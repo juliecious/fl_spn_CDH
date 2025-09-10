@@ -38,7 +38,7 @@ class Kernel(object):
         n = shape(K)[0]
         K_colsums = K.sum(axis=0)
         K_allsum = K_colsums.sum()
-        return K - (K_colsums[None, :] + K_colsums[:, None]) / n + (K_allsum / n ** 2)
+        return K - (K_colsums[None, :] + K_colsums[:, None]) / n + (K_allsum / n**2)
 
     def center_kernel_matrix_regression(K: ndarray, Kz: ndarray, epsilon: float):
         """

@@ -14,13 +14,16 @@ from causallearn.utils.cit import *
 from causallearn.utils.PCUtils.BackgroundKnowledge import BackgroundKnowledge
 
 
-
-def possible_parents(node_x: Node, adjx: List[Node], knowledge: BackgroundKnowledge | None = None) -> List[Node]:
+def possible_parents(
+    node_x: Node, adjx: List[Node], knowledge: BackgroundKnowledge | None = None
+) -> List[Node]:
     possible_parents: List[Node] = []
 
     for node_z in adjx:
-        if (knowledge is None) or \
-                (not knowledge.is_forbidden(node_z, node_x) and not knowledge.is_required(node_x, node_z)):
+        if (knowledge is None) or (
+            not knowledge.is_forbidden(node_z, node_x)
+            and not knowledge.is_required(node_x, node_z)
+        ):
             possible_parents.append(node_z)
 
     return possible_parents
@@ -39,20 +42,35 @@ def freeDegree(nodes: List[Node], adjacencies) -> int:
     return max_degree
 
 
-def forbiddenEdge(node_x: Node, node_y: Node, knowledge: BackgroundKnowledge | None) -> bool:
+def forbiddenEdge(
+    node_x: Node, node_y: Node, knowledge: BackgroundKnowledge | None
+) -> bool:
     if knowledge is None:
         return False
-    elif knowledge.is_forbidden(node_x, node_y) and knowledge.is_forbidden(node_y, node_x):
-        print(node_x.get_name() + " --- " + node_y.get_name() +
-              " because it was forbidden by background background_knowledge.")
+    elif knowledge.is_forbidden(node_x, node_y) and knowledge.is_forbidden(
+        node_y, node_x
+    ):
+        print(
+            node_x.get_name()
+            + " --- "
+            + node_y.get_name()
+            + " because it was forbidden by background background_knowledge."
+        )
         return True
     return False
 
 
-def searchAtDepth0(data: ndarray, nodes: List[Node], adjacencies: Dict[Node, Set[Node]],
-                   sep_sets: Dict[Tuple[int, int], Set[int]],
-                   independence_test_method: CIT | None=None, alpha: float = 0.05,
-                   verbose: bool = False, knowledge: BackgroundKnowledge | None = None, pbar=None) -> bool:
+def searchAtDepth0(
+    data: ndarray,
+    nodes: List[Node],
+    adjacencies: Dict[Node, Set[Node]],
+    sep_sets: Dict[Tuple[int, int], Set[int]],
+    independence_test_method: CIT | None = None,
+    alpha: float = 0.05,
+    verbose: bool = False,
+    knowledge: BackgroundKnowledge | None = None,
+    pbar=None,
+) -> bool:
     empty = []
 
     show_progress = pbar is not None
@@ -61,20 +79,32 @@ def searchAtDepth0(data: ndarray, nodes: List[Node], adjacencies: Dict[Node, Set
     for i in range(len(nodes)):
         if show_progress:
             pbar.update()
-            pbar.set_description(f'Depth=0, working on node {i}')
+            pbar.set_description(f"Depth=0, working on node {i}")
         if verbose and (i + 1) % 100 == 0:
             print(nodes[i + 1].get_name())
 
         for j in range(i + 1, len(nodes)):
             p_value = independence_test_method(i, j, tuple(empty))
             independent = p_value > alpha
-            no_edge_required = True if knowledge is None else \
-                ((not knowledge.is_required(nodes[i], nodes[j])) or knowledge.is_required(nodes[j], nodes[i]))
+            no_edge_required = (
+                True
+                if knowledge is None
+                else (
+                    (not knowledge.is_required(nodes[i], nodes[j]))
+                    or knowledge.is_required(nodes[j], nodes[i])
+                )
+            )
             if independent and no_edge_required:
                 sep_sets[(i, j)] = set()
 
                 if verbose:
-                    print(nodes[i].get_name() + " _||_ " + nodes[j].get_name() + " | (),  score = " + str(p_value))
+                    print(
+                        nodes[i].get_name()
+                        + " _||_ "
+                        + nodes[j].get_name()
+                        + " | (),  score = "
+                        + str(p_value)
+                    )
             elif not forbiddenEdge(nodes[i], nodes[j], knowledge):
                 adjacencies[nodes[i]].add(nodes[j])
                 adjacencies[nodes[j]].add(nodes[i])
@@ -83,12 +113,21 @@ def searchAtDepth0(data: ndarray, nodes: List[Node], adjacencies: Dict[Node, Set
     return freeDegree(nodes, adjacencies) > 0
 
 
-def searchAtDepth(data: ndarray, depth: int, nodes: List[Node], adjacencies: Dict[Node, Set[Node]],
-                  sep_sets: Dict[Tuple[int, int], Set[int]],
-                  independence_test_method: CIT | None = None,
-                  alpha: float = 0.05,
-                  verbose: bool = False, knowledge: BackgroundKnowledge | None = None, pbar=None) -> bool:
-    def edge(adjx: List[Node], i: int, adjacencies_completed_edge: Dict[Node, Set[Node]]) -> bool:
+def searchAtDepth(
+    data: ndarray,
+    depth: int,
+    nodes: List[Node],
+    adjacencies: Dict[Node, Set[Node]],
+    sep_sets: Dict[Tuple[int, int], Set[int]],
+    independence_test_method: CIT | None = None,
+    alpha: float = 0.05,
+    verbose: bool = False,
+    knowledge: BackgroundKnowledge | None = None,
+    pbar=None,
+) -> bool:
+    def edge(
+        adjx: List[Node], i: int, adjacencies_completed_edge: Dict[Node, Set[Node]]
+    ) -> bool:
         for j in range(len(adjx)):
             node_y = adjx[j]
             _adjx = list(adjacencies_completed_edge[nodes[i]])
@@ -107,9 +146,14 @@ def searchAtDepth(data: ndarray, depth: int, nodes: List[Node], adjacencies: Dic
                     p_value = independence_test_method(i, Y, tuple(cond_set))
                     independent = p_value > alpha
 
-                    no_edge_required = True if knowledge is None else (
-                            not knowledge.is_required(nodes[i], adjx[j]) or knowledge.is_required(adjx[j],
-                                                                                                  nodes[i]))
+                    no_edge_required = (
+                        True
+                        if knowledge is None
+                        else (
+                            not knowledge.is_required(nodes[i], adjx[j])
+                            or knowledge.is_required(adjx[j], nodes[i])
+                        )
+                    )
                     if independent and no_edge_required:
 
                         if adjacencies[nodes[i]].__contains__(adjx[j]):
@@ -126,8 +170,13 @@ def searchAtDepth(data: ndarray, depth: int, nodes: List[Node], adjacencies: Dic
                                 sep_sets[(i, nodes.index(adjx[j]))] = set(cond_set)
 
                         if verbose:
-                            message = "Independence accepted: " + nodes[i].get_name() + " _||_ " + adjx[
-                                j].get_name() + " | "
+                            message = (
+                                "Independence accepted: "
+                                + nodes[i].get_name()
+                                + " _||_ "
+                                + adjx[j].get_name()
+                                + " | "
+                            )
                             for cond_set_index in range(len(cond_set)):
                                 message += nodes[cond_set[cond_set_index]].get_name()
                                 if cond_set_index != len(cond_set) - 1:
@@ -150,7 +199,7 @@ def searchAtDepth(data: ndarray, depth: int, nodes: List[Node], adjacencies: Dic
     for i in range(len(nodes)):
         if show_progress:
             pbar.update()
-            pbar.set_description(f'Depth={depth}, working on node {i}')
+            pbar.set_description(f"Depth={depth}, working on node {i}")
         if verbose:
             count += 1
             if count % 10 == 0:
@@ -165,11 +214,18 @@ def searchAtDepth(data: ndarray, depth: int, nodes: List[Node], adjacencies: Dic
     return freeDegree(nodes, adjacencies) > depth
 
 
-def searchAtDepth_not_stable(data: ndarray, depth: int, nodes: List[Node], adjacencies: Dict[Node, Set[Node]],
-                             sep_sets: Dict[Tuple[int, int], Set[int]],
-                             independence_test_method: CIT | None=None, alpha: float = 0.05, verbose: bool = False,
-                             knowledge: BackgroundKnowledge | None = None,
-                             pbar=None) -> bool:
+def searchAtDepth_not_stable(
+    data: ndarray,
+    depth: int,
+    nodes: List[Node],
+    adjacencies: Dict[Node, Set[Node]],
+    sep_sets: Dict[Tuple[int, int], Set[int]],
+    independence_test_method: CIT | None = None,
+    alpha: float = 0.05,
+    verbose: bool = False,
+    knowledge: BackgroundKnowledge | None = None,
+    pbar=None,
+) -> bool:
     def edge(adjx, i, adjacencies_completed_edge):
         for j in range(len(adjx)):
             node_y = adjx[j]
@@ -189,8 +245,14 @@ def searchAtDepth_not_stable(data: ndarray, depth: int, nodes: List[Node], adjac
                     p_value = independence_test_method(i, Y, tuple(cond_set))
                     independent = p_value > alpha
 
-                    no_edge_required = True if knowledge is None else \
-                        (not knowledge.is_required(nodes[i], adjx[j]) or knowledge.is_required(adjx[j], nodes[i]))
+                    no_edge_required = (
+                        True
+                        if knowledge is None
+                        else (
+                            not knowledge.is_required(nodes[i], adjx[j])
+                            or knowledge.is_required(adjx[j], nodes[i])
+                        )
+                    )
                     if independent and no_edge_required:
 
                         if adjacencies[nodes[i]].__contains__(adjx[j]):
@@ -207,8 +269,13 @@ def searchAtDepth_not_stable(data: ndarray, depth: int, nodes: List[Node], adjac
                                 sep_sets[(i, nodes.index(adjx[j]))] = set(cond_set)
 
                         if verbose:
-                            message = "Independence accepted: " + nodes[i].get_name() + " _||_ " + adjx[
-                                j].get_name() + " | "
+                            message = (
+                                "Independence accepted: "
+                                + nodes[i].get_name()
+                                + " _||_ "
+                                + adjx[j].get_name()
+                                + " | "
+                            )
                             for cond_set_index in range(len(cond_set)):
                                 message += nodes[cond_set[cond_set_index]].get_name()
                                 if cond_set_index != len(cond_set) - 1:
@@ -227,7 +294,7 @@ def searchAtDepth_not_stable(data: ndarray, depth: int, nodes: List[Node], adjac
     for i in range(len(nodes)):
         if show_progress:
             pbar.update()
-            pbar.set_description(f'Depth={depth}, working on node {i}')
+            pbar.set_description(f"Depth={depth}, working on node {i}")
         if verbose:
             count += 1
             if count % 10 == 0:
@@ -243,10 +310,17 @@ def searchAtDepth_not_stable(data: ndarray, depth: int, nodes: List[Node], adjac
     return freeDegree(nodes, adjacencies) > depth
 
 
-def fas(data: ndarray, nodes: List[Node], independence_test_method: CIT | None=None, alpha: float = 0.05,
-        knowledge: BackgroundKnowledge | None = None, depth: int = -1,
-        verbose: bool = False, stable: bool = True, show_progress: bool = True) -> Tuple[
-    GeneralGraph, Dict[Tuple[int, int], Set[int]]]:
+def fas(
+    data: ndarray,
+    nodes: List[Node],
+    independence_test_method: CIT | None = None,
+    alpha: float = 0.05,
+    knowledge: BackgroundKnowledge | None = None,
+    depth: int = -1,
+    verbose: bool = False,
+    stable: bool = True,
+    show_progress: bool = True,
+) -> Tuple[GeneralGraph, Dict[Tuple[int, int], Set[int]]]:
     """
     Implements the "fast adjacency search" used in several causal algorithm in this file. In the fast adjacency
     search, at a given stage of the search, an edge X*-*Y is removed from the graph if X _||_ Y | S, where S is a subset
@@ -294,21 +368,50 @@ def fas(data: ndarray, nodes: List[Node], independence_test_method: CIT | None=N
         depth = 1000
 
     # ------- end initial variable ---------
-    print('Starting Fast Adjacency Search.')
+    print("Starting Fast Adjacency Search.")
 
     # use tqdm to show progress bar
     pbar = tqdm(total=len(nodes)) if show_progress else None
     for d in range(depth):
         if d == 0:
-            more = searchAtDepth0(data, nodes, adjacencies, sep_sets, independence_test_method, alpha, verbose,
-                                  knowledge, pbar=pbar)
+            more = searchAtDepth0(
+                data,
+                nodes,
+                adjacencies,
+                sep_sets,
+                independence_test_method,
+                alpha,
+                verbose,
+                knowledge,
+                pbar=pbar,
+            )
         else:
             if stable:
-                more = searchAtDepth(data, d, nodes, adjacencies, sep_sets, independence_test_method, alpha, verbose,
-                                     knowledge, pbar=pbar)
+                more = searchAtDepth(
+                    data,
+                    d,
+                    nodes,
+                    adjacencies,
+                    sep_sets,
+                    independence_test_method,
+                    alpha,
+                    verbose,
+                    knowledge,
+                    pbar=pbar,
+                )
             else:
-                more = searchAtDepth_not_stable(data, d, nodes, adjacencies, sep_sets, independence_test_method, alpha,
-                                                verbose, knowledge, pbar=pbar)
+                more = searchAtDepth_not_stable(
+                    data,
+                    d,
+                    nodes,
+                    adjacencies,
+                    sep_sets,
+                    independence_test_method,
+                    alpha,
+                    verbose,
+                    knowledge,
+                    pbar=pbar,
+                )
         if not more:
             break
     if show_progress:

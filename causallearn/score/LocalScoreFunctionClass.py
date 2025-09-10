@@ -41,8 +41,12 @@ class LocalScoreClass(object):
 
         if not self.score_cache[i].__contains__(hash_key):
             if self.local_score_fun == local_score_BIC_from_cov:
-                self.score_cache[i][hash_key] = self.local_score_fun((self.cov, self.n), i, PAi, self.parameters)
+                self.score_cache[i][hash_key] = self.local_score_fun(
+                    (self.cov, self.n), i, PAi, self.parameters
+                )
             else:
-                self.score_cache[i][hash_key] = self.local_score_fun(self.data, i, PAi, self.parameters)
+                self.score_cache[i][hash_key] = self.local_score_fun(
+                    self.data, i, PAi, self.parameters
+                )
 
         return self.score_cache[i][hash_key]

@@ -17,7 +17,6 @@ from causallearn.utils.GraphUtils import GraphUtils
 # directed edges, with no cycles--using a matrix. Variables are permitted to be either measured
 # or latent, with at most one edge per node pair, and no edges to self.
 class Dag(GeneralGraph):
-
     def __init__(self, nodes: List[Node]):
 
         # for node in nodes:
@@ -154,7 +153,10 @@ class Dag(GeneralGraph):
     #
     # Returns true iff the graph contain 'edge'.
     def contains_edge(self, edge):
-        if edge.get_endpoint1() != Endpoint.TAIL or edge.get_endpoint2() != Endpoint.ARROW:
+        if (
+            edge.get_endpoint1() != Endpoint.TAIL
+            or edge.get_endpoint2() != Endpoint.ARROW
+        ):
             return False
         else:
             node1 = edge.get_node1()
@@ -201,7 +203,9 @@ class Dag(GeneralGraph):
 
         if isinstance(other, Dag):
             sorted_list = self.nodes.sort()
-            if sorted_list == other.nodes.sort() and np.array_equal(self.graph, other.graph):
+            if sorted_list == other.nodes.sort() and np.array_equal(
+                self.graph, other.graph
+            ):
                 return True
             else:
                 return False
@@ -384,11 +388,11 @@ class Dag(GeneralGraph):
 
     # Returns true iff node1 is a proper ancestor of node2.
     def is_proper_ancestor_of(self, node1, node2):
-        return (self.is_ancestor_of(node1, node2) and not (node1 == node2))
+        return self.is_ancestor_of(node1, node2) and not (node1 == node2)
 
     # Returns true iff node1 is a proper descendant of node2.
     def is_proper_descendant_of(self, node1, node2):
-        return (self.is_descendant_of(node1, node2) and not (node1 == node2))
+        return self.is_descendant_of(node1, node2) and not (node1 == node2)
 
     # Returns true iff node1 is a descendant of node2.
     def is_descendant_of(self, node1, node2):
@@ -468,7 +472,10 @@ class Dag(GeneralGraph):
         if edge1 is None or edge2 is None:
             return False
 
-        return str(edge1.get_proximal_endpoint(node2)) == "ARROW" and str(edge2.get_proximal_endpoint(node2)) == "ARROW"
+        return (
+            str(edge1.get_proximal_endpoint(node2)) == "ARROW"
+            and str(edge2.get_proximal_endpoint(node2)) == "ARROW"
+        )
 
     # Returns true if node1 and node2 are d-connected on the set of nodes z.
     def is_dconnected_to(self, node1, node2, z):
@@ -738,7 +745,9 @@ class Dag(GeneralGraph):
     # Sets the list of nodes for this graph.
     def set_nodes(self, nodes):
         if len(nodes) != self.num_vars:
-            raise ValueError("Sorry, there is a mismatch in the number of variables you are trying to set.")
+            raise ValueError(
+                "Sorry, there is a mismatch in the number of variables you are trying to set."
+            )
 
         self.nodes = nodes
 
@@ -795,7 +804,10 @@ class Dag(GeneralGraph):
 
 def is_fully_directed(edge):
     if edge:
-        if edge.get_endpoint1() == Endpoint.TAIL and edge.get_endpoint2() == Endpoint.ARROW:
+        if (
+            edge.get_endpoint1() == Endpoint.TAIL
+            and edge.get_endpoint2() == Endpoint.ARROW
+        ):
             return True
     return False
 

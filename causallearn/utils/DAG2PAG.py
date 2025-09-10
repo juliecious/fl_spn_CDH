@@ -55,10 +55,15 @@ def dag2pag(dag: Dag, islatent: List[Node]) -> GeneralGraph:
             for i in range(1, len(path) - 1):
                 if nodes[path[i]] in observed_nodes:
                     has_nonlatent = True
-                has_collider = is_endpoint(dag.get_edge(nodes[path[i - 1]], nodes[path[i]]), nodes[path[i]],
-                                           Endpoint.ARROW) and \
-                               is_endpoint(dag.get_edge(nodes[path[i + 1]], nodes[path[i]]), nodes[path[i]],
-                                           Endpoint.ARROW)
+                has_collider = is_endpoint(
+                    dag.get_edge(nodes[path[i - 1]], nodes[path[i]]),
+                    nodes[path[i]],
+                    Endpoint.ARROW,
+                ) and is_endpoint(
+                    dag.get_edge(nodes[path[i + 1]], nodes[path[i]]),
+                    nodes[path[i]],
+                    Endpoint.ARROW,
+                )
                 if has_collider:
                     path_sep = False
             if not path_sep:
@@ -111,7 +116,10 @@ def dag2pag(dag: Dag, islatent: List[Node]) -> GeneralGraph:
 
 def is_fully_directed(edge: Edge) -> bool:
     if edge:
-        if edge.get_endpoint1() == Endpoint.TAIL and edge.get_endpoint2() == Endpoint.ARROW:
+        if (
+            edge.get_endpoint1() == Endpoint.TAIL
+            and edge.get_endpoint2() == Endpoint.ARROW
+        ):
             return True
     return False
 

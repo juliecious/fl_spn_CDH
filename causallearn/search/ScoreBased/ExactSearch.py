@@ -23,9 +23,17 @@ INF = float("inf")
 NEGINF = float("-inf")
 
 
-def bic_exact_search(X, super_graph=None, search_method='astar',
-                     use_path_extension=True, use_k_cycle_heuristic=False,
-                     k=3, verbose=False, include_graph=None, max_parents=None):
+def bic_exact_search(
+    X,
+    super_graph=None,
+    search_method="astar",
+    use_path_extension=True,
+    use_k_cycle_heuristic=False,
+    k=3,
+    verbose=False,
+    include_graph=None,
+    max_parents=None,
+):
     """
     Search for the optimal graph using DP or A star.
     Parameters
@@ -80,21 +88,31 @@ def bic_exact_search(X, super_graph=None, search_method='astar',
     search_stats = {}
 
     # Generate parent graphs (without parallel computing)
-    parent_graphs = tuple([
-        generate_parent_graph(X, i, max_parents,
-                              parent_set=tuple(np.where(super_graph[:, i])[0]),
-                              include_parents=tuple(np.where(include_graph[:, i])[0]))
-        for i in range(d)])
-    search_stats['n_parent_graphs_entries'] = sum([len(l) for l in parent_graphs])
+    parent_graphs = tuple(
+        [
+            generate_parent_graph(
+                X,
+                i,
+                max_parents,
+                parent_set=tuple(np.where(super_graph[:, i])[0]),
+                include_parents=tuple(np.where(include_graph[:, i])[0]),
+            )
+            for i in range(d)
+        ]
+    )
+    search_stats["n_parent_graphs_entries"] = sum([len(l) for l in parent_graphs])
     if verbose:
         _logger.info("Finished generating parent graphs.")
 
     # Shortest path search
-    if search_method == 'dp':
-        structures, shortest_path_stats = dp_shortest_path(parent_graphs, use_path_extension, verbose)
-    elif search_method == 'astar':
-        structures, shortest_path_stats = astar_shortest_path(parent_graphs, use_path_extension,
-                                                              use_k_cycle_heuristic, k, verbose)
+    if search_method == "dp":
+        structures, shortest_path_stats = dp_shortest_path(
+            parent_graphs, use_path_extension, verbose
+        )
+    elif search_method == "astar":
+        structures, shortest_path_stats = astar_shortest_path(
+            parent_graphs, use_path_extension, use_k_cycle_heuristic, k, verbose
+        )
     else:
         raise ValueError("Unknown search method.")
 
@@ -110,8 +128,13 @@ def bic_exact_search(X, super_graph=None, search_method='astar',
     return dag_est, search_stats
 
 
-def astar_shortest_path(parent_graphs, use_path_extension=True,
-                        use_k_cycle_heuristic=False, k=3, verbose=False):
+def astar_shortest_path(
+    parent_graphs,
+    use_path_extension=True,
+    use_k_cycle_heuristic=False,
+    k=3,
+    verbose=False,
+):
     """
     Search for the shortest path in the order graph using A star.
     Parameters
@@ -145,7 +168,7 @@ def astar_shortest_path(parent_graphs, use_path_extension=True,
         # Create pattern databse
         PD = create_dynamic_pd(parent_graphs, k)
         if verbose:
-            _logger.info('Finished creating pattern database.')
+            _logger.info("Finished creating pattern database.")
 
     score = {(): 0}
     h = sum(parent_graphs[i][0][1] for i in range(d))
@@ -177,7 +200,9 @@ def astar_shortest_path(parent_graphs, use_path_extension=True,
             new_structures[i] = parents
 
             if use_path_extension:
-                new_U, new_structures, g = path_extension(new_U, new_structures, parent_graphs, g)
+                new_U, new_structures, g = path_extension(
+                    new_U, new_structures, parent_graphs, g
+                )
 
             if use_k_cycle_heuristic:
                 h = compute_dynamic_h(new_U, PD)
@@ -206,13 +231,13 @@ def astar_shortest_path(parent_graphs, use_path_extension=True,
             max_n_opened = len(opened)
 
     shortest_path_stats = {
-        'while_iter': while_iter,
-        'for_iter': for_iter,
-        'n_closed': len(closed),
-        'max_n_opened': max_n_opened
+        "while_iter": while_iter,
+        "for_iter": for_iter,
+        "n_closed": len(closed),
+        "max_n_opened": max_n_opened,
     }
     if use_k_cycle_heuristic:
-        shortest_path_stats['n_pattern_database'] = len(PD)
+        shortest_path_stats["n_pattern_database"] = len(PD)
     return tuple(structures), shortest_path_stats
 
 
@@ -251,35 +276,45 @@ def dp_shortest_path(parent_graphs, use_path_extension=True, verbose=False):
                     if set(parent).issuperset(parent_graphs[variable][0][0]):
                         optimal_child[parent] = subset
 
-                structure, weight = query_best_structure(parent_graphs[variable], parent)
-                order_graph.add_edge(parent, subset, weight=weight,
-                                     structure=structure)
+                structure, weight = query_best_structure(
+                    parent_graphs[variable], parent
+                )
+                order_graph.add_edge(parent, subset, weight=weight, structure=structure)
 
         if use_path_extension:
             # Remove some edges indicated by optimal path extension
             for parent, child in optimal_child.items():
-                edges_to_remove = [edge for edge in nx.edges(order_graph, parent) if edge[1] != child]
+                edges_to_remove = [
+                    edge for edge in nx.edges(order_graph, parent) if edge[1] != child
+                ]
                 for edge in edges_to_remove:
                     order_graph.remove_edge(*edge)
 
-    path = nx.shortest_path(order_graph, source=(), target=tuple(range(d)),
-                            weight='weight', method='bellman-ford')
+    path = nx.shortest_path(
+        order_graph,
+        source=(),
+        target=tuple(range(d)),
+        weight="weight",
+        method="bellman-ford",
+    )
 
     score, structures = 0, list(None for i in range(d))
     for u, v in zip(path[:-1], path[1:]):
         idx = list(set(v) - set(u))[0]
-        parents = order_graph.get_edge_data(u, v)['structure']
+        parents = order_graph.get_edge_data(u, v)["structure"]
         structures[idx] = parents
-        score -= order_graph.get_edge_data(u, v)['weight']
+        score -= order_graph.get_edge_data(u, v)["weight"]
 
     shortest_path_stats = {
-        'n_order_graph_nodes': order_graph.number_of_nodes(),
-        'n_order_graph_edges': order_graph.number_of_edges()
+        "n_order_graph_nodes": order_graph.number_of_nodes(),
+        "n_order_graph_edges": order_graph.number_of_edges(),
     }
     return structures, shortest_path_stats
 
 
-def generate_parent_graph(X, i, max_parents=None, parent_set=None, include_parents=None):
+def generate_parent_graph(
+    X, i, max_parents=None, parent_set=None, include_parents=None
+):
     """
     Generate a parent graph for a single variable over its parents.
     This will generate the parent graph for a single parents given the data.
@@ -339,7 +374,9 @@ def generate_parent_graph(X, i, max_parents=None, parent_set=None, include_paren
 
                 for variable in structure:
                     curr_structure = tuple(l for l in structure if l != variable)
-                    _, curr_best_score = query_best_structure(parent_graph, curr_structure)
+                    _, curr_best_score = query_best_structure(
+                        parent_graph, curr_structure
+                    )
 
                     if curr_best_score < score:
                         # A subset of the structure has better score
@@ -361,16 +398,14 @@ def bic_score_node(X, i, structure):
     if len(structure) == 0:
         residual = np.sum(X[:, i] ** 2)
     else:
-        _, residual, _, _ = np.linalg.lstsq(a=X[:, structure],
-                                            b=X[:, i],
-                                            rcond=None)
+        _, residual, _, _ = np.linalg.lstsq(a=X[:, structure], b=X[:, i], rcond=None)
     bic = n * np.log(residual / n) + len(structure) * np.log(n)
     return bic.item()
 
 
 def insort(parent_graph, structure, score):
     """
-    parent_graph is a list of tuples with the form (structure, score) and is 
+    parent_graph is a list of tuples with the form (structure, score) and is
     sorted based on score. This function inserts the structure and score
     at the corresponding position such that the list remains sorted.
     Referred from https://stackoverflow.com/a/39501468
@@ -454,9 +489,13 @@ def create_dynamic_pd(parent_graphs, k=2):
         del PD_final[i]
 
     # Sort patterns in decreasing costs
-    PD_final = OrderedDict(sorted(PD_final.items(),
-                                  key=lambda tup: delta_h[tuple_diff(V, tup[0])],
-                                  reverse=True))
+    PD_final = OrderedDict(
+        sorted(
+            PD_final.items(),
+            key=lambda tup: delta_h[tuple_diff(V, tup[0])],
+            reverse=True,
+        )
+    )
     return PD_final
 
 

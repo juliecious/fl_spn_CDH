@@ -22,7 +22,6 @@ from causallearn.utils.GraphUtils import GraphUtils
 # --o
 # o-o
 class GeneralGraph(Graph, ABC):
-
     def __init__(self, nodes: List[Node]):
         self.nodes: List[Node] = nodes
         self.num_vars: int = len(nodes)
@@ -241,15 +240,19 @@ class GeneralGraph(Graph, ABC):
 
         if endpoint1 == "TAIL":
             if endpoint2 == "TAIL":
-                if (e2 == -1 and e1 == -1) \
-                        or (e2 == Endpoint.TAIL_AND_ARROW.value and e1 == Endpoint.TAIL_AND_ARROW.value):
+                if (e2 == -1 and e1 == -1) or (
+                    e2 == Endpoint.TAIL_AND_ARROW.value
+                    and e1 == Endpoint.TAIL_AND_ARROW.value
+                ):
                     return True
                 else:
                     return False
             else:
                 if endpoint2 == "ARROW":
-                    if (e1 == -1 and e2 == 1) \
-                            or (e1 == Endpoint.TAIL_AND_ARROW.value and e2 == Endpoint.ARROW_AND_ARROW.value):
+                    if (e1 == -1 and e2 == 1) or (
+                        e1 == Endpoint.TAIL_AND_ARROW.value
+                        and e2 == Endpoint.ARROW_AND_ARROW.value
+                    ):
                         return True
                     else:
                         return False
@@ -264,9 +267,17 @@ class GeneralGraph(Graph, ABC):
         else:
             if endpoint1 == "ARROW":
                 if endpoint2 == "ARROW":
-                    if (e1 == Endpoint.ARROW.value and e2 == Endpoint.ARROW.value) \
-                            or (e1 == Endpoint.TAIL_AND_ARROW.value and e2 == Endpoint.TAIL_AND_ARROW.value) \
-                            or (e1 == Endpoint.ARROW_AND_ARROW.value or e2 == Endpoint.ARROW_AND_ARROW.value):
+                    if (
+                        (e1 == Endpoint.ARROW.value and e2 == Endpoint.ARROW.value)
+                        or (
+                            e1 == Endpoint.TAIL_AND_ARROW.value
+                            and e2 == Endpoint.TAIL_AND_ARROW.value
+                        )
+                        or (
+                            e1 == Endpoint.ARROW_AND_ARROW.value
+                            or e2 == Endpoint.ARROW_AND_ARROW.value
+                        )
+                    ):
                         return True
                     else:
                         return False
@@ -327,7 +338,9 @@ class GeneralGraph(Graph, ABC):
     def __eq__(self, other):
         if isinstance(other, GeneralGraph):
             sorted_list = self.nodes.sort()
-            if sorted_list == other.nodes.sort() and np.array_equal(self.graph, other.graph):
+            if sorted_list == other.nodes.sort() and np.array_equal(
+                self.graph, other.graph
+            ):
                 return True
             else:
                 return False
@@ -352,9 +365,10 @@ class GeneralGraph(Graph, ABC):
         parents: List[Node] = []
 
         for i in range(self.num_vars):
-            if (self.graph[i, j] == -1 and self.graph[j, i] == 1) \
-                    or (self.graph[i, j] == Endpoint.TAIL_AND_ARROW.value
-                        and self.graph[j, i] == Endpoint.ARROW_AND_ARROW.value):
+            if (self.graph[i, j] == -1 and self.graph[j, i] == 1) or (
+                self.graph[i, j] == Endpoint.TAIL_AND_ARROW.value
+                and self.graph[j, i] == Endpoint.ARROW_AND_ARROW.value
+            ):
                 node2 = self.nodes[i]
                 parents.append(node2)
 
@@ -378,9 +392,10 @@ class GeneralGraph(Graph, ABC):
         children: List[Node] = []
 
         for j in range(self.num_vars):
-            if (self.graph[j, i] == 1 and self.graph[i, j] == -1) \
-                    or (self.graph[j, i] == Endpoint.ARROW_AND_ARROW.value
-                        and self.graph[i, j] == Endpoint.TAIL_AND_ARROW.value):
+            if (self.graph[j, i] == 1 and self.graph[i, j] == -1) or (
+                self.graph[j, i] == Endpoint.ARROW_AND_ARROW.value
+                and self.graph[i, j] == Endpoint.TAIL_AND_ARROW.value
+            ):
                 node2 = self.nodes[j]
                 children.append(node2)
 
@@ -406,7 +421,10 @@ class GeneralGraph(Graph, ABC):
         outdegree = 0
 
         for j in range(self.num_vars):
-            if self.graph[i, j] == -1 or self.graph[i, j] == Endpoint.TAIL_AND_ARROW.value:
+            if (
+                self.graph[i, j] == -1
+                or self.graph[i, j] == Endpoint.TAIL_AND_ARROW.value
+            ):
                 outdegree = outdegree + 1
 
         return outdegree
@@ -462,7 +480,11 @@ class GeneralGraph(Graph, ABC):
         edges = 0
         for i in range(self.num_vars):
             for j in range(i + 1, self.num_vars):
-                if self.graph[i, j] == 1 or self.graph[i, j] == -1 or self.graph[i, j] == 2:
+                if (
+                    self.graph[i, j] == 1
+                    or self.graph[i, j] == -1
+                    or self.graph[i, j] == 2
+                ):
                     edges = edges + 1
                 else:
                     if self.graph[i, j] != 0:
@@ -503,13 +525,17 @@ class GeneralGraph(Graph, ABC):
     def is_child_of(self, node1: Node, node2: Node) -> bool:
         i = self.node_map[node1]
         j = self.node_map[node2]
-        return self.graph[i, j] == 1 or self.graph[i, j] == Endpoint.ARROW_AND_ARROW.value
+        return (
+            self.graph[i, j] == 1 or self.graph[i, j] == Endpoint.ARROW_AND_ARROW.value
+        )
 
     # Returns true iff node1 is a parent of node2.
     def is_parent_of(self, node1: Node, node2: Node) -> bool:
         i = self.node_map[node1]
         j = self.node_map[node2]
-        return self.graph[j, i] == 1 or self.graph[j, i] == Endpoint.ARROW_AND_ARROW.value
+        return (
+            self.graph[j, i] == 1 or self.graph[j, i] == Endpoint.ARROW_AND_ARROW.value
+        )
 
     # Returns true iff node1 is a proper ancestor of node2.
     def is_proper_ancestor_of(self, node1: Node, node2: Node) -> bool:
@@ -564,20 +590,30 @@ class GeneralGraph(Graph, ABC):
             if self.graph[j, i] == 1 or self.graph[j, i] == -1 or self.graph[j, i] == 2:
                 edges.append(self.get_edge(node, node2))
             else:
-                if self.graph[j, i] == Endpoint.TAIL_AND_ARROW.value \
-                        and self.graph[i, j] == Endpoint.ARROW_AND_ARROW.value:
+                if (
+                    self.graph[j, i] == Endpoint.TAIL_AND_ARROW.value
+                    and self.graph[i, j] == Endpoint.ARROW_AND_ARROW.value
+                ):
                     edges.append(Edge(node, node2, Endpoint.ARROW, Endpoint.TAIL))
                     edges.append(Edge(node, node2, Endpoint.ARROW, Endpoint.ARROW))
                 else:
-                    if self.graph[j, i] == Endpoint.ARROW_AND_ARROW.value \
-                            and self.graph[i, j] == Endpoint.TAIL_AND_ARROW.value:
+                    if (
+                        self.graph[j, i] == Endpoint.ARROW_AND_ARROW.value
+                        and self.graph[i, j] == Endpoint.TAIL_AND_ARROW.value
+                    ):
                         edges.append(Edge(node, node2, Endpoint.TAIL, Endpoint.ARROW))
                         edges.append(Edge(node, node2, Endpoint.ARROW, Endpoint.ARROW))
                     else:
-                        if self.graph[j, i] == Endpoint.TAIL_AND_ARROW.value \
-                                and self.graph[i, j] == Endpoint.TAIL_AND_ARROW.value:
-                            edges.append(Edge(node, node2, Endpoint.TAIL, Endpoint.TAIL))
-                            edges.append(Edge(node, node2, Endpoint.ARROW, Endpoint.ARROW))
+                        if (
+                            self.graph[j, i] == Endpoint.TAIL_AND_ARROW.value
+                            and self.graph[i, j] == Endpoint.TAIL_AND_ARROW.value
+                        ):
+                            edges.append(
+                                Edge(node, node2, Endpoint.TAIL, Endpoint.TAIL)
+                            )
+                            edges.append(
+                                Edge(node, node2, Endpoint.ARROW, Endpoint.ARROW)
+                            )
 
         return edges
 
@@ -587,23 +623,41 @@ class GeneralGraph(Graph, ABC):
             node = self.nodes[i]
             for j in range(i + 1, self.num_vars):
                 node2 = self.nodes[j]
-                if self.graph[j, i] == 1 or self.graph[j, i] == -1 or self.graph[j, i] == 2:
+                if (
+                    self.graph[j, i] == 1
+                    or self.graph[j, i] == -1
+                    or self.graph[j, i] == 2
+                ):
                     edges.append(self.get_edge(node, node2))
                 else:
-                    if self.graph[j, i] == Endpoint.TAIL_AND_ARROW.value \
-                            and self.graph[i, j] == Endpoint.ARROW_AND_ARROW.value:
+                    if (
+                        self.graph[j, i] == Endpoint.TAIL_AND_ARROW.value
+                        and self.graph[i, j] == Endpoint.ARROW_AND_ARROW.value
+                    ):
                         edges.append(Edge(node, node2, Endpoint.ARROW, Endpoint.TAIL))
                         edges.append(Edge(node, node2, Endpoint.ARROW, Endpoint.ARROW))
                     else:
-                        if self.graph[j, i] == Endpoint.ARROW_AND_ARROW.value \
-                                and self.graph[i, j] == Endpoint.TAIL_AND_ARROW.value:
-                            edges.append(Edge(node, node2, Endpoint.TAIL, Endpoint.ARROW))
-                            edges.append(Edge(node, node2, Endpoint.ARROW, Endpoint.ARROW))
+                        if (
+                            self.graph[j, i] == Endpoint.ARROW_AND_ARROW.value
+                            and self.graph[i, j] == Endpoint.TAIL_AND_ARROW.value
+                        ):
+                            edges.append(
+                                Edge(node, node2, Endpoint.TAIL, Endpoint.ARROW)
+                            )
+                            edges.append(
+                                Edge(node, node2, Endpoint.ARROW, Endpoint.ARROW)
+                            )
                         else:
-                            if self.graph[j, i] == Endpoint.TAIL_AND_ARROW.value \
-                                    and self.graph[i, j] == Endpoint.TAIL_AND_ARROW.value:
-                                edges.append(Edge(node, node2, Endpoint.TAIL, Endpoint.TAIL))
-                                edges.append(Edge(node, node2, Endpoint.ARROW, Endpoint.ARROW))
+                            if (
+                                self.graph[j, i] == Endpoint.TAIL_AND_ARROW.value
+                                and self.graph[i, j] == Endpoint.TAIL_AND_ARROW.value
+                            ):
+                                edges.append(
+                                    Edge(node, node2, Endpoint.TAIL, Endpoint.TAIL)
+                                )
+                                edges.append(
+                                    Edge(node, node2, Endpoint.ARROW, Endpoint.ARROW)
+                                )
 
         return edges
 
@@ -647,10 +701,15 @@ class GeneralGraph(Graph, ABC):
         if edge1 is None or edge2 is None:
             return False
 
-        return str(edge1.get_proximal_endpoint(node2)) == "ARROW" and str(edge2.get_proximal_endpoint(node2)) == "ARROW"
+        return (
+            str(edge1.get_proximal_endpoint(node2)) == "ARROW"
+            and str(edge2.get_proximal_endpoint(node2)) == "ARROW"
+        )
 
     def is_def_unshielded_collider(self, node1: Node, node2: Node, node3: Node) -> bool:
-        return self.is_def_collider(node1, node2, node3) and not self.is_directly_connected_to(node1, node3)
+        return self.is_def_collider(
+            node1, node2, node3
+        ) and not self.is_directly_connected_to(node1, node3)
 
     # Returns true if node1 and node2 are d-connected on the set of nodes z.
     def is_dconnected_to(self, node1: Node, node2: Node, z: List[Node]) -> bool:
@@ -706,13 +765,19 @@ class GeneralGraph(Graph, ABC):
 
         if str(endpoint) == "ARROW":
             for j in range(self.num_vars):
-                if self.graph[i, j] == 1 or self.graph[i, j] == Endpoint.ARROW_AND_ARROW.value:
+                if (
+                    self.graph[i, j] == 1
+                    or self.graph[i, j] == Endpoint.ARROW_AND_ARROW.value
+                ):
                     node2 = self.nodes[j]
                     nodes.append(node2)
         else:
             if str(endpoint) == "TAIL":
                 for j in range(self.num_vars):
-                    if self.graph[i, j] == -1 or self.graph[i, j] == Endpoint.TAIL_AND_ARROW.value:
+                    if (
+                        self.graph[i, j] == -1
+                        or self.graph[i, j] == Endpoint.TAIL_AND_ARROW.value
+                    ):
                         node2 = self.nodes[j]
                         nodes.append(node2)
             else:
@@ -731,13 +796,19 @@ class GeneralGraph(Graph, ABC):
 
         if str(endpoint) == "ARROW":
             for j in range(self.num_vars):
-                if self.graph[j, i] == 1 or self.graph[j, i] == Endpoint.ARROW_AND_ARROW.value:
+                if (
+                    self.graph[j, i] == 1
+                    or self.graph[j, i] == Endpoint.ARROW_AND_ARROW.value
+                ):
                     node2 = self.nodes[j]
                     nodes.append(node2)
         else:
             if str(endpoint) == "TAIL":
                 for j in range(self.num_vars):
-                    if self.graph[j, i] == -1 or self.graph[j, i] == Endpoint.TAIL_AND_ARROW.value:
+                    if (
+                        self.graph[j, i] == -1
+                        or self.graph[j, i] == Endpoint.TAIL_AND_ARROW.value
+                    ):
                         node2 = self.nodes[j]
                         nodes.append(node2)
             else:
@@ -763,7 +834,10 @@ class GeneralGraph(Graph, ABC):
         end1 = edge.get_numerical_endpoint1()
         end2 = edge.get_numerical_endpoint2()
 
-        if out_of == Endpoint.TAIL_AND_ARROW.value and in_to == Endpoint.TAIL_AND_ARROW.value:
+        if (
+            out_of == Endpoint.TAIL_AND_ARROW.value
+            and in_to == Endpoint.TAIL_AND_ARROW.value
+        ):
             if end1 == Endpoint.ARROW.value:
                 self.graph[j, i] = -1
                 self.graph[i, j] = -1
@@ -772,7 +846,10 @@ class GeneralGraph(Graph, ABC):
                     self.graph[i, j] = Endpoint.ARROW.value
                     self.graph[j, i] = Endpoint.ARROW.value
         else:
-            if out_of == Endpoint.ARROW_AND_ARROW.value and in_to == Endpoint.TAIL_AND_ARROW.value:
+            if (
+                out_of == Endpoint.ARROW_AND_ARROW.value
+                and in_to == Endpoint.TAIL_AND_ARROW.value
+            ):
                 if end1 == Endpoint.ARROW.value:
                     self.graph[j, i] = 1
                     self.graph[i, j] = -1
@@ -781,7 +858,10 @@ class GeneralGraph(Graph, ABC):
                         self.graph[j, i] = Endpoint.ARROW.value
                         self.graph[i, j] = Endpoint.ARROW.value
             else:
-                if out_of == Endpoint.TAIL_AND_ARROW.value and in_to == Endpoint.ARROW_AND_ARROW.value:
+                if (
+                    out_of == Endpoint.TAIL_AND_ARROW.value
+                    and in_to == Endpoint.ARROW_AND_ARROW.value
+                ):
                     if end1 == Endpoint.ARROW.value:
                         self.graph[j, i] = -1
                         self.graph[i, j] = 1
@@ -976,7 +1056,9 @@ class GeneralGraph(Graph, ABC):
     # Sets the list of nodes for this graph.
     def set_nodes(self, nodes: List[Node]):
         if len(nodes) != self.num_vars:
-            raise ValueError("Sorry, there is a mismatch in the number of variables you are trying to set.")
+            raise ValueError(
+                "Sorry, there is a mismatch in the number of variables you are trying to set."
+            )
 
         self.nodes = nodes
 

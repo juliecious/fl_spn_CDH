@@ -99,6 +99,7 @@ def chisq(data, X, Y, conditioning_set, G_sq=False):
 
 #######################################################################################################################
 
+
 def append_value(array, i, j, value):
     """
     Append value to the list at array[i, j]
@@ -111,6 +112,7 @@ def append_value(array, i, j, value):
 
 #######################################################################################################################
 
+
 def powerset(L):
     """
     Return the powerset of L (list)
@@ -120,6 +122,7 @@ def powerset(L):
 
 
 #######################################################################################################################
+
 
 def cartesian_product(lists):
     "Return the Cartesian product of lists (List of lists)"
@@ -131,12 +134,14 @@ def cartesian_product(lists):
 
 #######################################################################################################################
 
+
 def list_union(L1, L2):
     "Return the union of L1 and L2 (lists)"
     return list(set(L1 + L2))
 
 
 #######################################################################################################################
+
 
 def list_intersection(L1, L2):
     "Return the intersection of L1 and L2 (lists)"
@@ -145,12 +150,14 @@ def list_intersection(L1, L2):
 
 #######################################################################################################################
 
+
 def list_minus(L1, L2):
     "Return a list of members in L1 (list) that are in L2 (list)"
     return list(set(L1) - set(L2))
 
 
 #######################################################################################################################
+
 
 def sort_dict_ascending(dict, descending=False):
     "Sort dict (dictionary) by its value in ascending order"
@@ -160,14 +167,16 @@ def sort_dict_ascending(dict, descending=False):
 
 #######################################################################################################################
 
+
 def np_ignore_nan(ndarray):
     "Replace all nan entries as blank entries"
     Output = ndarray.astype(str)
-    Output[Output == 'nan'] = ''
+    Output[Output == "nan"] = ""
     return Output
 
 
 #######################################################################################################################
+
 
 def neighbors(adjmat, i):
     "Find the neighbors of node i in the adjacency matrix adjmat (np.ndarray)"
@@ -177,6 +186,7 @@ def neighbors(adjmat, i):
 
 
 #######################################################################################################################
+
 
 def degree_graph(adjmat):
     "Return the maximum number of edges connected to a node in the adjacency matrix adjmat (np.ndarray)"
@@ -200,6 +210,7 @@ def find_circ_arrow(adjmat):
 
 #######################################################################################################################
 
+
 def find_tail(adjmat):
     "Return the list of i --o j as (i, j) in the adjacency matrix adjmat (np.ndarray)"
     L = np.where(adjmat == 0)
@@ -208,26 +219,42 @@ def find_tail(adjmat):
 
 #######################################################################################################################
 
+
 def find_undirected(adjmat):
     "Return the list of undirected edge i --- j as (i, j) in the adjacency matrix adjmat (np.ndarray)"
-    return [(edge[0], edge[1]) for edge in find_tail(adjmat) if adjmat[edge[1], edge[0]] == 0]
+    return [
+        (edge[0], edge[1])
+        for edge in find_tail(adjmat)
+        if adjmat[edge[1], edge[0]] == 0
+    ]
 
 
 #######################################################################################################################
+
 
 def find_fully_directed(adjmat):
     "Return the list of directed edges i --> j as (i, j) in the adjacency matrix adjmat (np.ndarray)"
-    return [(edge[0], edge[1]) for edge in find_circ_arrow(adjmat) if adjmat[edge[1], edge[0]] == 0]
+    return [
+        (edge[0], edge[1])
+        for edge in find_circ_arrow(adjmat)
+        if adjmat[edge[1], edge[0]] == 0
+    ]
 
 
 #######################################################################################################################
+
 
 def find_bi_directed(adjmat):
     "Return the list of directed edges i <-> j as (i, j) in the adjacency matrix adjmat (np.ndarray)"
-    return [(edge[0], edge[1]) for edge in find_circ_arrow(adjmat) if adjmat[edge[1], edge[0]] == 1]
+    return [
+        (edge[0], edge[1])
+        for edge in find_circ_arrow(adjmat)
+        if adjmat[edge[1], edge[0]] == 1
+    ]
 
 
 #######################################################################################################################
+
 
 def find_adj(adjmat):
     "Return the list of adjacencies i --- j as (i, j) in the adjacency matrix adjmat (np.ndarray)"
@@ -236,12 +263,14 @@ def find_adj(adjmat):
 
 #######################################################################################################################
 
+
 def is_fully_directed(adjmat, i, j):
     "Return True if i --> j holds in the adjacency matrix adjmat (np.ndarray) and False otherwise"
     return adjmat[i, j] == 1 and adjmat[j, i] == 0
 
 
 #######################################################################################################################
+
 
 def is_undirected(adjmat, i, j):
     "Return True if i --- j holds in the adjacency matrix adjmat (np.ndarray) and False otherwise"
@@ -250,6 +279,7 @@ def is_undirected(adjmat, i, j):
 
 #######################################################################################################################
 
+
 def is_bi_directed(adjmat, i, j):
     "Return True if i <-> j holds in the adjacency matrix adjmat (np.ndarray) and False otherwise"
     return adjmat[i, j] == 1 and adjmat[j, i] == 1
@@ -257,40 +287,64 @@ def is_bi_directed(adjmat, i, j):
 
 #######################################################################################################################
 
+
 def is_adj(adjmat, i, j):
     "Return True if i o-o j holds in the adjacency matrix adjmat (np.ndarray) and False otherwise"
-    return is_fully_directed(adjmat, i, j) or is_fully_directed(adjmat, j, i) \
-           or is_undirected(adjmat, i, j) or is_bi_directed(adjmat, i, j)
+    return (
+        is_fully_directed(adjmat, i, j)
+        or is_fully_directed(adjmat, j, i)
+        or is_undirected(adjmat, i, j)
+        or is_bi_directed(adjmat, i, j)
+    )
 
 
 #######################################################################################################################
+
 
 def find_unshielded_triples(adjmat):
     "Return the list of unshielded triples i o-o j o-o k as (i, j, k) from the adjacency matrix adjmat (np.ndarray)"
-    return [(pair[0][0], pair[0][1], pair[1][1]) for pair in permutations(find_adj(adjmat), 2)
-            if pair[0][1] == pair[1][0] and pair[0][0] != pair[1][1] and adjmat[pair[0][0], pair[1][1]] == -1]
+    return [
+        (pair[0][0], pair[0][1], pair[1][1])
+        for pair in permutations(find_adj(adjmat), 2)
+        if pair[0][1] == pair[1][0]
+        and pair[0][0] != pair[1][1]
+        and adjmat[pair[0][0], pair[1][1]] == -1
+    ]
 
 
 #######################################################################################################################
+
 
 def find_triangles(adjmat):
     "Return the list of non-ambiguous triangles i o-o j o-o k o-o i as (i, j, k) from the adjacency matrix adjmat (np.ndarray)"
     Adj = find_adj(adjmat)
-    return [(pair[0][0], pair[0][1], pair[1][1]) for pair in permutations(Adj, 2)
-            if pair[0][1] == pair[1][0] and pair[0][0] != pair[1][1] and (pair[0][0], pair[1][1]) in Adj]
+    return [
+        (pair[0][0], pair[0][1], pair[1][1])
+        for pair in permutations(Adj, 2)
+        if pair[0][1] == pair[1][0]
+        and pair[0][0] != pair[1][1]
+        and (pair[0][0], pair[1][1]) in Adj
+    ]
 
 
 #######################################################################################################################
+
 
 def find_kites(graph):
     "Return the list of non-ambiguous kites i o-o j o-o l o-o k o-o i o-o l (where j and k are non-adjacent)\
     as (i, j, k, l) from the adjacency matrix adjmat (np.ndarray)"
-    return [(pair[0][0], pair[0][1], pair[1][1], pair[0][2]) for pair in permutations(find_triangles(graph), 2)
-            if pair[0][0] == pair[1][0] and pair[0][2] == pair[1][2]
-            and pair[0][1] < pair[1][1] and graph[pair[0][1], pair[1][1]] == -1]
+    return [
+        (pair[0][0], pair[0][1], pair[1][1], pair[0][2])
+        for pair in permutations(find_triangles(graph), 2)
+        if pair[0][0] == pair[1][0]
+        and pair[0][2] == pair[1][2]
+        and pair[0][1] < pair[1][1]
+        and graph[pair[0][1], pair[1][1]] == -1
+    ]
 
 
 #######################################################################################################################
+
 
 def find_all_conditioning_sets(adjmat, x, y):
     "return the list of conditioning sets of the neighbors of x or y in the adjacency matrix adjmat (np.ndarray)"
@@ -303,12 +357,14 @@ def find_all_conditioning_sets(adjmat, x, y):
 
 #######################################################################################################################
 
+
 def find_conditioning_sets_with_middle(adjmat, x, y, z):
     "return the list of conditioning sets of the neighbors of x or y which contains z in the adjacency matrix adjmat (np.ndarray)"
     return [S for S in find_all_conditioning_sets(adjmat, x, y) if z in S]
 
 
 #######################################################################################################################
+
 
 def find_conditioning_sets_without_middle(adjmat, x, y, z):
     "return the list of conditioning sets of the neighbors of x or y which does not contain z in the adjacency matrix adjmat (np.ndarray)"
@@ -317,22 +373,29 @@ def find_conditioning_sets_without_middle(adjmat, x, y, z):
 
 #######################################################################################################################
 
+
 def find_uc(adjmat):
     "Return the list of unshielded colliders x --> y <-- z as (x, y, z) in the adjacency matrix adjmat (np.ndarray)\
     with asymmetry x < z"
     directed = find_fully_directed(adjmat)
-    return [(pair[0][0], pair[0][1], pair[1][0]) for pair in permutations(directed, 2)
-            if pair[0][1] == pair[1][1] and pair[0][0] < pair[1][0] and adjmat[pair[0][0], pair[1][0]] == -1]
+    return [
+        (pair[0][0], pair[0][1], pair[1][0])
+        for pair in permutations(directed, 2)
+        if pair[0][1] == pair[1][1]
+        and pair[0][0] < pair[1][0]
+        and adjmat[pair[0][0], pair[1][0]] == -1
+    ]
 
 
 #######################################################################################################################
 
+
 def rearrange_columns(adjmat, PATH):
     "Rearrange the adjacency matrix adjmat (np.ndarray) according to the data imported at PATH"
-    raw_col_names = list(pd.read_csv(PATH, sep='\t').columns)
+    raw_col_names = list(pd.read_csv(PATH, sep="\t").columns)
     var_indices = []
     for name in raw_col_names:
-        var_indices.append(int(name.split('X')[1]) - 1)
+        var_indices.append(int(name.split("X")[1]) - 1)
     new_indices = np.zeros_like(var_indices)
     for i in range(1, len(new_indices)):
         new_indices[var_indices[i]] = range(len(new_indices))[i]
@@ -343,10 +406,13 @@ def rearrange_columns(adjmat, PATH):
 
 #######################################################################################################################
 
+
 def dag2pattern(adjmat):
     "Generate the pattern of the adjacency matrix adjmat (np.ndarray)"
     pattern = deepcopy(adjmat)
-    pattern[pattern == 1] = 0  # Remove all the arrowheads from the DAG to obtain the skeleton
+    pattern[
+        pattern == 1
+    ] = 0  # Remove all the arrowheads from the DAG to obtain the skeleton
     UC = find_uc(adjmat)
     for (i, j, k) in UC:
         pattern[i, j] = 1
@@ -365,15 +431,22 @@ def dag2pattern(adjmat):
                 Loop = True
 
         for (i, j, k) in Tri:
-            if is_fully_directed(pattern, i, j) and is_fully_directed(pattern, j, k) and is_undirected(pattern, i, k):
+            if (
+                is_fully_directed(pattern, i, j)
+                and is_fully_directed(pattern, j, k)
+                and is_undirected(pattern, i, k)
+            ):
                 pattern[i, k] = 1
                 Loop = True
 
         for (i, j, k, l) in Kites:
-            if is_undirected(pattern, i, j) and is_undirected(pattern, i, k) and is_fully_directed(pattern, j,
-                                                                                                   l) and is_fully_directed(
-                pattern, k, l) \
-                    and is_undirected(pattern, i, l):
+            if (
+                is_undirected(pattern, i, j)
+                and is_undirected(pattern, i, k)
+                and is_fully_directed(pattern, j, l)
+                and is_fully_directed(pattern, k, l)
+                and is_undirected(pattern, i, l)
+            ):
                 pattern[i, l] = 1
                 Loop = True
 
@@ -381,6 +454,7 @@ def dag2pattern(adjmat):
 
 
 #######################################################################################################################
+
 
 def adjmat2digraph(adjmat):
     "Recover the directed graph from the adjacency matrix adjmat (np.ndarray) and return a nx_graph object"
@@ -391,22 +465,23 @@ def adjmat2digraph(adjmat):
     directed = find_fully_directed(adjmat)
     bidirected = find_bi_directed(adjmat)
     for (i, j) in undirected:
-        g.add_edge(i, j, color='g')  # Green edge: undirected edge
+        g.add_edge(i, j, color="g")  # Green edge: undirected edge
     for (i, j) in directed:
-        g.add_edge(i, j, color='b')  # Blue edge: directed edge
+        g.add_edge(i, j, color="b")  # Blue edge: directed edge
     for (i, j) in bidirected:
-        g.add_edge(i, j, color='r')  # Red edge: bidirected edge
+        g.add_edge(i, j, color="r")  # Red edge: bidirected edge
     return g
 
 
 #######################################################################################################################
+
 
 def draw_graph(nx_graph):
     "Draw the nx_graph (networkx graph object)"
     print("Green: undirected; Blue: directed; Red: bi-directed")
     warnings.filterwarnings("ignore", category=UserWarning)
     edges = nx_graph.edges()
-    colors = [nx_graph[u][v]['color'] for u, v in edges]
+    colors = [nx_graph[u][v]["color"] for u, v in edges]
     pos = nx.circular_layout(nx_graph)
     nx.draw(nx_graph, pos=pos, with_labels=True, edge_color=colors)
     # nx.draw(graph, pos=pos, with_labels=True)
@@ -416,6 +491,7 @@ def draw_graph(nx_graph):
 
 #######################################################################################################################
 
+
 def is_dsep(nx_graph, x, y, Z):
     "Return True if x and y are d-separated by the set Z in nx_graph (networkx graph object) and False otherwise"
     S = set([str(i) for i in Z])
@@ -424,16 +500,17 @@ def is_dsep(nx_graph, x, y, Z):
 
 #######################################################################################################################
 
+
 def tetrad2adjmat(path):
     "Convert the graph (.txt output by TETRAD) at path into an adjacency matrix (np.ndarray)"
-    tetrad_file = pd.read_csv(path, sep='\t')
+    tetrad_file = pd.read_csv(path, sep="\t")
 
-    if ',' in str(tetrad_file.loc[0][0]):
-        var_names = str(tetrad_file.loc[0][0]).split(',')
-    elif ';' in str(tetrad_file.loc[0][0]):
-        var_names = str(tetrad_file.loc[0][0]).split(';')
+    if "," in str(tetrad_file.loc[0][0]):
+        var_names = str(tetrad_file.loc[0][0]).split(",")
+    elif ";" in str(tetrad_file.loc[0][0]):
+        var_names = str(tetrad_file.loc[0][0]).split(";")
     else:
-        var_names = ''
+        var_names = ""
 
     adjmat = np.eye(len(var_names), len(var_names))
     adjmat[adjmat == 1] = None
@@ -443,39 +520,54 @@ def tetrad2adjmat(path):
 
     for i in range(2, tetrad_file.shape[0]):
         STR = str(tetrad_file.loc[i][0])
-        if '-->' in STR:
-            STR_truncated = STR.split('. ')[1].split(' --> ')
-            LEFT = int(STR_truncated[0].split('X')[1]) - 1
-            RIGHT = int(STR_truncated[1].split('X')[1]) - 1
+        if "-->" in STR:
+            STR_truncated = STR.split(". ")[1].split(" --> ")
+            LEFT = int(STR_truncated[0].split("X")[1]) - 1
+            RIGHT = int(STR_truncated[1].split("X")[1]) - 1
             if adjmat[LEFT, RIGHT] != -1 and adjmat[RIGHT, LEFT] != -1:
                 if adjmat[LEFT, RIGHT] != 1 or adjmat[RIGHT, LEFT] != 0:
-                    raise ValueError("Inconsistency detected. Check the source file on", STR_truncated[0], "and",
-                                     STR_truncated[1], ".")
+                    raise ValueError(
+                        "Inconsistency detected. Check the source file on",
+                        STR_truncated[0],
+                        "and",
+                        STR_truncated[1],
+                        ".",
+                    )
             else:
                 adjmat[LEFT, RIGHT] = 1
                 adjmat[RIGHT, LEFT] = 0
 
-        elif '---' in STR:
-            STR_truncated = STR.split('. ')[1].split(' --- ')
-            LEFT = int(STR_truncated[0].split('X')[1]) - 1
-            RIGHT = int(STR_truncated[1].split('X')[1]) - 1
+        elif "---" in STR:
+            STR_truncated = STR.split(". ")[1].split(" --- ")
+            LEFT = int(STR_truncated[0].split("X")[1]) - 1
+            RIGHT = int(STR_truncated[1].split("X")[1]) - 1
             if adjmat[LEFT, RIGHT] != -1 and adjmat[RIGHT, LEFT] != -1:
                 if adjmat[LEFT, RIGHT] != 0 or adjmat[RIGHT, LEFT] != 0:
-                    raise ValueError("Inconsistency detected. Check the source file on", STR_truncated[0], "and",
-                                     STR_truncated[1], ".")
+                    raise ValueError(
+                        "Inconsistency detected. Check the source file on",
+                        STR_truncated[0],
+                        "and",
+                        STR_truncated[1],
+                        ".",
+                    )
             else:
                 adjmat[LEFT, RIGHT] = 0
                 adjmat[RIGHT, LEFT] = 0
 
-        elif '<->' in STR:
+        elif "<->" in STR:
             bidirected += 1
-            STR_truncated = STR.split('. ')[1].split(' <-> ')
-            LEFT = int(STR_truncated[0].split('X')[1]) - 1
-            RIGHT = int(STR_truncated[1].split('X')[1]) - 1
+            STR_truncated = STR.split(". ")[1].split(" <-> ")
+            LEFT = int(STR_truncated[0].split("X")[1]) - 1
+            RIGHT = int(STR_truncated[1].split("X")[1]) - 1
             if adjmat[LEFT, RIGHT] != -1 and adjmat[RIGHT, LEFT] != -1:
                 if adjmat[LEFT, RIGHT] != 1 or adjmat[RIGHT, LEFT] != 1:
-                    raise ValueError("Inconsistency detected. Check the source file on", STR_truncated[0], "and",
-                                     STR_truncated[1], ".")
+                    raise ValueError(
+                        "Inconsistency detected. Check the source file on",
+                        STR_truncated[0],
+                        "and",
+                        STR_truncated[1],
+                        ".",
+                    )
             else:
                 adjmat[(LEFT, RIGHT)] = 1
                 adjmat[(RIGHT, LEFT)] = 1
@@ -488,29 +580,38 @@ def tetrad2adjmat(path):
 
 #######################################################################################################################
 
+
 def adjmat2tetrad(PATH, adjmat):
     "Convert the adjacency matrix adjmat (np.ndarray) into a text file at PATH which is readable by TETRAD"
     directed = find_fully_directed(adjmat)
     undirected = [(i, j) for (i, j) in find_undirected(adjmat) if i < j]
-    bidirected = [(i, j) for (i, j) in find_circ_arrow(adjmat) if adjmat[j, i] == 1 and i < j]
-    file = open(str(PATH), 'w')
+    bidirected = [
+        (i, j) for (i, j) in find_circ_arrow(adjmat) if adjmat[j, i] == 1 and i < j
+    ]
+    file = open(str(PATH), "w")
 
-    file.write('Graph Nodes: \n')
+    file.write("Graph Nodes: \n")
     node_size = adjmat.shape[0]
     for node in range(node_size - 1):
-        file.write('X' + str(node + 1) + ';')
-    file.write('X' + str(node_size) + '\n')
-    file.write('\n')
+        file.write("X" + str(node + 1) + ";")
+    file.write("X" + str(node_size) + "\n")
+    file.write("\n")
 
-    file.write('Graph Edges: \n')
+    file.write("Graph Edges: \n")
 
     a = iter(range(1, len(directed) + len(undirected) + len(bidirected) + 1))
     for (i, j) in directed:
-        file.write(str(next(a)) + '. ' + 'X' + str(i + 1) + ' --> X' + str(j + 1) + '\n')
+        file.write(
+            str(next(a)) + ". " + "X" + str(i + 1) + " --> X" + str(j + 1) + "\n"
+        )
     for (i, j) in undirected:
-        file.write(str(next(a)) + '. ' + 'X' + str(i + 1) + ' --- X' + str(j + 1) + '\n')
+        file.write(
+            str(next(a)) + ". " + "X" + str(i + 1) + " --- X" + str(j + 1) + "\n"
+        )
     for (i, j) in bidirected:
-        file.write(str(next(a)) + '. ' + 'X' + str(i + 1) + ' <-> X' + str(j + 1) + '\n')
+        file.write(
+            str(next(a)) + ". " + "X" + str(i + 1) + " <-> X" + str(j + 1) + "\n"
+        )
 
     file.close()
 
@@ -518,9 +619,10 @@ def adjmat2tetrad(PATH, adjmat):
 #######################################################################################################################
 # mvpc utils
 
+
 def gen_vir_data(regMs, rss, Ws, num_test_var, effective_sz):
     """Generate the virtual data follows the full data distribution P(X, Y, S)"""
-    data_vir = np.ndarray(shape=(effective_sz, num_test_var), dtype=float, order='F')
+    data_vir = np.ndarray(shape=(effective_sz, num_test_var), dtype=float, order="F")
     for i in range(num_test_var):
         data_vir[:, i] = regMs[i].predict(Ws) + rss[i]
     return data_vir
@@ -549,7 +651,9 @@ def get_predictor_ws(mdata, num_test_var, effective_sz):
     ## 3. effective sample size
     indx_W_shuffle = arr[:effective_sz]
 
-    W_del_shuffle_eff = Ws_del[indx_W_shuffle, :]  # the sample size of W should be equal to effective sample size
+    W_del_shuffle_eff = Ws_del[
+        indx_W_shuffle, :
+    ]  # the sample size of W should be equal to effective sample size
     return W_del_shuffle_eff.reshape(-1, Ws_ncol)
 
 
@@ -569,7 +673,7 @@ def cond_perm_c(X, Y, condition_set, prt_m, skel):
 def contain_crrn_m(var, prt_m):
     """Check if the missingness indicators of var
     in the list of the ones requiring correction"""
-    intersection_var_m = list(set(var) & set(prt_m['m']))
+    intersection_var_m = list(set(var) & set(prt_m["m"]))
     if len(intersection_var_m) > 0:
         return True
     else:
@@ -611,7 +715,7 @@ def contain_common_neighbors_prt_mvar(X, Y, condition_set, skel, prt_m):
 
 
 def get_prt_mvars(var, prt_m):
-    """ Get the parents of missingness indicators of XYS
+    """Get the parents of missingness indicators of XYS
     :params:
         - var: a list or a tuple
     :return:
@@ -619,7 +723,7 @@ def get_prt_mvars(var, prt_m):
     """
     W_indx_ = []
     for vi in var:
-        if vi in prt_m['m']:  # vi has a missingness indicator requiring correction
+        if vi in prt_m["m"]:  # vi has a missingness indicator requiring correction
             W_indx_ += get_prt_of_mi(vi, prt_m)
     W_indx_ = list(np.unique(W_indx_))
     return W_indx_
@@ -627,9 +731,9 @@ def get_prt_mvars(var, prt_m):
 
 def get_prt_of_mi(vi, prt_m):
     """Get the parents of the missingness indicator, vi"""
-    for i, mi in enumerate(prt_m['m']):
+    for i, mi in enumerate(prt_m["m"]):
         if mi == vi:
-            prti = prt_m['prt'][i]
+            prti = prt_m["prt"][i]
             return list(prti)
 
 
@@ -682,12 +786,12 @@ def learn_regression_model(tdel_data, num_model):
 def get_residual(regM, X, y):
     """get the residuals of a regression model"""
     prediction = regM.predict(X)
-    residual = (y - prediction)
+    residual = y - prediction
     return residual
 
 
 def get_sub_correlation_matrix(mvdata):
-    """"
+    """ "
     Get the correlation matrix of the input data
     -------
     INPUT:

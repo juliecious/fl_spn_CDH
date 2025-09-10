@@ -7,16 +7,16 @@ from numpy import abs
 
 
 def plot_time_series(
-        link_matrix=None,
-        coef_matrix=None,
-        var_names=None,
-        order=None,
-        figsize=None,
-        dpi=200,
-        label_space_left=0.1,
-        label_space_top=0.05,
-        label_fontsize=12,
-        alpha=0.001
+    link_matrix=None,
+    coef_matrix=None,
+    var_names=None,
+    order=None,
+    figsize=None,
+    dpi=200,
+    label_space_left=0.1,
+    label_space_top=0.05,
+    label_fontsize=12,
+    alpha=0.001,
 ):
     """
     Plot time series graph.
@@ -69,7 +69,7 @@ def plot_time_series(
     dim, _, max_lag = link_matrix.shape
 
     if var_names is None:
-        var_names = [fr"$X_{i}$" for i in range(dim)]
+        var_names = [rf"$X_{i}$" for i in range(dim)]
 
     if order is None:
         order = range(dim)
@@ -102,7 +102,7 @@ def plot_time_series(
         pos_tmp[i] = np.array(
             [
                 ((i % max_lag) - xmin) / (xmax - xmin),
-                ((i // max_lag) - ymin) / (ymax - ymin)
+                ((i // max_lag) - ymin) / (ymax - ymin),
             ]
         )
         pos_tmp[i][np.isnan(pos_tmp[i])] = 0.0
@@ -140,7 +140,7 @@ def plot_time_series(
             ax.text(
                 pos[tau][0],
                 1.0 - label_space_top,
-                fr"$t-{max_lag - tau - 1}$",
+                rf"$t-{max_lag - tau - 1}$",
                 fontsize=label_fontsize,
                 horizontalalignment="center",
                 verticalalignment="top",

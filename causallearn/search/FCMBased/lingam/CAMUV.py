@@ -27,7 +27,7 @@ from causallearn.search.FCMBased.lingam import hsic2
 
 
 def do_an_experiment(data_file, alpha):
-    with open(data_file, 'rb') as f:
+    with open(data_file, "rb") as f:
         obj = pickle.load(f)
     X = obj["data"]
     maxnum_vals = 3
@@ -40,8 +40,12 @@ def get_neighborhoods(X, alpha):
     d = X.shape[1]
     N = [set() for i in range(d)]
     for i in range(d):
-        for j in range(d)[i + 1:]:
-            independence = hsic2.hsic_gam(X=np.reshape(X[:, i], [n, 1]), Y=np.reshape(X[:, j], [n, 1]), mode="pvalue")
+        for j in range(d)[i + 1 :]:
+            independence = hsic2.hsic_gam(
+                X=np.reshape(X[:, i], [n, 1]),
+                Y=np.reshape(X[:, j], [n, 1]),
+                mode="pvalue",
+            )
             if independence < alpha:
                 N[i].add(j)
                 N[j].add(i)
@@ -55,7 +59,7 @@ def find_parents(X, alpha, maxnum_vals, N):
     t = 2
     Y = copy.deepcopy(X)
 
-    while (True):
+    while True:
         changed = False
         variables_set_list = list(itertools.combinations(set(range(d)), t))
         for variables_set in variables_set_list:
@@ -89,8 +93,11 @@ def find_parents(X, alpha, maxnum_vals, N):
         for j in P[i]:
             residual_i = get_residual(X, i, P[i] - {j})
             residual_j = get_residual(X, j, P[j])
-            independence = hsic2.hsic_gam(X=np.reshape(residual_i, [n, 1]), Y=np.reshape(residual_j, [n, 1]),
-                                          mode="pvalue")
+            independence = hsic2.hsic_gam(
+                X=np.reshape(residual_i, [n, 1]),
+                Y=np.reshape(residual_j, [n, 1]),
+                mode="pvalue",
+            )
             if independence > alpha:
                 non_parents.add(j)
         P[i] = P[i] - non_parents
@@ -121,8 +128,11 @@ def get_child(X, variables_set, P, N, Y, alpha):
             continue
 
         residual = get_residual(X, child, parents | P[child])
-        independence = hsic2.hsic_gam(X=np.reshape(residual, [n, 1]),
-                                      Y=np.reshape(Y[:, list(parents)], [n, len(parents)]), mode="pvalue")
+        independence = hsic2.hsic_gam(
+            X=np.reshape(residual, [n, 1]),
+            Y=np.reshape(Y[:, list(parents)], [n, len(parents)]),
+            mode="pvalue",
+        )
         if max_independence < independence:
             max_independence = independence
             max_independence_child = child
@@ -133,8 +143,11 @@ def get_child(X, variables_set, P, N, Y, alpha):
 def check_independence_withou_K(parents, child, P, N, Y, alpha):
     n = Y.shape[0]
     for parent in parents:
-        independence = hsic2.hsic_gam(X=np.reshape(Y[:, child], [n, 1]), Y=np.reshape(Y[:, parent], [n, 1]),
-                                      mode="pvalue")
+        independence = hsic2.hsic_gam(
+            X=np.reshape(Y[:, child], [n, 1]),
+            Y=np.reshape(Y[:, parent], [n, 1]),
+            mode="pvalue",
+        )
         if alpha < independence:
             return False
     return True
@@ -143,7 +156,7 @@ def check_independence_withou_K(parents, child, P, N, Y, alpha):
 def check_identified_causality(variables_set, P):
     variables_list = list(variables_set)
     for i in variables_list:
-        for j in variables_list[variables_list.index(i) + 1:]:
+        for j in variables_list[variables_list.index(i) + 1 :]:
             if (j in P[i]) or (i in P[j]):
                 return False
     return True
@@ -165,15 +178,18 @@ def execute(X, alpha, num_explanatory_vals):
     U = []
 
     for i in range(d):
-        for j in range(d)[i + 1:]:
+        for j in range(d)[i + 1 :]:
             if (i in P[j]) or (j in P[i]):
                 continue
             if (not i in N[j]) or (not j in N[i]):
                 continue
             i_residual = get_residual(X, i, P[i])
             j_residual = get_residual(X, j, P[j])
-            independence = hsic2.hsic_gam(X=np.reshape(i_residual, [n, 1]), Y=np.reshape(j_residual, [n, 1]),
-                                          mode="pvalue")
+            independence = hsic2.hsic_gam(
+                X=np.reshape(i_residual, [n, 1]),
+                Y=np.reshape(j_residual, [n, 1]),
+                mode="pvalue",
+            )
             if independence < alpha:
                 if not set([i, j]) in U:
                     U.append(set([i, j]))
@@ -210,6 +226,7 @@ def create_data_for_evaluation(P, C):
 ##################################################################################
 # NOTE: Functions below are for CAMUV.py
 
+
 def get_width(X):
     n = X.shape[0]
 
@@ -221,7 +238,7 @@ def get_width(X):
 
     dists = Q + R - 2 * np.dot(Xmed, Xmed.T)
     dists = dists - np.tril(dists)
-    dists = dists.reshape(n ** 2, 1)
+    dists = dists.reshape(n**2, 1)
 
     width_x = np.sqrt(0.5 * np.median(dists[dists > 0]))
 
@@ -231,6 +248,7 @@ def get_width(X):
 # def median(lst):
 # 	lst_sorted = sorted(lst)
 # 	return lst_sorted[(len(lst) - 1) // 2]
+
 
 def get_mean_width(X):
     n = X.shape[0]
@@ -243,7 +261,7 @@ def get_mean_width(X):
 
     dists = Q + R - 2 * np.dot(Xmed, Xmed.T)
     dists = dists - np.tril(dists)
-    dists = dists.reshape(n ** 2, 1)
+    dists = dists.reshape(n**2, 1)
 
     width_x = np.sqrt(0.5 * np.mean(dists[dists > 0]))
 
@@ -259,7 +277,7 @@ def bw_scott(x):
 def bw_silverman(x):
     A = select_sigma(x)
     n = len(x)
-    return .9 * A * n ** (-0.2)
+    return 0.9 * A * n ** (-0.2)
 
 
 def select_sigma(X):
@@ -280,7 +298,7 @@ def rbf_dot(pattern1, pattern2, width):
 
     H = Q + R - 2 * np.dot(pattern1, pattern2.T)
 
-    H = np.exp(-H / 2 / (width ** 2))
+    H = np.exp(-H / 2 / (width**2))
 
     return H
 
@@ -297,8 +315,19 @@ def get_K(X, width_x):
     return K, Kc
 
 
-def hsic_gam(X=None, Y=None, alph=None, width_x=None, width_y=None, K=None, Kc=None, L=None, Lc=None, mode=None,
-             kwdth="mdbs"):
+def hsic_gam(
+    X=None,
+    Y=None,
+    alph=None,
+    width_x=None,
+    width_y=None,
+    K=None,
+    Kc=None,
+    L=None,
+    Lc=None,
+    mode=None,
+    kwdth="mdbs",
+):
     n = X.shape[0]
 
     if kwdth == "scott":
@@ -346,7 +375,7 @@ def hsic_gam(X=None, Y=None, alph=None, width_x=None, width_y=None, K=None, Kc=N
 
     mHSIC = (1 + muX * muY - muX - muY) / n
 
-    al = mHSIC ** 2 / varHSIC
+    al = mHSIC**2 / varHSIC
     bet = varHSIC * n / mHSIC
 
     if mode == "pvalue":
@@ -356,6 +385,6 @@ def hsic_gam(X=None, Y=None, alph=None, width_x=None, width_y=None, K=None, Kc=N
     thresh = gamma.ppf(1 - alph, al, scale=bet)[0][0]
 
     if mode == "testStatMinusThres":
-        return (testStat - thresh)
+        return testStat - thresh
 
-    return (testStat < thresh)
+    return testStat < thresh

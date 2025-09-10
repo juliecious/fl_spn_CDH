@@ -18,7 +18,6 @@ from causallearn.graph.NodeType import NodeType
 
 
 class GraphUtils:
-
     def __init__(self):
         pass
 
@@ -110,11 +109,15 @@ class GraphUtils:
 
     # Helper method. Determines if two edges do or do not form a block for d-separation, conditional on a set of nodes z
     # starting from a node a
-    def reachable(self, edge1: Edge, edge2: Edge, node_a: Node, z: List[Node], graph: Graph) -> bool:
+    def reachable(
+        self, edge1: Edge, edge2: Edge, node_a: Node, z: List[Node], graph: Graph
+    ) -> bool:
         node_b = edge1.get_distal_node(node_a)
 
-        collider = str(edge1.get_proximal_endpoint(node_b)) == "ARROW" and str(
-            edge2.get_proximal_endpoint(node_b)) == "ARROW"
+        collider = (
+            str(edge1.get_proximal_endpoint(node_b)) == "ARROW"
+            and str(edge2.get_proximal_endpoint(node_b)) == "ARROW"
+        )
 
         if (not collider) and not (node_b in z):
             return True
@@ -172,8 +175,16 @@ class GraphUtils:
 
         return z
 
-    def sepset_path_found(self, a: Node, b: Node, y: Node, path: List[Node], z: List[Node], graph: Graph,
-                          colliders: List[Tuple[Node, Node, Node]]) -> bool:
+    def sepset_path_found(
+        self,
+        a: Node,
+        b: Node,
+        y: Node,
+        path: List[Node],
+        z: List[Node],
+        graph: Graph,
+        colliders: List[Tuple[Node, Node, Node]],
+    ) -> bool:
         if b == y:
             return True
 
@@ -226,8 +237,14 @@ class GraphUtils:
             path.remove(b)
             return True
 
-    def get_pass_nodes(self, a: Node, b: Node, z: List[Node], graph: Graph,
-                       colliders: List[Tuple[Node, Node, Node]] | None) -> List[Node]:
+    def get_pass_nodes(
+        self,
+        a: Node,
+        b: Node,
+        z: List[Node],
+        graph: Graph,
+        colliders: List[Tuple[Node, Node, Node]] | None,
+    ) -> List[Node]:
         pass_nodes: List[Node] = []
 
         for c in graph.get_adjacent_nodes(b):
@@ -239,8 +256,15 @@ class GraphUtils:
 
         return pass_nodes
 
-    def node_reachable(self, a: Node, b: Node, c: Node, z: List[Node], graph: Graph,
-                       colliders: List[Tuple[Node, Node, Node]] | None) -> bool:
+    def node_reachable(
+        self,
+        a: Node,
+        b: Node,
+        c: Node,
+        z: List[Node],
+        graph: Graph,
+        colliders: List[Tuple[Node, Node, Node]] | None,
+    ) -> bool:
         collider = graph.is_def_collider(a, b, c)
 
         if not collider and not (b in z):
@@ -295,6 +319,7 @@ class GraphUtils:
     def find_unshielded_triples(self, graph: Graph):
         """Return the list of unshielded triples i o-o j o-o k in adjmat as (i, j, k)"""
         from causallearn.graph.Dag import Dag
+
         if not isinstance(graph, Dag):
             raise ValueError("graph must be a DAG")
         triples = []
@@ -308,19 +333,35 @@ class GraphUtils:
             node_map = graph.get_node_map()
 
             if node1 == node3:
-                if node2 != node4 and graph.get_adjacency_matrix()[node_map[node2], node_map[node4]] == 0:
+                if (
+                    node2 != node4
+                    and graph.get_adjacency_matrix()[node_map[node2], node_map[node4]]
+                    == 0
+                ):
                     triples.append((node2, node1, node4))
                     continue
             if node1 == node4:
-                if node2 != node3 and graph.get_adjacency_matrix()[node_map[node2], node_map[node3]] == 0:
+                if (
+                    node2 != node3
+                    and graph.get_adjacency_matrix()[node_map[node2], node_map[node3]]
+                    == 0
+                ):
                     triples.append((node2, node1, node3))
                     continue
             if node2 == node3:
-                if node1 != node4 and graph.get_adjacency_matrix()[node_map[node1], node_map[node4]] == 0:
+                if (
+                    node1 != node4
+                    and graph.get_adjacency_matrix()[node_map[node1], node_map[node4]]
+                    == 0
+                ):
                     triples.append((node1, node2, node4))
                     continue
             if node2 == node4:
-                if node2 != node3 and graph.get_adjacency_matrix()[node_map[node2], node_map[node3]] == 0:
+                if (
+                    node2 != node3
+                    and graph.get_adjacency_matrix()[node_map[node2], node_map[node3]]
+                    == 0
+                ):
                     triples.append((node1, node2, node3))
 
         return triples
@@ -363,9 +404,15 @@ class GraphUtils:
     def find_kites(self, graph) -> List[Tuple[Node, Node, Node, Node]]:
         kites: List[Tuple[Node, Node, Node, Node]] = []
         for pair in permutations(self.find_triangles(graph), 2):
-            if (pair[0][0] == pair[1][0]) and (pair[0][2] == pair[1][2]) and (
-                    graph.node_map[pair[0][1]] < graph.node_map[pair[1][1]]) and (
-                    graph.graph[graph.node_map[pair[0][1]], graph.node_map[pair[1][1]]] == 0):
+            if (
+                (pair[0][0] == pair[1][0])
+                and (pair[0][2] == pair[1][2])
+                and (graph.node_map[pair[0][1]] < graph.node_map[pair[1][1]])
+                and (
+                    graph.graph[graph.node_map[pair[0][1]], graph.node_map[pair[1][1]]]
+                    == 0
+                )
+            ):
                 kites.append((pair[0][0], pair[0][1], pair[1][1], pair[0][2]))
 
         return kites
@@ -413,37 +460,56 @@ class GraphUtils:
         return e.get_endpoint1() == Endpoint.TAIL and e.get_endpoint2() == Endpoint.TAIL
 
     def directed(self, e: Edge) -> bool:
-        return (e.get_endpoint1() == Endpoint.TAIL and e.get_endpoint2() == Endpoint.ARROW) \
-               or (e.get_endpoint1() == Endpoint.ARROW and e.get_endpoint2() == Endpoint.TAIL)
+        return (
+            e.get_endpoint1() == Endpoint.TAIL and e.get_endpoint2() == Endpoint.ARROW
+        ) or (
+            e.get_endpoint1() == Endpoint.ARROW and e.get_endpoint2() == Endpoint.TAIL
+        )
 
     def bi_directed(self, e: Edge) -> bool:
-        return e.get_endpoint1() == Endpoint.ARROW and e.get_endpoint2() == Endpoint.ARROW
+        return (
+            e.get_endpoint1() == Endpoint.ARROW and e.get_endpoint2() == Endpoint.ARROW
+        )
 
     def adj_precision(self, truth: Graph, est: Graph) -> float:
         confusion = AdjacencyConfusion(truth, est)
-        return confusion.get_adj_tp() / (confusion.get_adj_tp() + confusion.get_adj_fp())
+        return confusion.get_adj_tp() / (
+            confusion.get_adj_tp() + confusion.get_adj_fp()
+        )
 
     def adj_recall(self, truth: Graph, est: Graph) -> float:
         confusion = AdjacencyConfusion(truth, est)
-        return confusion.get_adj_tp() / (confusion.get_adj_tp() + confusion.get_adj_fn())
+        return confusion.get_adj_tp() / (
+            confusion.get_adj_tp() + confusion.get_adj_fn()
+        )
 
     def arrow_precision(self, truth: Graph, est: Graph) -> float:
         confusion = ArrowConfusion(truth, est)
-        return confusion.get_arrows_tp() / (confusion.get_arrows_tp() + confusion.get_arrows_fp())
+        return confusion.get_arrows_tp() / (
+            confusion.get_arrows_tp() + confusion.get_arrows_fp()
+        )
 
     def arrow_recall(self, truth: Graph, est: Graph) -> float:
         confusion = ArrowConfusion(truth, est)
-        return confusion.get_arrows_tp() / (confusion.get_arrows_tp() + confusion.get_arrows_fn())
+        return confusion.get_arrows_tp() / (
+            confusion.get_arrows_tp() + confusion.get_arrows_fn()
+        )
 
     def arrow_precision_common_edges(self, truth: Graph, est: Graph) -> float:
         confusion = ArrowConfusion(truth, est)
-        return confusion.get_arrows_tp() / (confusion.get_arrows_tp() + confusion.get_arrows_fp_ce())
+        return confusion.get_arrows_tp() / (
+            confusion.get_arrows_tp() + confusion.get_arrows_fp_ce()
+        )
 
     def arrow_recall_common_edges(self, truth: Graph, est: Graph) -> float:
         confusion = ArrowConfusion(truth, est)
-        return confusion.get_arrows_tp() / (confusion.get_arrows_tp() + confusion.get_arrows_fn_ce())
+        return confusion.get_arrows_tp() / (
+            confusion.get_arrows_tp() + confusion.get_arrows_fn_ce()
+        )
 
-    def exists_directed_path_from_to_breadth_first(self, node_from: Node, node_to: Node, G: Graph) -> bool:
+    def exists_directed_path_from_to_breadth_first(
+        self, node_from: Node, node_to: Node, G: Graph
+    ) -> bool:
         Q: Deque[Node] = deque()
         V: List[Node] = [node_from]
         Q.append(node_from)
@@ -472,23 +538,24 @@ class GraphUtils:
     def to_pgv(G: Graph, title: str = ""):
         # warnings.warn("GraphUtils.to_pgv() is deprecated", DeprecationWarning)
         import pygraphviz as pgv
+
         graphviz_g = pgv.AGraph(directed=True)
-        graphviz_g.graph_attr['label'] = title
-        graphviz_g.graph_attr['labelfontsize'] = 18
+        graphviz_g.graph_attr["label"] = title
+        graphviz_g.graph_attr["labelfontsize"] = 18
         nodes = G.get_nodes()
         for i, node in enumerate(nodes):
             graphviz_g.add_node(i)
-            graphviz_g.get_node(i).attr['label'] = node.get_name()
+            graphviz_g.get_node(i).attr["label"] = node.get_name()
             if node.get_node_type() == NodeType.LATENT:
-                graphviz_g.get_node(i).attr['shape'] = 'square'
+                graphviz_g.get_node(i).attr["shape"] = "square"
 
         def get_g_arrow_type(endpoint):
             if endpoint == Endpoint.TAIL:
-                return 'none'
+                return "none"
             elif endpoint == Endpoint.ARROW:
-                return 'normal'
+                return "normal"
             elif endpoint == Endpoint.CIRCLE:
-                return 'odot'
+                return "odot"
             else:
                 raise NotImplementedError()
 
@@ -501,16 +568,22 @@ class GraphUtils:
             node2_id = nodes.index(node2)
             graphviz_g.add_edge(node1_id, node2_id)
             g_edge = graphviz_g.get_edge(node1_id, node2_id)
-            g_edge.attr['dir'] = 'both'
+            g_edge.attr["dir"] = "both"
 
-            g_edge.attr['arrowtail'] = get_g_arrow_type(edge.get_endpoint1())
-            g_edge.attr['arrowhead'] = get_g_arrow_type(edge.get_endpoint2())
+            g_edge.attr["arrowtail"] = get_g_arrow_type(edge.get_endpoint1())
+            g_edge.attr["arrowhead"] = get_g_arrow_type(edge.get_endpoint2())
 
         return graphviz_g
 
     @staticmethod
-    def to_pydot(G: Graph, edges: List[Edge] | None = None, labels: List[str] | None = None, title: str = "", dpi: float = 200):
-        '''
+    def to_pydot(
+        G: Graph,
+        edges: List[Edge] | None = None,
+        labels: List[str] | None = None,
+        title: str = "",
+        dpi: float = 200,
+    ):
+        """
         Convert a graph object to a DOT object.
 
         Parameters
@@ -528,7 +601,7 @@ class GraphUtils:
         Returns
         -------
         pydot_g : Dot
-        '''
+        """
 
         nodes = G.get_nodes()
         if labels is not None:
@@ -541,17 +614,17 @@ class GraphUtils:
             node_name = labels[i] if labels is not None else node.get_name()
             pydot_g.add_node(pydot.Node(i, label=node.get_name()))
             if node.get_node_type() == NodeType.LATENT:
-                pydot_g.add_node(pydot.Node(i, label=node_name, shape='square'))
+                pydot_g.add_node(pydot.Node(i, label=node_name, shape="square"))
             else:
                 pydot_g.add_node(pydot.Node(i, label=node_name))
 
         def get_g_arrow_type(endpoint):
             if endpoint == Endpoint.TAIL:
-                return 'none'
+                return "none"
             elif endpoint == Endpoint.ARROW:
-                return 'normal'
+                return "normal"
             elif endpoint == Endpoint.CIRCLE:
-                return 'odot'
+                return "odot"
             else:
                 raise NotImplementedError()
 
@@ -563,8 +636,13 @@ class GraphUtils:
             node2 = edge.get_node2()
             node1_id = nodes.index(node1)
             node2_id = nodes.index(node2)
-            dot_edge = pydot.Edge(node1_id, node2_id, dir='both', arrowtail=get_g_arrow_type(edge.get_endpoint1()),
-                                  arrowhead=get_g_arrow_type(edge.get_endpoint2()))
+            dot_edge = pydot.Edge(
+                node1_id,
+                node2_id,
+                dir="both",
+                arrowtail=get_g_arrow_type(edge.get_endpoint1()),
+                arrowhead=get_g_arrow_type(edge.get_endpoint2()),
+            )
 
             if Edge.Property.dd in edge.properties:
                 dot_edge.obj_dict["attributes"]["color"] = "green3"

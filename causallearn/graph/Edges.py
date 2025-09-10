@@ -30,7 +30,10 @@ class Edges:
 
     # return true iff an edge is a bidrected edge <->
     def is_bidirected_edge(self, edge: Edge) -> bool:
-        return edge.get_endpoint1() is Endpoint.ARROW and edge.get_endpoint2() is Endpoint.ARROW
+        return (
+            edge.get_endpoint1() is Endpoint.ARROW
+            and edge.get_endpoint2() is Endpoint.ARROW
+        )
 
     # return true iff the given edge is a directed edge -->
     def is_directed_edge(self, edge: Edge) -> bool:
@@ -52,14 +55,23 @@ class Edges:
 
     # return true iff some edge is an undirected edge --
     def is_undirected_edge(self, edge: Edge) -> bool:
-        return edge.get_endpoint1() is Endpoint.TAIL and edge.get_endpoint2() is Endpoint.TAIL
+        return (
+            edge.get_endpoint1() is Endpoint.TAIL
+            and edge.get_endpoint2() is Endpoint.TAIL
+        )
 
     def traverse_directed(self, node: Node, edge: Edge) -> Node | None:
         if node == edge.get_node1():
-            if str(edge.get_endpoint1()) == "TAIL" and str(edge.get_endpoint2()) == "ARROW":
+            if (
+                str(edge.get_endpoint1()) == "TAIL"
+                and str(edge.get_endpoint2()) == "ARROW"
+            ):
                 return edge.get_node2()
         elif node == edge.get_node2():
-            if str(edge.get_endpoint2()) == "TAIL" and str(edge.get_endpoint1()) == "ARROW":
+            if (
+                str(edge.get_endpoint2()) == "TAIL"
+                and str(edge.get_endpoint1()) == "ARROW"
+            ):
                 return edge.get_node1()
 
         return None

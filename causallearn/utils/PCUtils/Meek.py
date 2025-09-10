@@ -8,7 +8,9 @@ from causallearn.graph.GraphClass import CausalGraph
 from causallearn.utils.PCUtils.BackgroundKnowledge import BackgroundKnowledge
 
 
-def meek(cg: CausalGraph, background_knowledge: BackgroundKnowledge | None = None) -> CausalGraph:
+def meek(
+    cg: CausalGraph, background_knowledge: BackgroundKnowledge | None = None
+) -> CausalGraph:
     """
     Run Meek rules
 
@@ -38,63 +40,116 @@ def meek(cg: CausalGraph, background_knowledge: BackgroundKnowledge | None = Non
         loop = False
         for (i, j, k) in UT:
             if cg_new.is_fully_directed(i, j) and cg_new.is_undirected(j, k):
-                if (background_knowledge is not None) and \
-                        (background_knowledge.is_forbidden(cg_new.G.nodes[j], cg_new.G.nodes[k]) or
-                         background_knowledge.is_required(cg_new.G.nodes[k], cg_new.G.nodes[j])):
+                if (background_knowledge is not None) and (
+                    background_knowledge.is_forbidden(
+                        cg_new.G.nodes[j], cg_new.G.nodes[k]
+                    )
+                    or background_knowledge.is_required(
+                        cg_new.G.nodes[k], cg_new.G.nodes[j]
+                    )
+                ):
                     pass
                 else:
                     edge1 = cg_new.G.get_edge(cg_new.G.nodes[j], cg_new.G.nodes[k])
                     if edge1 is not None:
-                        if cg_new.G.is_ancestor_of(cg_new.G.nodes[k], cg_new.G.nodes[j]):
+                        if cg_new.G.is_ancestor_of(
+                            cg_new.G.nodes[k], cg_new.G.nodes[j]
+                        ):
                             continue
                         else:
                             cg_new.G.remove_edge(edge1)
                     else:
                         continue
-                    cg_new.G.add_edge(Edge(cg_new.G.nodes[j], cg_new.G.nodes[k], Endpoint.TAIL, Endpoint.ARROW))
+                    cg_new.G.add_edge(
+                        Edge(
+                            cg_new.G.nodes[j],
+                            cg_new.G.nodes[k],
+                            Endpoint.TAIL,
+                            Endpoint.ARROW,
+                        )
+                    )
                     loop = True
 
         for (i, j, k) in Tri:
-            if cg_new.is_fully_directed(i, j) and cg_new.is_fully_directed(j, k) and cg_new.is_undirected(i, k):
-                if (background_knowledge is not None) and \
-                        (background_knowledge.is_forbidden(cg_new.G.nodes[i], cg_new.G.nodes[k]) or
-                         background_knowledge.is_required(cg_new.G.nodes[k], cg_new.G.nodes[i])):
+            if (
+                cg_new.is_fully_directed(i, j)
+                and cg_new.is_fully_directed(j, k)
+                and cg_new.is_undirected(i, k)
+            ):
+                if (background_knowledge is not None) and (
+                    background_knowledge.is_forbidden(
+                        cg_new.G.nodes[i], cg_new.G.nodes[k]
+                    )
+                    or background_knowledge.is_required(
+                        cg_new.G.nodes[k], cg_new.G.nodes[i]
+                    )
+                ):
                     pass
                 else:
                     edge1 = cg_new.G.get_edge(cg_new.G.nodes[i], cg_new.G.nodes[k])
                     if edge1 is not None:
-                        if cg_new.G.is_ancestor_of(cg_new.G.nodes[k], cg_new.G.nodes[i]):
+                        if cg_new.G.is_ancestor_of(
+                            cg_new.G.nodes[k], cg_new.G.nodes[i]
+                        ):
                             continue
                         else:
                             cg_new.G.remove_edge(edge1)
                     else:
                         continue
-                    cg_new.G.add_edge(Edge(cg_new.G.nodes[i], cg_new.G.nodes[k], Endpoint.TAIL, Endpoint.ARROW))
+                    cg_new.G.add_edge(
+                        Edge(
+                            cg_new.G.nodes[i],
+                            cg_new.G.nodes[k],
+                            Endpoint.TAIL,
+                            Endpoint.ARROW,
+                        )
+                    )
                     loop = True
 
         for (i, j, k, l) in Kite:
-            if cg_new.is_undirected(i, j) and cg_new.is_undirected(i, k) and cg_new.is_fully_directed(j, l) \
-                    and cg_new.is_fully_directed(k, l) and cg_new.is_undirected(i, l):
-                if (background_knowledge is not None) and \
-                        (background_knowledge.is_forbidden(cg_new.G.nodes[i], cg_new.G.nodes[l]) or
-                         background_knowledge.is_required(cg_new.G.nodes[l], cg_new.G.nodes[i])):
+            if (
+                cg_new.is_undirected(i, j)
+                and cg_new.is_undirected(i, k)
+                and cg_new.is_fully_directed(j, l)
+                and cg_new.is_fully_directed(k, l)
+                and cg_new.is_undirected(i, l)
+            ):
+                if (background_knowledge is not None) and (
+                    background_knowledge.is_forbidden(
+                        cg_new.G.nodes[i], cg_new.G.nodes[l]
+                    )
+                    or background_knowledge.is_required(
+                        cg_new.G.nodes[l], cg_new.G.nodes[i]
+                    )
+                ):
                     pass
                 else:
                     edge1 = cg_new.G.get_edge(cg_new.G.nodes[i], cg_new.G.nodes[l])
                     if edge1 is not None:
-                        if cg_new.G.is_ancestor_of(cg_new.G.nodes[l], cg_new.G.nodes[i]):
+                        if cg_new.G.is_ancestor_of(
+                            cg_new.G.nodes[l], cg_new.G.nodes[i]
+                        ):
                             continue
                         else:
                             cg_new.G.remove_edge(edge1)
                     else:
                         continue
-                    cg_new.G.add_edge(Edge(cg_new.G.nodes[i], cg_new.G.nodes[l], Endpoint.TAIL, Endpoint.ARROW))
+                    cg_new.G.add_edge(
+                        Edge(
+                            cg_new.G.nodes[i],
+                            cg_new.G.nodes[l],
+                            Endpoint.TAIL,
+                            Endpoint.ARROW,
+                        )
+                    )
                     loop = True
 
     return cg_new
 
 
-def definite_meek(cg: CausalGraph, background_knowledge: BackgroundKnowledge | None = None) -> CausalGraph:
+def definite_meek(
+    cg: CausalGraph, background_knowledge: BackgroundKnowledge | None = None
+) -> CausalGraph:
     """
     Run Meek rules over the definite unshielded triples
 
@@ -122,11 +177,21 @@ def definite_meek(cg: CausalGraph, background_knowledge: BackgroundKnowledge | N
     while loop:
         loop = False
         for (i, j, k) in cg_new.definite_non_UC:
-            if cg_new.is_fully_directed(i, j) and \
-                    cg_new.is_undirected(j, k) and \
-                    not ((background_knowledge is not None) and
-                         (background_knowledge.is_forbidden(cg_new.G.nodes[j], cg_new.G.nodes[k]) or
-                          background_knowledge.is_required(cg_new.G.nodes[k], cg_new.G.nodes[j]))):
+            if (
+                cg_new.is_fully_directed(i, j)
+                and cg_new.is_undirected(j, k)
+                and not (
+                    (background_knowledge is not None)
+                    and (
+                        background_knowledge.is_forbidden(
+                            cg_new.G.nodes[j], cg_new.G.nodes[k]
+                        )
+                        or background_knowledge.is_required(
+                            cg_new.G.nodes[k], cg_new.G.nodes[j]
+                        )
+                    )
+                )
+            ):
                 edge1 = cg_new.G.get_edge(cg_new.G.nodes[j], cg_new.G.nodes[k])
                 if edge1 is not None:
                     if cg_new.G.is_ancestor_of(cg_new.G.nodes[k], cg_new.G.nodes[j]):
@@ -135,13 +200,30 @@ def definite_meek(cg: CausalGraph, background_knowledge: BackgroundKnowledge | N
                         cg_new.G.remove_edge(edge1)
                 else:
                     continue
-                cg_new.G.add_edge(Edge(cg_new.G.nodes[j], cg_new.G.nodes[k], Endpoint.TAIL, Endpoint.ARROW))
+                cg_new.G.add_edge(
+                    Edge(
+                        cg_new.G.nodes[j],
+                        cg_new.G.nodes[k],
+                        Endpoint.TAIL,
+                        Endpoint.ARROW,
+                    )
+                )
                 loop = True
-            elif cg_new.is_fully_directed(k, j) and \
-                    cg_new.is_undirected(j, i) and \
-                    not ((background_knowledge is not None) and
-                         (background_knowledge.is_forbidden(cg_new.G.nodes[j], cg_new.G.nodes[i]) or
-                          background_knowledge.is_required(cg_new.G.nodes[i], cg_new.G.nodes[j]))):
+            elif (
+                cg_new.is_fully_directed(k, j)
+                and cg_new.is_undirected(j, i)
+                and not (
+                    (background_knowledge is not None)
+                    and (
+                        background_knowledge.is_forbidden(
+                            cg_new.G.nodes[j], cg_new.G.nodes[i]
+                        )
+                        or background_knowledge.is_required(
+                            cg_new.G.nodes[i], cg_new.G.nodes[j]
+                        )
+                    )
+                )
+            ):
                 edge1 = cg_new.G.get_edge(cg_new.G.nodes[j], cg_new.G.nodes[i])
                 if edge1 is not None:
                     if cg_new.G.is_ancestor_of(cg_new.G.nodes[i], cg_new.G.nodes[j]):
@@ -150,45 +232,89 @@ def definite_meek(cg: CausalGraph, background_knowledge: BackgroundKnowledge | N
                         cg_new.G.remove_edge(edge1)
                 else:
                     continue
-                cg_new.G.add_edge(Edge(cg_new.G.nodes[j], cg_new.G.nodes[i], Endpoint.TAIL, Endpoint.ARROW))
+                cg_new.G.add_edge(
+                    Edge(
+                        cg_new.G.nodes[j],
+                        cg_new.G.nodes[i],
+                        Endpoint.TAIL,
+                        Endpoint.ARROW,
+                    )
+                )
                 loop = True
 
         for (i, j, k) in Tri:
-            if cg_new.is_fully_directed(i, j) and cg_new.is_fully_directed(j, k) and cg_new.is_undirected(i, k):
-                if (background_knowledge is not None) and \
-                        (background_knowledge.is_forbidden(cg_new.G.nodes[i], cg_new.G.nodes[k]) or
-                         background_knowledge.is_required(cg_new.G.nodes[k], cg_new.G.nodes[i])):
+            if (
+                cg_new.is_fully_directed(i, j)
+                and cg_new.is_fully_directed(j, k)
+                and cg_new.is_undirected(i, k)
+            ):
+                if (background_knowledge is not None) and (
+                    background_knowledge.is_forbidden(
+                        cg_new.G.nodes[i], cg_new.G.nodes[k]
+                    )
+                    or background_knowledge.is_required(
+                        cg_new.G.nodes[k], cg_new.G.nodes[i]
+                    )
+                ):
                     pass
                 else:
                     edge1 = cg_new.G.get_edge(cg_new.G.nodes[i], cg_new.G.nodes[k])
                     if edge1 is not None:
-                        if cg_new.G.is_ancestor_of(cg_new.G.nodes[k], cg_new.G.nodes[i]):
+                        if cg_new.G.is_ancestor_of(
+                            cg_new.G.nodes[k], cg_new.G.nodes[i]
+                        ):
                             continue
                         else:
                             cg_new.G.remove_edge(edge1)
                     else:
                         continue
-                    cg_new.G.add_edge(Edge(cg_new.G.nodes[i], cg_new.G.nodes[k], Endpoint.TAIL, Endpoint.ARROW))
+                    cg_new.G.add_edge(
+                        Edge(
+                            cg_new.G.nodes[i],
+                            cg_new.G.nodes[k],
+                            Endpoint.TAIL,
+                            Endpoint.ARROW,
+                        )
+                    )
                     loop = True
 
         for (i, j, k, l) in Kite:
-            if ((j, l, k) in cg_new.definite_UC or (k, l, j) in cg_new.definite_UC) \
-                    and ((j, i, k) in cg_new.definite_non_UC or (k, i, j) in cg_new.definite_non_UC) \
-                    and cg_new.is_undirected(i, l):
-                if (background_knowledge is not None) and \
-                        (background_knowledge.is_forbidden(cg_new.G.nodes[i], cg_new.G.nodes[l]) or
-                         background_knowledge.is_required(cg_new.G.nodes[l], cg_new.G.nodes[i])):
+            if (
+                ((j, l, k) in cg_new.definite_UC or (k, l, j) in cg_new.definite_UC)
+                and (
+                    (j, i, k) in cg_new.definite_non_UC
+                    or (k, i, j) in cg_new.definite_non_UC
+                )
+                and cg_new.is_undirected(i, l)
+            ):
+                if (background_knowledge is not None) and (
+                    background_knowledge.is_forbidden(
+                        cg_new.G.nodes[i], cg_new.G.nodes[l]
+                    )
+                    or background_knowledge.is_required(
+                        cg_new.G.nodes[l], cg_new.G.nodes[i]
+                    )
+                ):
                     pass
                 else:
                     edge1 = cg_new.G.get_edge(cg_new.G.nodes[i], cg_new.G.nodes[l])
                     if edge1 is not None:
-                        if cg_new.G.is_ancestor_of(cg_new.G.nodes[l], cg_new.G.nodes[i]):
+                        if cg_new.G.is_ancestor_of(
+                            cg_new.G.nodes[l], cg_new.G.nodes[i]
+                        ):
                             continue
                         else:
                             cg_new.G.remove_edge(edge1)
                     else:
                         continue
-                    cg_new.G.add_edge(Edge(cg_new.G.nodes[i], cg_new.G.nodes[l], Endpoint.TAIL, Endpoint.ARROW))
+                    cg_new.G.add_edge(
+                        Edge(
+                            cg_new.G.nodes[i],
+                            cg_new.G.nodes[l],
+                            Endpoint.TAIL,
+                            Endpoint.ARROW,
+                        )
+                    )
                     loop = True
 
     return cg_new

@@ -19,8 +19,8 @@ def fisher_test(pvals):
     return 1 - chi2.cdf(fisher_stat, 2 * len(pvals))
 
 
-def GIN(data, indep_test_method='kci', alpha=0.05):
-    '''
+def GIN(data, indep_test_method="kci", alpha=0.05):
+    """
     Learning causal structure of Latent Variables for Linear Non-Gaussian Latent Variable Model
     with Generalized Independent Noise Condition
     Parameters
@@ -37,23 +37,27 @@ def GIN(data, indep_test_method='kci', alpha=0.05):
         causal graph
     causal_order : list
         causal order
-    '''
+    """
     n = data.shape[1]
     cov = np.cov(data.T)
 
-    if indep_test_method == 'kci':
+    if indep_test_method == "kci":
         kci = KCI_UInd()
 
-    if indep_test_method not in ['kci', 'hsic']:
-        raise NotImplementedError((f"Independent test method {indep_test_method} is not implemented."))
+    if indep_test_method not in ["kci", "hsic"]:
+        raise NotImplementedError(
+            (f"Independent test method {indep_test_method} is not implemented.")
+        )
 
     def indep_test(x, y, method):
-        if method == 'kci':
+        if method == "kci":
             return kci.compute_pvalue(x, y)[0]
-        elif method == 'hsic':
+        elif method == "hsic":
             return hsic_test_gamma(x, y)[1]
         else:
-            raise NotImplementedError((f"Independent test method {indep_test_method} is not implemented."))
+            raise NotImplementedError(
+                (f"Independent test method {indep_test_method} is not implemented.")
+            )
 
     var_set = set(range(n))
     cluster_size = 2
@@ -65,7 +69,9 @@ def GIN(data, indep_test_method='kci', alpha=0.05):
             e = cal_e_with_gin(data, cov, list(cluster), list(remain_var_set))
             pvals = []
             for z in range(len(remain_var_set)):
-                pvals.append(indep_test(data[:, [z]], e[:, None], method=indep_test_method))
+                pvals.append(
+                    indep_test(data[:, [z]], e[:, None], method=indep_test_method)
+                )
             fisher_pval = fisher_test(pvals)
             if fisher_pval >= alpha:
                 tmp_clusters_list.append(cluster)
@@ -75,7 +81,7 @@ def GIN(data, indep_test_method='kci', alpha=0.05):
             var_set -= set(cluster)
         cluster_size += 1
 
-    causal_order = [] # this variable corresponds to K in paper
+    causal_order = []  # this variable corresponds to K in paper
     updated = True
     while updated:
         updated = False
@@ -93,10 +99,14 @@ def GIN(data, indep_test_method='kci', alpha=0.05):
                 if i == j:
                     continue
                 cluster_j1, cluster_j2 = array_split(cluster_j, 2)
-                e = cal_e_with_gin(data, cov, X + cluster_i1 + cluster_j1, Z + cluster_i2)
+                e = cal_e_with_gin(
+                    data, cov, X + cluster_i1 + cluster_j1, Z + cluster_i2
+                )
                 pvals = []
                 for z in range(len(Z + cluster_i2)):
-                    pvals.append(indep_test(data[:, [z]], e[:, None], method=indep_test_method))
+                    pvals.append(
+                        indep_test(data[:, [z]], e[:, None], method=indep_test_method)
+                    )
                 fisher_pval = fisher_test(pvals)
                 if fisher_pval < alpha:
                     is_root = False
@@ -153,7 +163,7 @@ def GIN(data, indep_test_method='kci', alpha=0.05):
 
 
 def GIN_MI(data):
-    '''
+    """
     Learning causal structure of Latent Variables for Linear Non-Gaussian Latent Variable Model
     with Generalized Independent Noise Condition
 
@@ -168,7 +178,7 @@ def GIN_MI(data):
         causal graph
     causal_order : list
         causal order
-    '''
+    """
     v_labels = list(range(data.shape[1]))
     v_set = set(v_labels)
     cov = np.cov(data.T)
@@ -191,8 +201,8 @@ def GIN_MI(data):
     cluster_list = merge_overlaping_cluster(cluster_list)
 
     # Step 2: Learning the Causal Order of Latent Variables
-    causal_order = [] # this variable corresponds to K in paper
-    while (len(cluster_list) != 0):
+    causal_order = []  # this variable corresponds to K in paper
+    while len(cluster_list) != 0:
         root = find_root(data, cov, cluster_list, causal_order)
         causal_order.append(root)
         cluster_list.remove(root)
@@ -225,7 +235,7 @@ def cal_e_with_gin(data, cov, X, Z):
 
 
 def cal_dep_for_gin(data, cov, X, Z):
-    '''
+    """
     Calculate the statistics of dependence via Generalized Independent Noise Condition
 
     Parameters
@@ -238,7 +248,7 @@ def cal_dep_for_gin(data, cov, X, Z):
     Returns
     -------
     sta : test statistic
-    '''
+    """
 
     e_xz = cal_e_with_gin(data, cov, X, Z)
 
@@ -250,7 +260,7 @@ def cal_dep_for_gin(data, cov, X, Z):
 
 
 def find_root(data, cov, clusters, causal_order):
-    '''
+    """
     Find the causal order by statistics of dependence
     Parameters
     ----------
@@ -261,7 +271,7 @@ def find_root(data, cov, clusters, causal_order):
     Returns
     -------
     root : latent root cause
-    '''
+    """
     if len(clusters) == 1:
         return clusters[0]
     root = clusters[0]
@@ -348,10 +358,10 @@ def array_split(x, k):
     section_len = x_len // k
     extra = x_len % k
     for i in range(extra):
-        sub_arys.append(x[start:start + section_len + 1])
+        sub_arys.append(x[start : start + section_len + 1])
         start = start + section_len + 1
 
     for i in range(k - extra):
-        sub_arys.append(x[start:start + section_len])
+        sub_arys.append(x[start : start + section_len])
         start = start + section_len
     return sub_arys

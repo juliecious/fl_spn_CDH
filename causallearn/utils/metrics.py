@@ -17,7 +17,6 @@ def get_cpdag(B):
     return cd.DAG.from_amat(B).cpdag().to_amat()[0]
 
 
-
 def get_dag_from_pdag(B_bin_pdag):
     # There is bug for G.to_dag().to_amat() from cd package
     # i.e., the shape of B is not preserved
@@ -99,20 +98,30 @@ def count_skeleton_accuracy(B_bin_true, B_bin_est):
     extra_lower = np.setdiff1d(pred, cond, assume_unique=True)
     missing_lower = np.setdiff1d(cond, pred, assume_unique=True)
     shd = len(extra_lower) + len(missing_lower)
-    return {'f1_skeleton': f1, 'precision_skeleton': 1 - fdr, 'recall_skeleton': tpr,
-            'shd_skeleton': shd, 'nnz_skeleton': nnz}
+    return {
+        "f1_skeleton": f1,
+        "precision_skeleton": 1 - fdr,
+        "recall_skeleton": tpr,
+        "shd_skeleton": shd,
+        "nnz_skeleton": nnz,
+    }
 
 
 def count_arrows_accuracy(B_bin_true, B_bin_est):
     dag_est = cd.DAG.from_amat(B_bin_est)
     dag_true = cd.DAG.from_amat(B_bin_true)
     cm_cpdag = dag_est.confusion_matrix(dag_true)
-    tp_arrows = len(cm_cpdag['true_positive_arcs'])
-    fp_arrows = len(cm_cpdag['false_positive_arcs'])
-    fn_arrows = len(cm_cpdag['false_negative_arcs'])
-    precision_arrows, recall_arows, f1_arrows \
-        = count_precision_recall_f1(tp_arrows, fp_arrows, fn_arrows)
-    return {'f1_arrows': f1_arrows, 'precision_arrows': precision_arrows, 'recall_arows': recall_arows}
+    tp_arrows = len(cm_cpdag["true_positive_arcs"])
+    fp_arrows = len(cm_cpdag["false_positive_arcs"])
+    fn_arrows = len(cm_cpdag["false_negative_arcs"])
+    precision_arrows, recall_arows, f1_arrows = count_precision_recall_f1(
+        tp_arrows, fp_arrows, fn_arrows
+    )
+    return {
+        "f1_arrows": f1_arrows,
+        "precision_arrows": precision_arrows,
+        "recall_arows": recall_arows,
+    }
 
 
 def count_dag_accuracy(B_bin_true, B_bin_est):
@@ -152,11 +161,19 @@ def count_dag_accuracy(B_bin_true, B_bin_est):
     shd = len(extra_lower) + len(missing_lower) + len(reverse)
     # false neg
     false_neg = np.setdiff1d(cond, true_pos, assume_unique=True)
-    precision, recall, f1 = count_precision_recall_f1(tp=len(true_pos),
-                                                      fp=len(reverse) + len(false_pos),
-                                                      fn=len(false_neg))
-    return {'fdr': fdr, 'tpr': tpr, 'fpr': fpr, 'shd': shd, 'nnz': pred_size, 
-            'precision': precision, 'recall': recall, 'f1': f1}
+    precision, recall, f1 = count_precision_recall_f1(
+        tp=len(true_pos), fp=len(reverse) + len(false_pos), fn=len(false_neg)
+    )
+    return {
+        "fdr": fdr,
+        "tpr": tpr,
+        "fpr": fpr,
+        "shd": shd,
+        "nnz": pred_size,
+        "precision": precision,
+        "recall": recall,
+        "f1": f1,
+    }
 
 
 def count_accuracy(B_bin_true, B_bin_est):
@@ -166,27 +183,27 @@ def count_accuracy(B_bin_true, B_bin_est):
         # Calculate performance metrics for DAG
         results_dag = count_dag_accuracy(B_bin_true, B_bin_est)
         results.update(results_dag)
-    except:    # To be safe
+    except:  # To be safe
         pass
 
     try:
         # Calculate SHD-CPDAG
         shd_cpdag = compute_shd_cpdag(B_bin_true, B_bin_est)
-        results['shd_cpdag'] = shd_cpdag
-    except:    # To be safe
+        results["shd_cpdag"] = shd_cpdag
+    except:  # To be safe
         pass
 
     try:
         # Calculate performance metrics for skeleton
         results_skeleton = count_skeleton_accuracy(B_bin_true, B_bin_est)
         results.update(results_skeleton)
-    except:    # To be safe
+    except:  # To be safe
         pass
 
     try:
         # Calculate performance metrics for arrows
         results_arrows = count_arrows_accuracy(B_bin_true, B_bin_est)
         results.update(results_arrows)
-    except:    # To be safe
+    except:  # To be safe
         pass
     return results

@@ -15,7 +15,7 @@ def get_width(X):
 
     dists = Q + R - 2 * np.dot(Xmed, Xmed.T)
     dists = dists - np.tril(dists)
-    dists = dists.reshape(n ** 2, 1)
+    dists = dists.reshape(n**2, 1)
 
     width_x = np.sqrt(0.5 * np.median(dists[dists > 0]))
 
@@ -25,6 +25,7 @@ def get_width(X):
 # def median(lst):
 # 	lst_sorted = sorted(lst)
 # 	return lst_sorted[(len(lst) - 1) // 2]
+
 
 def get_mean_width(X):
     n = X.shape[0]
@@ -37,7 +38,7 @@ def get_mean_width(X):
 
     dists = Q + R - 2 * np.dot(Xmed, Xmed.T)
     dists = dists - np.tril(dists)
-    dists = dists.reshape(n ** 2, 1)
+    dists = dists.reshape(n**2, 1)
 
     width_x = np.sqrt(0.5 * np.mean(dists[dists > 0]))
 
@@ -53,7 +54,7 @@ def bw_scott(x):
 def bw_silverman(x):
     A = select_sigma(x)
     n = len(x)
-    return .9 * A * n ** (-0.2)
+    return 0.9 * A * n ** (-0.2)
 
 
 def select_sigma(X):
@@ -74,7 +75,7 @@ def rbf_dot(pattern1, pattern2, width):
 
     H = Q + R - 2 * np.dot(pattern1, pattern2.T)
 
-    H = np.exp(-H / 2 / (width ** 2))
+    H = np.exp(-H / 2 / (width**2))
 
     return H
 
@@ -91,8 +92,19 @@ def get_K(X, width_x):
     return K, Kc
 
 
-def hsic_gam(X=None, Y=None, alph=None, width_x=None, width_y=None, K=None, Kc=None, L=None, Lc=None, mode=None,
-             kwdth="mdbs"):
+def hsic_gam(
+    X=None,
+    Y=None,
+    alph=None,
+    width_x=None,
+    width_y=None,
+    K=None,
+    Kc=None,
+    L=None,
+    Lc=None,
+    mode=None,
+    kwdth="mdbs",
+):
     n = X.shape[0]
 
     if kwdth == "scott":
@@ -140,7 +152,7 @@ def hsic_gam(X=None, Y=None, alph=None, width_x=None, width_y=None, K=None, Kc=N
 
     mHSIC = (1 + muX * muY - muX - muY) / n
 
-    al = mHSIC ** 2 / varHSIC
+    al = mHSIC**2 / varHSIC
     bet = varHSIC * n / mHSIC
 
     if mode == "pvalue":
@@ -150,6 +162,6 @@ def hsic_gam(X=None, Y=None, alph=None, width_x=None, width_y=None, K=None, Kc=N
     thresh = gamma.ppf(1 - alph, al, scale=bet)[0][0]
 
     if mode == "testStatMinusThres":
-        return (testStat - thresh)
+        return testStat - thresh
 
-    return (testStat < thresh)
+    return testStat < thresh

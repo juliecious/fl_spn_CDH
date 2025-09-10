@@ -28,7 +28,11 @@ class BackgroundKnowledge(object):
         """
         if (not isinstance(node1, Node)) or (not isinstance(node2, Node)):
             raise TypeError(
-                'node must not be instance of Node. node1 = ' + str(type(node1)) + ' node2 = ' + str(type(node2)))
+                "node must not be instance of Node. node1 = "
+                + str(type(node1))
+                + " node2 = "
+                + str(type(node2))
+            )
 
         self.forbidden_rules_specs.add((node1, node2))
 
@@ -49,7 +53,11 @@ class BackgroundKnowledge(object):
         """
         if (not isinstance(node1, Node)) or (not isinstance(node2, Node)):
             raise TypeError(
-                'node must not be instance of Node. node1 = ' + str(type(node1)) + ' node2 = ' + str(type(node2)))
+                "node must not be instance of Node. node1 = "
+                + str(type(node1))
+                + " node2 = "
+                + str(type(node2))
+            )
 
         self.required_rules_specs.add((node1, node2))
 
@@ -69,8 +77,12 @@ class BackgroundKnowledge(object):
         The object itself, which is for the convenience of construction.
         """
         if type(node_pattern1) != str or type(node_pattern2) != str:
-            raise TypeError('node_pattern must be type of str. node_pattern1 = ' + str(
-                type(node_pattern1)) + ' node_pattern2 = ' + str(type(node_pattern2)))
+            raise TypeError(
+                "node_pattern must be type of str. node_pattern1 = "
+                + str(type(node_pattern1))
+                + " node_pattern2 = "
+                + str(type(node_pattern2))
+            )
 
         self.forbidden_pattern_rules_specs.add((node_pattern1, node_pattern2))
 
@@ -90,8 +102,12 @@ class BackgroundKnowledge(object):
         The object itself, which is for the convenience of construction.
         """
         if type(node_pattern1) != str or type(node_pattern2) != str:
-            raise TypeError('node_pattern must be type of str. node_pattern1 = ' + str(
-                type(node_pattern1)) + ' node_pattern2 = ' + str(type(node_pattern2)))
+            raise TypeError(
+                "node_pattern must be type of str. node_pattern1 = "
+                + str(type(node_pattern1))
+                + " node_pattern2 = "
+                + str(type(node_pattern2))
+            )
 
         self.required_pattern_rules_specs.add((node_pattern1, node_pattern2))
 
@@ -99,7 +115,7 @@ class BackgroundKnowledge(object):
 
     def _ensure_tiers(self, tier: int):
         if type(tier) != int:
-            raise TypeError('tier must be int type. tier = ' + str(type(tier)))
+            raise TypeError("tier must be int type. tier = " + str(type(tier)))
 
         for t in range(tier + 1):
             if not self.tier_map.keys().__contains__(t):
@@ -120,10 +136,13 @@ class BackgroundKnowledge(object):
         """
         if (not isinstance(node, Node)) or type(tier) != int:
             raise TypeError(
-                'node must be instance of Node. tier must be int type. node = ' + str(type(node)) + ' tier = ' + str(
-                    type(tier)))
+                "node must be instance of Node. tier must be int type. node = "
+                + str(type(node))
+                + " tier = "
+                + str(type(tier))
+            )
         if tier < 0:
-            raise TypeError('tier must be a non-negative integer. tier = ' + str(tier))
+            raise TypeError("tier must be a non-negative integer. tier = " + str(tier))
 
         self._ensure_tiers(tier)
         self.tier_map.get(tier).add(node)
@@ -148,8 +167,12 @@ class BackgroundKnowledge(object):
         if the  edge node1 --> node2 is forbidden, then return True, otherwise False.
         """
         if (not isinstance(node1, Node)) or (not isinstance(node2, Node)):
-            raise TypeError('node1 and node2 must be instance of Node. node1 = ' + str(type(node1)) + ' node2 = ' + str(
-                type(node2)))
+            raise TypeError(
+                "node1 and node2 must be instance of Node. node1 = "
+                + str(type(node1))
+                + " node2 = "
+                + str(type(node2))
+            )
 
         # first check in forbidden_rules_specs
         for (from_node, to_node) in self.forbidden_rules_specs:
@@ -158,13 +181,15 @@ class BackgroundKnowledge(object):
 
         # then check in forbidden_pattern_rules_specs
         for (from_node_pattern, to_node_pattern) in self.forbidden_pattern_rules_specs:
-            if self._is_node_match_regular_expression(from_node_pattern,
-                                                      node1) and self._is_node_match_regular_expression(to_node_pattern,
-                                                                                                        node2):
+            if self._is_node_match_regular_expression(
+                from_node_pattern, node1
+            ) and self._is_node_match_regular_expression(to_node_pattern, node2):
                 return True
 
         # then check in tier_map
-        if self.tier_value_map.keys().__contains__(node1) and self.tier_value_map.keys().__contains__(node2):
+        if self.tier_value_map.keys().__contains__(
+            node1
+        ) and self.tier_value_map.keys().__contains__(node2):
             if self.tier_value_map.get(node1) >= self.tier_value_map.get(node2):
                 return True
 
@@ -184,8 +209,12 @@ class BackgroundKnowledge(object):
         if the  edge node1 --> node2 is required, then return True, otherwise False.
         """
         if (not isinstance(node1, Node)) or (not isinstance(node2, Node)):
-            raise TypeError('node1 and node2 must be instance of Node. node1 = ' + str(type(node1)) + ' node2 = ' + str(
-                type(node2)))
+            raise TypeError(
+                "node1 and node2 must be instance of Node. node1 = "
+                + str(type(node1))
+                + " node2 = "
+                + str(type(node2))
+            )
 
         # first check in required_rules_specs
         for (from_node, to_node) in self.required_rules_specs:
@@ -194,9 +223,9 @@ class BackgroundKnowledge(object):
 
         # then check in required_pattern_rules_specs
         for (from_node_pattern, to_node_pattern) in self.required_pattern_rules_specs:
-            if self._is_node_match_regular_expression(from_node_pattern,
-                                                      node1) and self._is_node_match_regular_expression(to_node_pattern,
-                                                                                                        node2):
+            if self._is_node_match_regular_expression(
+                from_node_pattern, node1
+            ) and self._is_node_match_regular_expression(to_node_pattern, node2):
                 return True
 
         return False
@@ -216,7 +245,11 @@ class BackgroundKnowledge(object):
         """
         if (not isinstance(node1, Node)) or (not isinstance(node2, Node)):
             raise TypeError(
-                'node must not be instance of Node. node1 = ' + str(type(node1)) + ' node2 = ' + str(type(node2)))
+                "node must not be instance of Node. node1 = "
+                + str(type(node1))
+                + " node2 = "
+                + str(type(node2))
+            )
 
         if self.forbidden_rules_specs.__contains__((node1, node2)):
             self.forbidden_rules_specs.remove((node1, node2))
@@ -238,7 +271,11 @@ class BackgroundKnowledge(object):
         """
         if (not isinstance(node1, Node)) or (not isinstance(node2, Node)):
             raise TypeError(
-                'node must not be instance of Node. node1 = ' + str(type(node1)) + ' node2 = ' + str(type(node2)))
+                "node must not be instance of Node. node1 = "
+                + str(type(node1))
+                + " node2 = "
+                + str(type(node2))
+            )
 
         if self.required_rules_specs.__contains__((node1, node2)):
             self.required_rules_specs.remove((node1, node2))
@@ -259,10 +296,16 @@ class BackgroundKnowledge(object):
         The object itself, which is for the convenience of construction.
         """
         if type(node_pattern1) != str or type(node_pattern2) != str:
-            raise TypeError('node_pattern must be type of str. node_pattern1 = ' + str(
-                type(node_pattern1)) + ' node_pattern2 = ' + str(type(node_pattern2)))
+            raise TypeError(
+                "node_pattern must be type of str. node_pattern1 = "
+                + str(type(node_pattern1))
+                + " node_pattern2 = "
+                + str(type(node_pattern2))
+            )
 
-        if self.forbidden_pattern_rules_specs.__contains__((node_pattern1, node_pattern2)):
+        if self.forbidden_pattern_rules_specs.__contains__(
+            (node_pattern1, node_pattern2)
+        ):
             self.forbidden_pattern_rules_specs.remove((node_pattern1, node_pattern2))
 
         return self
@@ -281,10 +324,16 @@ class BackgroundKnowledge(object):
         The object itself, which is for the convenience of construction.
         """
         if type(node_pattern1) != str or type(node_pattern2) != str:
-            raise TypeError('node_pattern must be type of str. node_pattern1 = ' + str(
-                type(node_pattern1)) + ' node_pattern2 = ' + str(type(node_pattern2)))
+            raise TypeError(
+                "node_pattern must be type of str. node_pattern1 = "
+                + str(type(node_pattern1))
+                + " node_pattern2 = "
+                + str(type(node_pattern2))
+            )
 
-        if self.required_pattern_rules_specs.__contains__((node_pattern1, node_pattern2)):
+        if self.required_pattern_rules_specs.__contains__(
+            (node_pattern1, node_pattern2)
+        ):
             self.required_pattern_rules_specs.remove((node_pattern1, node_pattern2))
 
         return self
@@ -304,10 +353,13 @@ class BackgroundKnowledge(object):
         """
         if (not isinstance(node, Node)) or type(tier) != int:
             raise TypeError(
-                'node must be instance of Node. tier must be int type. node = ' + str(type(node)) + ' tier = ' + str(
-                    type(tier)))
+                "node must be instance of Node. tier must be int type. node = "
+                + str(type(node))
+                + " tier = "
+                + str(type(tier))
+            )
         if tier < 0:
-            raise TypeError('tier must be a non-negative integer. tier = ' + str(tier))
+            raise TypeError("tier must be a non-negative integer. tier = " + str(tier))
 
         self._ensure_tiers(tier)
         if self.tier_map.get(tier).__contains__(node):

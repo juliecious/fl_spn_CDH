@@ -25,11 +25,20 @@ class Edge:
         self.properties = []
 
         if node1 is None or node2 is None:
-            raise TypeError('Nodes must not be of NoneType. node1 = ' + str(node1) + ' node2 = ' + str(node2))
+            raise TypeError(
+                "Nodes must not be of NoneType. node1 = "
+                + str(node1)
+                + " node2 = "
+                + str(node2)
+            )
 
         if end1 is None or end2 is None:
             raise TypeError(
-                'Endpoints must not be of NoneType. endpoint1 = ' + str(end1) + ' endpoint2 = ' + str(end2))
+                "Endpoints must not be of NoneType. endpoint1 = "
+                + str(end1)
+                + " endpoint2 = "
+                + str(end2)
+            )
 
         # assign nodes and endpoints; if the edge points left, flip it
         if self.pointing_left(end1, end2):
@@ -196,13 +205,20 @@ class Edge:
     def points_toward(self, node: Node) -> bool:
         proximal = self.get_proximal_endpoint(node)
         distal = self.get_distal_endpoint(node)
-        return proximal == Endpoint.ARROW and (distal == Endpoint.TAIL or distal == Endpoint.CIRCLE)
+        return proximal == Endpoint.ARROW and (
+            distal == Endpoint.TAIL or distal == Endpoint.CIRCLE
+        )
 
     def __eq__(self, other):
         if not isinstance(other, Edge):
             raise TypeError("Not an edge")
 
-        return self.endpoint1 == other.endpoint1 and self.endpoint2 == other.endpoint2 and self.node1 == other.node1 and self.node2 == other.node2
+        return (
+            self.endpoint1 == other.endpoint1
+            and self.endpoint2 == other.endpoint2
+            and self.node1 == other.node1
+            and self.node2 == other.node2
+        )
 
     def __lt__(self, other):
         return self.node1 < other.node1 or self.node2 < other.node2
@@ -243,4 +259,6 @@ class Edge:
 
     # returns True if the edge is pointing "left"
     def pointing_left(self, endpoint1: Endpoint, endpoint2: Endpoint):
-        return endpoint1 == Endpoint.ARROW and (endpoint2 == Endpoint.TAIL or endpoint2 == Endpoint.CIRCLE)
+        return endpoint1 == Endpoint.ARROW and (
+            endpoint2 == Endpoint.TAIL or endpoint2 == Endpoint.CIRCLE
+        )

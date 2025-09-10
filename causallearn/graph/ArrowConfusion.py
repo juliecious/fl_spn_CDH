@@ -8,6 +8,7 @@ class ArrowConfusion:
     """
     Compute the arrow confusion between two graphs.
     """
+
     __arrowsFp = 0
     __arrowsFn = 0
     __arrowsTp = 0
@@ -40,15 +41,31 @@ class ArrowConfusion:
         # Assumes the list of nodes for the two graphs are the same.
         for i in list(range(0, len(nodes))):
             for j in list(range(0, len(nodes))):
-                if truth.get_endpoint(truth.get_node(nodes_name[i]), truth.get_node(nodes_name[j])) == Endpoint.ARROW:
+                if (
+                    truth.get_endpoint(
+                        truth.get_node(nodes_name[i]), truth.get_node(nodes_name[j])
+                    )
+                    == Endpoint.ARROW
+                ):
                     truePositives[j][i] = 1
-                if est.get_endpoint(est.get_node(nodes_name[i]), est.get_node(nodes_name[j])) == Endpoint.ARROW:
+                if (
+                    est.get_endpoint(
+                        est.get_node(nodes_name[i]), est.get_node(nodes_name[j])
+                    )
+                    == Endpoint.ARROW
+                ):
                     estPositives[j][i] = 1
-                if truth.get_endpoint(truth.get_node(nodes_name[i]), truth.get_node(nodes_name[j])) == Endpoint.ARROW \
-                        and est.is_adjacent_to(est.get_node(nodes_name[i]), est.get_node(nodes_name[j])):
+                if truth.get_endpoint(
+                    truth.get_node(nodes_name[i]), truth.get_node(nodes_name[j])
+                ) == Endpoint.ARROW and est.is_adjacent_to(
+                    est.get_node(nodes_name[i]), est.get_node(nodes_name[j])
+                ):
                     truePositivesCE[j][i] = 1
-                if est.get_endpoint(est.get_node(nodes_name[i]), est.get_node(nodes_name[j])) == Endpoint.ARROW \
-                        and truth.is_adjacent_to(truth.get_node(nodes_name[i]), truth.get_node(nodes_name[j])):
+                if est.get_endpoint(
+                    est.get_node(nodes_name[i]), est.get_node(nodes_name[j])
+                ) == Endpoint.ARROW and truth.is_adjacent_to(
+                    truth.get_node(nodes_name[i]), truth.get_node(nodes_name[j])
+                ):
                     estPositivesCE[j][i] = 1
 
         ones = np.ones((len(nodes), len(nodes)))
@@ -56,13 +73,19 @@ class ArrowConfusion:
 
         self.__arrowsFp = (np.maximum(estPositives - truePositives, zeros)).sum()
         self.__arrowsFn = (np.maximum(truePositives - estPositives, zeros)).sum()
-        self.__arrowsTp = (np.minimum(truePositives == estPositives, truePositives)).sum()
+        self.__arrowsTp = (
+            np.minimum(truePositives == estPositives, truePositives)
+        ).sum()
         self.__arrowsTn = (truePositives == estPositives).sum() - self.__arrowsTp
 
         self.__arrowsFpCE = (np.maximum(estPositivesCE - truePositivesCE, zeros)).sum()
         self.__arrowsFnCE = (np.maximum(truePositivesCE - estPositivesCE, zeros)).sum()
-        self.__arrowsTpCE = (np.minimum(truePositivesCE == estPositivesCE, truePositivesCE)).sum()
-        self.__arrowsTnCE = (truePositivesCE == estPositivesCE).sum() - self.__arrowsTpCE
+        self.__arrowsTpCE = (
+            np.minimum(truePositivesCE == estPositivesCE, truePositivesCE)
+        ).sum()
+        self.__arrowsTnCE = (
+            truePositivesCE == estPositivesCE
+        ).sum() - self.__arrowsTpCE
 
     def get_arrows_fp(self):
         return self.__arrowsFp

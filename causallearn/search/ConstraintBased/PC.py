@@ -13,24 +13,25 @@ from causallearn.graph.GraphClass import CausalGraph
 from causallearn.utils.PCUtils.BackgroundKnowledge import BackgroundKnowledge
 from causallearn.utils.cit import *
 from causallearn.utils.PCUtils import Helper, Meek, SkeletonDiscovery, UCSepset
-from causallearn.utils.PCUtils.BackgroundKnowledgeOrientUtils import \
-    orient_by_background_knowledge
+from causallearn.utils.PCUtils.BackgroundKnowledgeOrientUtils import (
+    orient_by_background_knowledge,
+)
 
 
 def pc(
-    data: ndarray, 
-    alpha=0.05, 
-    indep_test=fisherz, 
-    stable: bool = True, 
-    uc_rule: int = 0, 
+    data: ndarray,
+    alpha=0.05,
+    indep_test=fisherz,
+    stable: bool = True,
+    uc_rule: int = 0,
     uc_priority: int = 2,
-    mvpc: bool = False, 
-    correction_name: str = 'MV_Crtn_Fisher_Z',
-    background_knowledge: BackgroundKnowledge | None = None, 
-    verbose: bool = False, 
+    mvpc: bool = False,
+    correction_name: str = "MV_Crtn_Fisher_Z",
+    background_knowledge: BackgroundKnowledge | None = None,
+    verbose: bool = False,
     show_progress: bool = True,
     node_names: List[str] | None = None,
-    **kwargs
+    **kwargs,
 ):
     if data.shape[0] < data.shape[1]:
         warnings.warn("The number of features is much larger than the sample size!")
@@ -38,14 +39,34 @@ def pc(
     if mvpc:  # missing value PC
         if indep_test == fisherz:
             indep_test = mv_fisherz
-        return mvpc_alg(data=data, node_names=node_names, alpha=alpha, indep_test=indep_test, correction_name=correction_name, stable=stable,
-                        uc_rule=uc_rule, uc_priority=uc_priority, background_knowledge=background_knowledge,
-                        verbose=verbose,
-                        show_progress=show_progress, **kwargs)
+        return mvpc_alg(
+            data=data,
+            node_names=node_names,
+            alpha=alpha,
+            indep_test=indep_test,
+            correction_name=correction_name,
+            stable=stable,
+            uc_rule=uc_rule,
+            uc_priority=uc_priority,
+            background_knowledge=background_knowledge,
+            verbose=verbose,
+            show_progress=show_progress,
+            **kwargs,
+        )
     else:
-        return pc_alg(data=data, node_names=node_names, alpha=alpha, indep_test=indep_test, stable=stable, uc_rule=uc_rule,
-                      uc_priority=uc_priority, background_knowledge=background_knowledge, verbose=verbose,
-                      show_progress=show_progress, **kwargs)
+        return pc_alg(
+            data=data,
+            node_names=node_names,
+            alpha=alpha,
+            indep_test=indep_test,
+            stable=stable,
+            uc_rule=uc_rule,
+            uc_priority=uc_priority,
+            background_knowledge=background_knowledge,
+            verbose=verbose,
+            show_progress=show_progress,
+            **kwargs,
+        )
 
 
 def pc_alg(
@@ -59,7 +80,7 @@ def pc_alg(
     background_knowledge: BackgroundKnowledge | None = None,
     verbose: bool = False,
     show_progress: bool = True,
-    **kwargs
+    **kwargs,
 ) -> CausalGraph:
     """
     Perform Peter-Clark (PC) algorithm for causal discovery
@@ -101,32 +122,47 @@ def pc_alg(
 
     start = time.time()
     indep_test = CIT(data, indep_test, **kwargs)
-    cg_1 = SkeletonDiscovery.skeleton_discovery(data, alpha, indep_test, stable,
-                                                background_knowledge=background_knowledge, verbose=verbose,
-                                                show_progress=show_progress, node_names=node_names)
+    cg_1 = SkeletonDiscovery.skeleton_discovery(
+        data,
+        alpha,
+        indep_test,
+        stable,
+        background_knowledge=background_knowledge,
+        verbose=verbose,
+        show_progress=show_progress,
+        node_names=node_names,
+    )
 
     if background_knowledge is not None:
         orient_by_background_knowledge(cg_1, background_knowledge)
 
     if uc_rule == 0:
         if uc_priority != -1:
-            cg_2 = UCSepset.uc_sepset(cg_1, uc_priority, background_knowledge=background_knowledge)
+            cg_2 = UCSepset.uc_sepset(
+                cg_1, uc_priority, background_knowledge=background_knowledge
+            )
         else:
             cg_2 = UCSepset.uc_sepset(cg_1, background_knowledge=background_knowledge)
         cg = Meek.meek(cg_2, background_knowledge=background_knowledge)
 
     elif uc_rule == 1:
         if uc_priority != -1:
-            cg_2 = UCSepset.maxp(cg_1, uc_priority, background_knowledge=background_knowledge)
+            cg_2 = UCSepset.maxp(
+                cg_1, uc_priority, background_knowledge=background_knowledge
+            )
         else:
             cg_2 = UCSepset.maxp(cg_1, background_knowledge=background_knowledge)
         cg = Meek.meek(cg_2, background_knowledge=background_knowledge)
 
     elif uc_rule == 2:
         if uc_priority != -1:
-            cg_2 = UCSepset.definite_maxp(cg_1, alpha, uc_priority, background_knowledge=background_knowledge)
+            cg_2 = UCSepset.definite_maxp(
+                cg_1, alpha, uc_priority, background_knowledge=background_knowledge
+            )
         else:
-            cg_2 = UCSepset.definite_maxp(cg_1, alpha, background_knowledge=background_knowledge)
+            cg_2 = UCSepset.definite_maxp(
+                cg_1, alpha, background_knowledge=background_knowledge
+            )
         cg_before = Meek.definite_meek(cg_2, background_knowledge=background_knowledge)
         cg = Meek.meek(cg_before, background_knowledge=background_knowledge)
     else:
@@ -202,9 +238,16 @@ def mvpc_alg(
 
     ## Step 2:
     ## a) Run PC algorithm with the 1st step skeleton;
-    cg_pre = SkeletonDiscovery.skeleton_discovery(data, alpha, indep_test, stable,
-                                                  background_knowledge=background_knowledge,
-                                                  verbose=verbose, show_progress=show_progress, node_names=node_names)
+    cg_pre = SkeletonDiscovery.skeleton_discovery(
+        data,
+        alpha,
+        indep_test,
+        stable,
+        background_knowledge=background_knowledge,
+        verbose=verbose,
+        show_progress=show_progress,
+        node_names=node_names,
+    )
     if background_knowledge is not None:
         orient_by_background_knowledge(cg_pre, background_knowledge)
 
@@ -221,23 +264,33 @@ def mvpc_alg(
     ## Step 3: Orient the edges
     if uc_rule == 0:
         if uc_priority != -1:
-            cg_2 = UCSepset.uc_sepset(cg_corr, uc_priority, background_knowledge=background_knowledge)
+            cg_2 = UCSepset.uc_sepset(
+                cg_corr, uc_priority, background_knowledge=background_knowledge
+            )
         else:
-            cg_2 = UCSepset.uc_sepset(cg_corr, background_knowledge=background_knowledge)
+            cg_2 = UCSepset.uc_sepset(
+                cg_corr, background_knowledge=background_knowledge
+            )
         cg = Meek.meek(cg_2, background_knowledge=background_knowledge)
 
     elif uc_rule == 1:
         if uc_priority != -1:
-            cg_2 = UCSepset.maxp(cg_corr, uc_priority, background_knowledge=background_knowledge)
+            cg_2 = UCSepset.maxp(
+                cg_corr, uc_priority, background_knowledge=background_knowledge
+            )
         else:
             cg_2 = UCSepset.maxp(cg_corr, background_knowledge=background_knowledge)
         cg = Meek.meek(cg_2, background_knowledge=background_knowledge)
 
     elif uc_rule == 2:
         if uc_priority != -1:
-            cg_2 = UCSepset.definite_maxp(cg_corr, alpha, uc_priority, background_knowledge=background_knowledge)
+            cg_2 = UCSepset.definite_maxp(
+                cg_corr, alpha, uc_priority, background_knowledge=background_knowledge
+            )
         else:
-            cg_2 = UCSepset.definite_maxp(cg_corr, alpha, background_knowledge=background_knowledge)
+            cg_2 = UCSepset.definite_maxp(
+                cg_corr, alpha, background_knowledge=background_knowledge
+            )
         cg_before = Meek.definite_meek(cg_2, background_knowledge=background_knowledge)
         cg = Meek.meek(cg_before, background_knowledge=background_knowledge)
     else:
@@ -251,7 +304,9 @@ def mvpc_alg(
 
 #######################################################################################################################
 ## *********** Functions for Step 1 ***********
-def get_parent_missingness_pairs(data: ndarray, alpha: float, indep_test, stable: bool = True) -> Dict[str, list]:
+def get_parent_missingness_pairs(
+    data: ndarray, alpha: float, indep_test, stable: bool = True
+) -> Dict[str, list]:
     """
     Detect the parents of missingness indicators
     If a missingness indicator has no parent, it will not be included in the result
@@ -264,7 +319,7 @@ def get_parent_missingness_pairs(data: ndarray, alpha: float, indep_test, stable
     :return:
     cg: a CausalGraph object
     """
-    parent_missingness_pairs = {'prt': [], 'm': []}
+    parent_missingness_pairs = {"prt": [], "m": []}
 
     ## Get the index of missingness indicators
     missingness_index = get_missingness_index(data)
@@ -272,10 +327,12 @@ def get_parent_missingness_pairs(data: ndarray, alpha: float, indep_test, stable
     ## Get the index of parents of missingness indicators
     # If the missingness indicator has no parent, then it will not be collected in prt_m
     for missingness_i in missingness_index:
-        parent_of_missingness_i = detect_parent(missingness_i, data, alpha, indep_test, stable)
+        parent_of_missingness_i = detect_parent(
+            missingness_i, data, alpha, indep_test, stable
+        )
         if not isempty(parent_of_missingness_i):
-            parent_missingness_pairs['prt'].append(parent_of_missingness_i)
-            parent_missingness_pairs['m'].append(missingness_i)
+            parent_missingness_pairs["prt"].append(parent_of_missingness_i)
+            parent_missingness_pairs["m"].append(missingness_i)
     return parent_missingness_pairs
 
 
@@ -299,7 +356,9 @@ def get_missingness_index(data: ndarray) -> List[int]:
     return missingness_index
 
 
-def detect_parent(r: int, data_: ndarray, alpha: float, indep_test, stable: bool = True) -> ndarray:
+def detect_parent(
+    r: int, data_: ndarray, alpha: float, indep_test, stable: bool = True
+) -> ndarray:
     """Detect the parents of a missingness indicator
     :param r: the missingness indicator
     :param data_: data set (numpy ndarray)
@@ -327,7 +386,9 @@ def detect_parent(r: int, data_: ndarray, alpha: float, indep_test, stable: bool
     # data
     ## Replace the variable r with its missingness indicator
     ## If r is not a missingness indicator, return [].
-    data[:, r] = np.isnan(data[:, r]).astype(float)  # True is missing; false is not missing
+    data[:, r] = np.isnan(data[:, r]).astype(
+        float
+    )  # True is missing; false is not missing
     if sum(data[:, r]) == 0 or sum(data[:, r]) == len(data[:, r]):
         return np.empty(0)
     ## *********** End ***********
@@ -370,7 +431,9 @@ def detect_parent(r: int, data_: ndarray, alpha: float, indep_test, stable: bool
                             if edge2 is not None:
                                 cg.G.remove_edge(edge2)
                         else:  # Stable: x---y will be removed only
-                            edge_removal.append((x, y))  # after all conditioning sets at
+                            edge_removal.append(
+                                (x, y)
+                            )  # after all conditioning sets at
                             edge_removal.append((y, x))  # depth l have been considered
                             Helper.append_value(cg.sepset, x, y, S)
                             Helper.append_value(cg.sepset, y, x, S)
@@ -407,8 +470,15 @@ def get_parent(r: int, cg_skel_adj: ndarray) -> ndarray:
 ## *********** END ***********
 #######################################################################################################################
 
-def skeleton_correction(data: ndarray, alpha: float, test_with_correction_name: str, init_cg: CausalGraph, prt_m: dict,
-                        stable: bool = True) -> CausalGraph:
+
+def skeleton_correction(
+    data: ndarray,
+    alpha: float,
+    test_with_correction_name: str,
+    init_cg: CausalGraph,
+    prt_m: dict,
+    stable: bool = True,
+) -> CausalGraph:
     """Perform skeleton discovery
     :param data: data set (numpy ndarray)
     :param alpha: desired significance level in (0, 1) (float)
@@ -462,7 +532,9 @@ def skeleton_correction(data: ndarray, alpha: float, test_with_correction_name: 
                             if edge2 is not None:
                                 cg.G.remove_edge(edge2)
                         else:  # Stable: x---y will be removed only
-                            edge_removal.append((x, y))  # after all conditioning sets at
+                            edge_removal.append(
+                                (x, y)
+                            )  # after all conditioning sets at
                             edge_removal.append((y, x))  # depth l have been considered
                             Helper.append_value(cg.sepset, x, y, S)
                             Helper.append_value(cg.sepset, y, x, S)
@@ -480,6 +552,7 @@ def skeleton_correction(data: ndarray, alpha: float, test_with_correction_name: 
 
 # *********** Evaluation util ***********
 
+
 def get_adjacancy_matrix(g: CausalGraph) -> ndarray:
     return nx.to_numpy_array(g.nx_graph).astype(int)
 
@@ -489,8 +562,20 @@ def matrix_diff(cg1: CausalGraph, cg2: CausalGraph) -> (float, List[Tuple[int, i
     adj2 = get_adjacancy_matrix(cg2)
     count = 0
     diff_ls = []
-    for i in range(len(adj1[:, ])):
-        for j in range(len(adj2[:, ])):
+    for i in range(
+        len(
+            adj1[
+                :,
+            ]
+        )
+    ):
+        for j in range(
+            len(
+                adj2[
+                    :,
+                ]
+            )
+        ):
             if adj1[i, j] != adj2[i, j]:
                 diff_ls.append((i, j))
                 count += 1

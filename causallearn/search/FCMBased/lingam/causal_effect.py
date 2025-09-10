@@ -14,7 +14,7 @@ class CausalEffect(object):
 
     References
     ----------
-    .. [1] P. Blöbaum and S. Shimizu. Estimation of interventional effects of features on prediction. 
+    .. [1] P. Blöbaum and S. Shimizu. Estimation of interventional effects of features on prediction.
        In Proc. 2017 IEEE International Workshop on Machine Learning for Signal Processing (MLSP2017), pp. 1--6, Tokyo, Japan, 2017.
     """
 
@@ -43,13 +43,15 @@ class CausalEffect(object):
             self._causal_order = self._causal_model.causal_order_
             return
         elif type(self._causal_model) is np.ndarray or type(self._causal_model) is list:
-            B = self._causal_model if type(
-                self._causal_model) is np.ndarray else np.array(self._causal_model)
+            B = (
+                self._causal_model
+                if type(self._causal_model) is np.ndarray
+                else np.array(self._causal_model)
+            )
             if len(B.shape) != 2:
                 raise ValueError("Specified 'causal_model' is not matrix")
             if B.shape[0] != B.shape[1]:
-                raise ValueError(
-                    "Specified 'causal_model' is not square matrix.")
+                raise ValueError("Specified 'causal_model' is not square matrix.")
 
             original_index = np.arange(B.shape[0])
             causal_order = []
@@ -59,7 +61,8 @@ class CausalEffect(object):
                 zero_rows = np.where(np.sum(np.abs(B_), axis=1) < 1e-10)[0]
                 if len(zero_rows) == 0:
                     raise ValueError(
-                        "Specified 'causal_model' is not lower triangular matrix.")
+                        "Specified 'causal_model' is not lower triangular matrix."
+                    )
 
                 causal_order.append(original_index[zero_rows[0]])
                 original_index = np.delete(original_index, zero_rows[0], 0)
@@ -117,17 +120,17 @@ class CausalEffect(object):
         pred : float
             Predicted value.
         """
-        if hasattr(pred_model, 'predict_proba'):
+        if hasattr(pred_model, "predict_proba"):
             p0, p1 = pred_model.predict_proba(X.reshape(1, -1))[0]
             pred = p0 - p1
-        elif hasattr(pred_model, 'predict'):
+        elif hasattr(pred_model, "predict"):
             pred = pred_model.predict(X.reshape(1, -1))[0]
         else:
             raise ValueError("'pred_model' has no prediction method.")
         return pred
 
     def estimate_effects_on_prediction(self, X, target_index, pred_model):
-        """ Estimate the intervention effect with the prediction model.
+        """Estimate the intervention effect with the prediction model.
 
         Parameters
         ----------
@@ -143,7 +146,7 @@ class CausalEffect(object):
         Returns
         -------
         intervention_effects : array-like, shape (n_features, 2)
-            Estimated values of intervention effect. 
+            Estimated values of intervention effect.
             The first column of the list is the value of 'E[Y|do(Xi=mean)]-E[Y|do(Xi=mean+std)]',
             and the second column is the value of 'E[Y|do(Xi=mean)]–E[Y|do(Xi=mean-std)]'.
             The maximum value in this array is the feature having the greatest intervention effect.
@@ -174,8 +177,10 @@ class CausalEffect(object):
 
         return np.array(effects)
 
-    def estimate_optimal_intervention(self, X, target_index, pred_model, intervention_index, desired_output):
-        """ Estimate of the intervention such that the expectation of
+    def estimate_optimal_intervention(
+        self, X, target_index, pred_model, intervention_index, desired_output
+    ):
+        """Estimate of the intervention such that the expectation of
         the prediction of the post-intervention observations is equal
         or close to a specified value.
 
@@ -191,7 +196,7 @@ class CausalEffect(object):
             Model object musst have ``coef_`` and ``intercept_`` attributes.
         intervention_index : int
             Index of variable to apply intervention.
-        desired_output : 
+        desired_output :
             Desired expected post-intervention output of prediction.
 
         Returns
@@ -204,10 +209,11 @@ class CausalEffect(object):
         self._check_init_params()
 
         # Allow linear regression model.
-        if not hasattr(pred_model, 'coef_') and not hasattr(pred_model, 'intercept_'):
+        if not hasattr(pred_model, "coef_") and not hasattr(pred_model, "intercept_"):
             raise ValueError(
-                "'pred_model' does not have regression coefficient attributes.")
-        if hasattr(pred_model, 'predict_proba'):
+                "'pred_model' does not have regression coefficient attributes."
+            )
+        if hasattr(pred_model, "predict_proba"):
             raise ValueError("'pred_model' is not linear regression model.")
 
         Ex = X.mean(axis=0)
@@ -238,4 +244,6 @@ class CausalEffect(object):
 
         coefs = np.insert(pred_model.coef_, target_index, 0)
 
-        return (desired_output - np.dot(coefs, Ex) - pred_model.intercept_) / np.dot(coefs, alpha)
+        return (desired_output - np.dot(coefs, Ex) - pred_model.intercept_) / np.dot(
+            coefs, alpha
+        )

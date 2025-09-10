@@ -12,12 +12,12 @@ from .base import _BaseLiNGAM
 
 
 class ICALiNGAM(_BaseLiNGAM):
-    """Implementation of ICA-based LiNGAM Algorithm [1]_ 
+    """Implementation of ICA-based LiNGAM Algorithm [1]_
 
     References
     ----------
-    .. [1] S. Shimizu, P. O. Hoyer, A. Hyvärinen, and A. J. Kerminen. 
-       A linear non-gaussian acyclic model for causal discovery. 
+    .. [1] S. Shimizu, P. O. Hoyer, A. Hyvärinen, and A. J. Kerminen.
+       A linear non-gaussian acyclic model for causal discovery.
        Journal of Machine Learning Research, 7:2003-2030, 2006.
     """
 
@@ -118,7 +118,7 @@ class ICALiNGAM(_BaseLiNGAM):
         ----------
         matrix : array-like, shape (n_features, n_samples)
             Target matrix.
-        
+
         Return
         ------
         causal_order : array, shape [n_features, ]

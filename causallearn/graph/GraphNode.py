@@ -6,7 +6,6 @@ from causallearn.graph.NodeType import NodeType
 
 
 class GraphNode(Node):
-
     def __init__(self, name: str):
         self.name: str = name
         self.node_type: NodeType = NodeType.MEASURED
@@ -33,13 +32,13 @@ class GraphNode(Node):
     # sets the name of the node
     def set_name(self, name: str):
         if name is None:
-            raise TypeError('Name cannot be of NoneType')
+            raise TypeError("Name cannot be of NoneType")
         self.name = name
 
     # sets the node type
     def set_node_type(self, node_type: NodeType):
         if node_type is None:
-            raise TypeError('Node cannot be of NoneType')
+            raise TypeError("Node cannot be of NoneType")
         self.node_type = node_type
 
     # sets the x coordinate of the center of the node

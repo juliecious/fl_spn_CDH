@@ -1,7 +1,7 @@
 import os
 import sys
 
-BASE_DIR = os.path.join(os.path.dirname(__file__), '..')
+BASE_DIR = os.path.join(os.path.dirname(__file__), "..")
 sys.path.append(BASE_DIR)
 from sklearn.gaussian_process import GaussianProcessRegressor
 from sklearn.gaussian_process.kernels import RBF
@@ -12,27 +12,27 @@ from causallearn.utils.KCI.KCI import KCI_UInd
 
 
 class ANM(object):
-    '''
+    """
     Python implementation of additive noise model-based causal discovery.
     References
     ----------
     [1] Hoyer, Patrik O., et al. "Nonlinear causal discovery with additive noise models." NIPS. Vol. 21. 2008.
-    '''
+    """
 
-    def __init__(self, kernelX='Gaussian', kernelY='Gaussian'):
-        '''
+    def __init__(self, kernelX="Gaussian", kernelY="Gaussian"):
+        """
         Construct the ANM model.
 
         Parameters:
         ----------
         kernelX: kernel function for hypothetical cause
         kernelY: kernel function for estimated noise
-        '''
+        """
         self.kernelX = kernelX
         self.kernelY = kernelY
 
     def fit_gp(self, X, y):
-        '''
+        """
         Fit a Gaussian process regression model
 
         Parameters
@@ -43,8 +43,10 @@ class ANM(object):
         Returns
         --------
         pred_y: predicted output (nx1)
-        '''
-        kernel = C(1.0, (1e-3, 1e3)) * RBF(1.0, (1e-2, 1e2)) + WhiteKernel(0.1, (1e-10, 1e+1))
+        """
+        kernel = C(1.0, (1e-3, 1e3)) * RBF(1.0, (1e-2, 1e2)) + WhiteKernel(
+            0.1, (1e-10, 1e1)
+        )
         gpr = GaussianProcessRegressor(kernel=kernel)
 
         # fit Gaussian process, including hyperparameter optimization
@@ -53,7 +55,7 @@ class ANM(object):
         return pred_y
 
     def cause_or_effect(self, data_x, data_y):
-        '''
+        """
         Fit a GP model in two directions and test the independence between the input and estimated noise
 
         Parameters
@@ -65,7 +67,7 @@ class ANM(object):
         ---------
         pval_forward: p value in the x->y direction
         pval_backward: p value in the y->x direction
-        '''
+        """
 
         # set up unconditional test
         kci = KCI_UInd(self.kernelX, self.kernelY)

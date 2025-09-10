@@ -15,7 +15,7 @@ from .hsic import hsic_test_gamma
 from .utils import predict_adaptive_lasso
 
 
-class LongitudinalLiNGAM():
+class LongitudinalLiNGAM:
     """Implementation of Longitudinal LiNGAM algorithm [1]_
 
     References
@@ -23,7 +23,7 @@ class LongitudinalLiNGAM():
     .. [1] K. Kadowaki, S. Shimizu, and T. Washio. Estimation of causal structures in longitudinal data using non-Gaussianity. In Proc. 23rd IEEE International Workshop on Machine Learning for Signal Processing (MLSP2013), pp. 1--6, Southampton, United Kingdom, 2013.
     """
 
-    def __init__(self, n_lags=1, measure='pwling', random_state=None):
+    def __init__(self, n_lags=1, measure="pwling", random_state=None):
         """Construct a model.
 
         Parameters
@@ -48,7 +48,7 @@ class LongitudinalLiNGAM():
         ----------
         X_list : list, shape [X, ...]
             Longitudinal multiple datasets for training, where ``X`` is an dataset.
-            The shape of ``X`` is (n_samples, n_features), 
+            The shape of ``X`` is (n_samples, n_features),
             where ``n_samples`` is the number of samples and ``n_features`` is the number of features.
 
         Returns
@@ -58,11 +58,10 @@ class LongitudinalLiNGAM():
         """
         # Check parameters
         if not isinstance(X_list, (list, np.ndarray)):
-            raise ValueError('X_list must be a array-like.')
+            raise ValueError("X_list must be a array-like.")
 
         if len(X_list) < 2:
-            raise ValueError(
-                'X_list must be a list containing at least two items')
+            raise ValueError("X_list must be a list containing at least two items")
 
         self._T = len(X_list)
         self._n = check_array(X_list[0]).shape[0]
@@ -71,7 +70,7 @@ class LongitudinalLiNGAM():
         for X in X_list:
             X = check_array(X)
             if X.shape != (self._n, self._p):
-                raise ValueError('X_list must be a list with the same shape')
+                raise ValueError("X_list must be a list with the same shape")
             X_t.append(X.T)
 
         M_tau, N_t = self._compute_residuals(X_t)
@@ -80,7 +79,8 @@ class LongitudinalLiNGAM():
 
         # output B(t,t), B(t,t-τ)
         self._adjacency_matrices = np.empty(
-            (self._T, 1 + self._n_lags, self._p, self._p))
+            (self._T, 1 + self._n_lags, self._p, self._p)
+        )
         self._adjacency_matrices[:, :] = np.nan
         for t in range(1, self._T):
             self._adjacency_matrices[t, 0] = B_t[t]
@@ -102,7 +102,7 @@ class LongitudinalLiNGAM():
         ----------
         X_list : array-like, shape (X, ...)
             Longitudinal multiple datasets for training, where ``X`` is an dataset.
-            The shape of ''X'' is (n_samples, n_features), 
+            The shape of ''X'' is (n_samples, n_features),
             where ``n_samples`` is the number of samples and ``n_features`` is the number of features.
         n_sampling : int
             Number of bootstrapping samples.
@@ -114,11 +114,10 @@ class LongitudinalLiNGAM():
         """
         # Check parameters
         if not isinstance(X_list, (list, np.ndarray)):
-            raise ValueError('X_list must be a array-like.')
+            raise ValueError("X_list must be a array-like.")
 
         if len(X_list) < 2:
-            raise ValueError(
-                'X_list must be a list containing at least two items')
+            raise ValueError("X_list must be a list containing at least two items")
 
         self._T = len(X_list)
         self._n = check_array(X_list[0]).shape[0]
@@ -127,14 +126,14 @@ class LongitudinalLiNGAM():
         for X in X_list:
             X = check_array(X)
             if X.shape != (self._n, self._p):
-                raise ValueError('X_list must be a list with the same shape')
+                raise ValueError("X_list must be a list with the same shape")
             X_t.append(X)
 
         # Bootstrapping
         adjacency_matrices = np.zeros(
-            (n_sampling, self._T, 1 + self._n_lags, self._p, self._p))
-        total_effects = np.zeros(
-            (n_sampling, self._T * self._p, self._T * self._p))
+            (n_sampling, self._T, 1 + self._n_lags, self._p, self._p)
+        )
+        total_effects = np.zeros((n_sampling, self._T * self._p, self._T * self._p))
         for i in range(n_sampling):
             resampled_X_t = np.empty((self._T, self._n, self._p))
             indices = np.random.randint(0, self._n, size=(self._n,))
@@ -148,14 +147,16 @@ class LongitudinalLiNGAM():
             for from_t in range(start_from_t, self._T):
                 for c, from_ in enumerate(self._causal_orders[from_t]):
                     to_t = from_t
-                    for to in self._causal_orders[from_t][c + 1:]:
-                        total_effects[i, to_t * self._p + to, from_t * self._p +
-                                      from_] = self.estimate_total_effect(X_t, from_t, from_, to_t, to)
+                    for to in self._causal_orders[from_t][c + 1 :]:
+                        total_effects[
+                            i, to_t * self._p + to, from_t * self._p + from_
+                        ] = self.estimate_total_effect(X_t, from_t, from_, to_t, to)
 
                     for to_t in range(from_t + 1, self._T):
                         for to in self._causal_orders[to_t]:
-                            total_effects[i, to_t * self._p + to, from_t * self._p +
-                                          from_] = self.estimate_total_effect(X_t, from_t, from_, to_t, to)
+                            total_effects[
+                                i, to_t * self._p + to, from_t * self._p + from_
+                            ] = self.estimate_total_effect(X_t, from_t, from_, to_t, to)
 
         return LongitudinalBootstrapResult(self._T, adjacency_matrices, total_effects)
 
@@ -167,13 +168,13 @@ class LongitudinalLiNGAM():
         X_t : array-like, shape (n_samples, n_features)
             Original data, where n_samples is the number of samples
             and n_features is the number of features.
-        from _t : 
+        from _t :
             The timepoint of source variable.
-        from_index : 
+        from_index :
             Index of source variable to estimate total effect.
-        to_t : 
+        to_t :
             The timepoint of destination variable.
-        to_index : 
+        to_index :
             Index of destination variable to estimate total effect.
 
         Returns
@@ -186,21 +187,25 @@ class LongitudinalLiNGAM():
             from_order = self._causal_orders[to_t].index(from_index)
             to_order = self._causal_orders[from_t].index(to_index)
             if from_order > to_order:
-                warnings.warn(f'The estimated causal effect may be incorrect because '
-                              f'the causal order of the destination variable (to_t={to_t}, to_index={to_index}) '
-                              f'is earlier than the source variable (from_t={from_t}, from_index={from_index}).')
+                warnings.warn(
+                    f"The estimated causal effect may be incorrect because "
+                    f"the causal order of the destination variable (to_t={to_t}, to_index={to_index}) "
+                    f"is earlier than the source variable (from_t={from_t}, from_index={from_index})."
+                )
         elif to_t < from_t:
-            warnings.warn(f'The estimated causal effect may be incorrect because '
-                          f'the causal order of the destination variable (to_t={to_t}) '
-                          f'is earlier than the source variable (from_t={from_t}).')
+            warnings.warn(
+                f"The estimated causal effect may be incorrect because "
+                f"the causal order of the destination variable (to_t={to_t}) "
+                f"is earlier than the source variable (from_t={from_t})."
+            )
 
         # X + lagged X
         # n_features * (to + from + n_lags)
         X_joined = np.zeros((self._n, self._p * (2 + self._n_lags)))
-        X_joined[:, 0:self._p] = X_t[to_t]
+        X_joined[:, 0 : self._p] = X_t[to_t]
         for tau in range(1 + self._n_lags):
             pos = self._p + self._p * tau
-            X_joined[:, pos:pos + self._p] = X_t[from_t - tau]
+            X_joined[:, pos : pos + self._p] = X_t[from_t - tau]
 
         am = np.concatenate([*self._adjacency_matrices[from_t]], axis=1)
 
@@ -232,8 +237,10 @@ class LongitudinalLiNGAM():
         for t in range(1, self._T):
             p_values = np.zeros([self._p, self._p])
             for i, j in itertools.combinations(range(self._p), 2):
-                _, p_value = hsic_test_gamma(np.reshape(E_list[t][:, i], [self._n, 1]),
-                                             np.reshape(E_list[t][:, j], [self._n, 1]))
+                _, p_value = hsic_test_gamma(
+                    np.reshape(E_list[t][:, i], [self._n, 1]),
+                    np.reshape(E_list[t][:, j], [self._n, 1]),
+                )
                 p_values[i, j] = p_value
                 p_values[j, i] = p_value
 
@@ -252,7 +259,7 @@ class LongitudinalLiNGAM():
             X_predictors = np.zeros((self._n, self._p * (1 + self._n_lags)))
             for tau in range(self._n_lags):
                 pos = self._p * tau
-                X_predictors[:, pos:pos + self._p] = X_t[t - (tau + 1)].T
+                X_predictors[:, pos : pos + self._p] = X_t[t - (tau + 1)].T
 
             # estimate M(t,t-τ) by regression
             X_target = X_t[t].T
@@ -261,7 +268,7 @@ class LongitudinalLiNGAM():
                 reg.fit(X_predictors, X_target[:, i])
                 for tau in range(self._n_lags):
                     pos = self._p * tau
-                    M_tau[t, tau, i] = reg.coef_[pos:pos + self._p]
+                    M_tau[t, tau, i] = reg.coef_[pos : pos + self._p]
 
             # Compute N(t)
             N_t[t] = X_t[t]
@@ -297,7 +304,7 @@ class LongitudinalLiNGAM():
         -------
         causal_order_ : array-like, shape (causal_order, ...)
             The causal order of fitted models for B(t,t).
-            The shape of causal_order is (n_features), 
+            The shape of causal_order is (n_features),
             where ``n_features`` is the number of features.
         """
         return self._causal_orders
@@ -310,9 +317,9 @@ class LongitudinalLiNGAM():
         -------
         adjacency_matrices_ : array-like, shape ((B(t,t), B(t,t-1), ..., B(t,t-τ)), ...)
             The list of adjacency matrix B(t,t) and B(t,t-τ) for longitudinal datasets.
-            The shape of B(t,t) and B(t,t-τ) is (n_features, n_features), where 
+            The shape of B(t,t) and B(t,t-τ) is (n_features, n_features), where
             ``n_features`` is the number of features.
-            **If the previous data required for the calculation are not available, 
+            **If the previous data required for the calculation are not available,
             such as B(t,t) or B(t,t-τ) at t=0, all elements of the matrix are nan**.
         """
         return self._adjacency_matrices
@@ -325,7 +332,7 @@ class LongitudinalLiNGAM():
         -------
         residuals_ : list, shape [E, ...]
             Residuals of regression, where ``E`` is an dataset.
-            The shape of ``E`` is (n_samples, n_features), 
+            The shape of ``E`` is (n_samples, n_features),
             where ``n_samples`` is the number of samples and ``n_features`` is the number of features.
 
         """
