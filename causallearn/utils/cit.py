@@ -825,6 +825,67 @@ class SPN(CIT_Base):
         with torch.no_grad():
             return self.einet(marginalized_tensor)
 
+    def get_formatted_XYZ_and_cachekey(self, X, Y, condition_set):
+        """
+        Normalize X, Y, and condition_set to sorted int lists, check for invalid overlaps,
+        and generate a unique string cache key. Compatible with both single integer and iterable input for all arguments.
+
+        This function ensures:
+            1. All inputs (X, Y, condition_set) are converted to Python lists of int.
+            2. Duplicates are removed and indices are sorted for consistency.
+            3. X and Y do not overlap with condition_set; raises ValueError if overlap exists.
+            4. Returns a unique, order-agnostic cache key for memoization, invariant to input type and order.
+
+        Parameters
+        ----------
+        X : int, Iterable[int], or np.*int*
+            Indices of the first variable(s). Accepts a single int or any iterable of ints.
+        Y : int, Iterable[int], or np.*int*
+            Indices of the second variable(s). Accepts a single int or any iterable of ints.
+        condition_set : int, Iterable[int], or np.*int*
+            Conditioning variable indices. Accepts a single int or any iterable of ints.
+
+        Returns
+        -------
+        Xs : List[int]
+            Sorted list of unique indices for X. Always a list, even if a single variable.
+        Ys : List[int]
+            Sorted list of unique indices for Y. Always a list, even if a single variable.
+        condition_set : List[int]
+            Sorted list of unique conditioning indices.
+        cache_key : str
+            Unique cache key string for the (X, Y | condition_set) triplet, agnostic to input type and argument order.
+        """
+
+        # Ensure all arguments are lists of int
+        def _flatten(idx):
+            if idx is None:
+                return []
+            elif isinstance(idx, (list, tuple)):
+                return [int(i) for i in idx]
+            else:
+                return [int(idx)]
+
+        Xs = _flatten(X)
+        Ys = _flatten(Y)
+        conds = _flatten(condition_set)
+
+        # Remove duplicates and sort for uniqueness in cache key
+        Xs = sorted(set(Xs))
+        Ys = sorted(set(Ys))
+        conds = sorted(set(conds))
+
+        # X, Y cannot be in condition_set
+        for v in Xs + Ys:
+            if v in conds:
+                raise ValueError(
+                    "get_formatted_XYZ_and_cachekey: variable in X or Y also appears in condition_set."
+                )
+        # Build a unique string cache key for memoization (order/overlap safe)
+        cache_key = f"{'.'.join(map(str, Xs))};{'.'.join(map(str, Ys))}|{'.'.join(map(str, conds)) if conds else ''}"
+
+        return Xs, Ys, conds, cache_key
+
     def __call__(self, X, Y, condition_set=None):
         """
         Main CI test interface - compatible with existing FedCDH calls
@@ -849,74 +910,67 @@ class SPN(CIT_Base):
         --------
         float : p-value ∈ (0,1), where p > α suggests independence
         """
-        # Format inputs using parent class utilities
-        Xs, Ys, condition_set, cache_key = self.get_formatted_XYZ_and_cachekey(
-            X, Y, condition_set
-        )
 
-        # Return cached result if available
+        # flatten all indices to Python int list
+        def _flatten(idx):
+            if idx is None:
+                return []
+            elif isinstance(idx, (list, tuple)):
+                return [int(i) for i in idx]
+            else:
+                return [int(idx)]
+
+        Xs = _flatten(X)
+        Ys = _flatten(Y)
+        conds = _flatten(condition_set)
+        all_indices = Xs + Ys + conds
+
+        # check index range
+        for idx in all_indices:
+            if not (0 <= idx < self.num_features):
+                raise IndexError(
+                    f"Index {idx} is out of bounds for feature size {self.num_features}"
+                )
+
+        # pass through standard pipeline (assume get_formatted_XYZ_and_cachekey auto-handles sorted sets)
+        Xs, Ys, conds, cache_key = self.get_formatted_XYZ_and_cachekey(Xs, Ys, conds)
+
         if cache_key in self.pvalue_cache:
             return self.pvalue_cache[cache_key]
 
+        # main CI computation logic...
         try:
-            # Sample subset for efficiency (maintains statistical validity)
             n_samples = min(self.sample_size_for_test, self.sample_size)
             sample_indices = np.random.choice(
                 self.sample_size, size=n_samples, replace=False
             )
             data_subset = self.data_tensor[sample_indices]
-
-            if condition_set:
-                # Conditional independence: X ⊥ Y | Z
-                xyz_dims = Xs + Ys + condition_set
-                xz_dims = Xs + condition_set
-                yz_dims = Ys + condition_set
-                z_dims = condition_set
-
-                # Compute marginal log-likelihoods via SPN
+            if conds:
+                xyz_dims = Xs + Ys + conds
+                xz_dims = Xs + conds
+                yz_dims = Ys + conds
+                z_dims = conds
                 ll_xyz = self._marginal_loglik(data_subset, xyz_dims).mean().item()
                 ll_xz = self._marginal_loglik(data_subset, xz_dims).mean().item()
                 ll_yz = self._marginal_loglik(data_subset, yz_dims).mean().item()
                 ll_z = self._marginal_loglik(data_subset, z_dims).mean().item()
-
-                # Independence test statistic
-                # Theory: Under independence, P(X,Y|Z) = P(X|Z)P(Y|Z)
-                # ⟺ P(X,Y,Z)P(Z) = P(X,Z)P(Y,Z)
-                # ⟺ log P(X,Y,Z) + log P(Z) = log P(X,Z) + log P(Y,Z)
                 independence_stat = ll_xyz + ll_z - ll_xz - ll_yz
-
+                ref_scale = max(abs(ll_xyz), 1e-6)
             else:
-                # Unconditional independence: X ⊥ Y
                 xy_dims = Xs + Ys
                 x_dims = Xs
                 y_dims = Ys
-
-                # Compute marginal log-likelihoods
                 ll_xy = self._marginal_loglik(data_subset, xy_dims).mean().item()
                 ll_x = self._marginal_loglik(data_subset, x_dims).mean().item()
                 ll_y = self._marginal_loglik(data_subset, y_dims).mean().item()
-
-                # Independence test statistic
-                # Theory: Under independence, P(X,Y) = P(X)P(Y)
-                # ⟺ log P(X,Y) = log P(X) + log P(Y)
                 independence_stat = ll_xy - ll_x - ll_y
+                ref_scale = max(abs(ll_xy), 1e-6)
 
-            # Statistical significance assessment
-            # Convert independence statistic to p-value
-            # Key insight: |stat| small → high p-value → independence
-            reference_scale = max(abs(ll_xyz if condition_set else ll_xy), 1e-6)
-            scaled_stat = abs(independence_stat) / reference_scale
-
-            # Robust p-value transformation
-            # Maps small deviations to high p-values (independence)
-            # Maps large deviations to low p-values (dependence)
-            p_value = np.exp(-2 * scaled_stat)  # Exponential decay transformation
+            scaled_stat = abs(independence_stat) / ref_scale
+            p_value = np.exp(-2 * scaled_stat)
             p_value = float(np.clip(p_value, 0.001, 0.999))
-
-            # Cache and return
             self.pvalue_cache[cache_key] = p_value
             return p_value
-
         except Exception as e:
             # Graceful error handling
             # Return neutral p-value to avoid breaking the discovery pipeline
