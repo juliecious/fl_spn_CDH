@@ -66,7 +66,7 @@ def CIT(data, method="fisherz", **kwargs):
             raise ImportError(
                 "SPN CI test requires simple_einet and pytorch. Please install: pip install torch simple-einet"
             )
-        return SPN(data, **kwargs)
+        return SPN(data, method_name=method, **kwargs)
     else:
         raise ValueError("Unknown method: {}".format(method))
 
@@ -739,79 +739,63 @@ class SPN(CIT_Base):
         self._initialize_and_train_spn()
 
     def _initialize_and_train_spn(self):
-        """
-        Initialize and train the EinsumNetwork
+        """Initialize and train the EinsumNetwork for SPN-based CI testing."""
+        # Check feature count
+        if self.num_features < 2:
+            raise ValueError(
+                f"SPN requires at least 2 features, got {self.num_features}"
+            )
 
-        Design rationale:
-        - Single joint model learns P(X1,X2,...,Xd)
-        - Leverages simple-einet's tractable marginal inference
-        - Auto-adjusts architecture based on data dimensionality
-        """
-        # Data normalization - critical for SPN numerical stability
+        # Data normalization
         self.scaler = StandardScaler()
         normalized_data = self.scaler.fit_transform(self.data)
+        if np.isnan(normalized_data).any() or np.isinf(normalized_data).any():
+            raise ValueError(
+                "SPN initialization: Normalized data contains NaN or Inf values."
+            )
         self.data_tensor = torch.FloatTensor(normalized_data)
 
-        # Architecture constraints enforcement
-        # simple-einet requires: 2^depth <= num_features
-        max_allowed_depth = int(np.floor(np.log2(self.num_features)))
-        actual_depth = min(self.spn_params["depth"], max_allowed_depth)
+        # Architecture parameters (conservative defaults)
+        max_allowed_depth = max(1, int(np.floor(np.log2(self.num_features))))
+        actual_depth = max(1, min(self.spn_params["depth"], max_allowed_depth))
+        num_sums = min(4, self.spn_params["num_sums"])
+        num_leaves = min(4, self.spn_params["num_leaves"])
+        num_repetitions = min(2, self.spn_params["num_repetitions"])
 
-        # Adaptive architecture sizing based on problem scale
-        if self.num_features <= 4:
-            # Small problems: deeper networks for expressiveness
-            num_sums = min(self.spn_params["num_sums"], 12)
-            num_leaves = min(self.spn_params["num_leaves"], 16)
-        else:
-            # Larger problems: wider but shallower for stability
-            num_sums = min(self.spn_params["num_sums"], 6)
-            num_leaves = min(self.spn_params["num_leaves"], 8)
-
-        # Configure EinsumNetwork
+        # Build EinsumNetwork config
         config = EinetConfig(
             num_features=self.num_features,
             depth=actual_depth,
             num_sums=num_sums,
             num_channels=1,
             num_leaves=num_leaves,
-            num_repetitions=self.spn_params["num_repetitions"],
+            num_repetitions=num_repetitions,
             num_classes=1,
-            dropout=self.spn_params["dropout"],
+            dropout=0.0,  # safer for stability
             leaf_type=Normal,
         )
-
         self.einet = Einet(config)
 
-        # Training procedure
-        optimizer = torch.optim.Adam(self.einet.parameters(), lr=self.spn_params["lr"])
-        scheduler = torch.optim.lr_scheduler.StepLR(optimizer, step_size=20, gamma=0.9)
-
-        # Training with early stopping
+        # Short training loop with early stopping
+        optimizer = torch.optim.Adam(self.einet.parameters(), lr=0.001)
         best_ll = float("-inf")
         patience = 0
-        max_patience = 15
+        max_patience = 3
+        n_epochs = min(5, self.spn_params.get("epochs", 10))  # For stability
 
-        for epoch in range(self.spn_params["epochs"]):
+        for epoch in range(n_epochs):
             optimizer.zero_grad()
-
-            # Compute joint log-likelihood
             log_lls = self.einet(self.data_tensor)
             loss = -log_lls.mean()
-
-            # Optimization step
             loss.backward()
             torch.nn.utils.clip_grad_norm_(self.einet.parameters(), 1.0)
             optimizer.step()
-            scheduler.step()
-
-            # Early stopping check
             current_ll = log_lls.mean().item()
             if current_ll > best_ll:
                 best_ll = current_ll
                 patience = 0
             else:
                 patience += 1
-
             if patience > max_patience:
                 break
 
