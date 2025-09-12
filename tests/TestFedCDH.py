@@ -20,10 +20,11 @@ import argparse
 
 np.set_printoptions(suppress=True, precision=3)
 
+
 # Simulation
-def test_fedCHD(i, n, K, d, s0, model):
+def test_fedCHD(i, n, K, d, s0, model, ci_method="kci"):
     set_random_seed(i)
-    print(f"Runing instance {i}.")
+    print(f"Running instance {i} with CI method: {ci_method}")
 
     c_indx = np.asarray(list(range(K)))
     c_indx = np.repeat(c_indx, n)
@@ -39,10 +40,37 @@ def test_fedCHD(i, n, K, d, s0, model):
         # General functional model.
         X, _ = my_simulate_general_hetero(true_DAG_bin, K, n * K, sem_type)
 
+    # Select CI test method
     start = time.time()
-    cg = cdnod(X, c_indx, K, 0.05, kci, True, 0, -1)
+    if ci_method.lower() == "spn":
+        # Pass SPN-specific parameters
+        cg = cdnod(
+            X,
+            c_indx,
+            K,
+            alpha=0.05,
+            indep_test="spn",
+            stable=True,
+            uc_rule=0,
+            uc_priority=-1,
+            epochs=60,
+            lr=0.01,
+        )  # SPN-specific kwargs
+    else:
+        # Use traditional methods
+        cg = cdnod(
+            X,
+            c_indx,
+            K,
+            alpha=0.05,
+            indep_test=ci_method,
+            stable=True,
+            uc_rule=0,
+            uc_priority=-1,
+        )
     end = time.time()
 
+    # Extract results
     est_graph = np.zeros((d, d))
     est_graph = cg.G.graph[0:d, 0:d]
     est_cpdag = get_cpdag_from_cdnod(
@@ -58,30 +86,81 @@ def test_fedCHD(i, n, K, d, s0, model):
     # Directed graph: F1, recall, precision, SHD
     ret_diretion = count_dag_accuracy(true_DAG_bin, est_dag_from_pdag)
 
+    # Combine results
     result = {}
     result.update(ret_skeleton)
     result.update(ret_diretion)
     result["time"] = end - start
     print("")
+
     return result
 
 
 def main(args):
+    """
+    Main evaluation function with CI method comparison
+    """
+    print("=" * 60)
+    print("FEDCDH EVALUATION WITH CONFIGURABLE CI METHODS")
+    print("=" * 60)
+    print(f"Configuration:")
+    print(f"  N={args.N}, d={args.d}, K={args.K}, n={args.n}")
+    print(f"  Model: {args.model}, CI Method: {args.ci_method}")
+    print()
+
     res_list = []
+    successful_runs = 0
+
     for i in range(args.N):
-        res = test_fedCHD(i, args.n, args.K, args.d, args.d, args.model)  # a dictionary
-        res_val = list(res.values())
-        if None in res_val:
-            print("Error! None in results!")
-        else:
-            res_list.append(res_val)
+        try:
+            res = test_fedCHD(
+                i, args.n, args.K, args.d, args.d, args.model, args.ci_method
+            )
+            res_val = list(res.values())
+
+            if None in res_val:
+                print(f"Warning: None values in results for instance {i}")
+            else:
+                res_list.append(res_val)
+                successful_runs += 1
+
+        except Exception as e:
+            print(f"Error in instance {i}: {e}")
+            continue
+
+    if successful_runs == 0:
+        print("No successful runs!")
+        return
+
+    # Compute statistics
     res_list = np.array(res_list)
-    avg = np.mean(res_list, axis=0)  # skeleton, orientation
+
+    avg = np.mean(res_list, axis=0)
     std = np.std(res_list, axis=0)
 
-    print("########## Measurement: ", list(res.keys()))
-    print("########## Average:     ", avg)
-    print("########## Std:         ", std)
+    # Print results
+    result_keys = [k for k in res.keys() if k != "ci_method"]
+    print("=" * 60)
+    print("FINAL RESULTS")
+    print("=" * 60)
+    print(f"Successful runs: {successful_runs}/{args.N}")
+    print(f"CI Method: {args.ci_method.upper()}")
+    print()
+    print("Metrics:", result_keys)
+    print("Average:", avg)
+    print("Std Dev:", std)
+
+    # Key metrics summary
+    skeleton_f1_idx = next(i for i, k in enumerate(result_keys) if "f1_skeleton" in k)
+    direction_f1_idx = next(i for i, k in enumerate(result_keys) if k == "f1")
+
+    time_idx = next(i for i, k in enumerate(result_keys) if k == "time")
+
+    print()
+    print("SUMMARY:")
+    print(f"  Skeleton F1: {avg[skeleton_f1_idx]:.3f} ± {std[skeleton_f1_idx]:.3f}")
+    print(f"  Direction F1: {avg[direction_f1_idx]:.3f} ± {std[direction_f1_idx]:.3f}")
+    print(f"  Average Runtime: {avg[time_idx]:.2f}s ± {std[time_idx]:.2f}s")
 
 
 def main_without_args(N, d, K, n, model):
@@ -103,19 +182,33 @@ def main_without_args(N, d, K, n, model):
 
 
 if __name__ == "__main__":
-    parser = argparse.ArgumentParser(description="Federated Causal Discovery")  # Mode
-    parser.add_argument("--N", default=5, type=int, help="number of instances")
-    parser.add_argument("--d", default=3, type=int, help="number of variables")
-    parser.add_argument("--K", default=5, type=int, help="number of clients")
+    parser = argparse.ArgumentParser(
+        description="Federated Causal Discovery with Configurable CI Tests"
+    )
+
+    # Existing parameters
+    parser.add_argument("--N", default=10, type=int, help="Number of test instances")
+    parser.add_argument("--d", default=6, type=int, help="Number of variables")
+    parser.add_argument("--K", default=10, type=int, help="Number of federated clients")
     parser.add_argument(
-        "--n", default=10, type=int, help="number of samples in one client"
+        "--n", default=100, type=int, help="Number of samples per client"
     )
     parser.add_argument(
         "--model",
         default="linear",
         type=str,
-        help="generated functional model, linear or general",
+        help="Data generation model: linear or general",
     )
+
+    # New CI method selection parameter
+    parser.add_argument(
+        "--ci_method",
+        default="kci",
+        type=str,
+        choices=["kci", "spn", "gmm"],
+        help="Conditional independence test method: kci (traditional) or spn (Sum-Product Networks)",
+    )
+
     args = parser.parse_args()
     main(args)
 
