@@ -205,8 +205,8 @@ if __name__ == "__main__":
         "--ci_method",
         default="kci",
         type=str,
-        choices=["kci", "spn", "gmm"],
-        help="Conditional independence test method: kci (traditional) or spn (Sum-Product Networks)",
+        choices=["kci", "spn", "gsq"],
+        help="Conditional independence test method: kci (traditional), gsq, or spn (Sum-Product Networks)",
     )
 
     args = parser.parse_args()

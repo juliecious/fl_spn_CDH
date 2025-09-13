@@ -13,7 +13,6 @@ def test_spn_cit_basic():
     print("SPN CI basic test passed!")
 
     # Generate reproducible random toy data (n samples, d dimensions)
-    np.random.seed(0)
     n, d = 100, 4
     X = np.random.randn(n, d)
 
@@ -148,7 +147,112 @@ def test_spn_pvalue_variety():
     print("=" * 60)
 
 
+def test_cit_spn_pipeline():
+    # Synthetic test data
+    n, d = 120, 4
+    X = np.random.randn(n, d)
+    # Design correlation: let variable 1 almost copy variable 0
+    X[:, 1] = X[:, 0] + np.random.randn(n) * 0.05
+
+    spn_kwargs = dict(
+        method="spn",
+        epochs=5,
+        depth=2,
+        num_sums=4,
+        num_leaves=4,
+        num_repetitions=2,
+        dropout=0.0,
+        lr=0.001,
+    )
+
+    # --- Use CIT factory to create the SPN object ---
+    # This is the standard pipeline in your repo!
+    print("Testing CIT(spn)...")
+    ci_test = CIT(X, **spn_kwargs)
+
+    # --- Test unconditional independence ---
+    p01 = ci_test(0, 1, [])
+    p02 = ci_test(0, 2, [])
+    p13 = ci_test(1, 3, [])
+    # Conditional independence
+    p01_c2 = ci_test(0, 1, [2])
+    p01_c3 = ci_test([0], [1], [3])  # List interface (full pipeline check)
+    p20 = ci_test([2], [0], [])
+
+    print(f"CIT(SPN) p(0,1|[]) = {p01:.4f}")
+    print(f"CIT(SPN) p(0,2|[]) = {p02:.4f}")
+    print(f"CIT(SPN) p(1,3|[]) = {p13:.4f}")
+    print(f"CIT(SPN) p(0,1|[2]) = {p01_c2:.4f}")
+    print(f"CIT(SPN) p([0],[1]|[3]) = {p01_c3:.4f}")
+    print(f"CIT(SPN) p([2],[0]|[]) = {p20:.4f}")
+
+    # Results should all be within [0,1]
+    for p in [p01, p02, p13, p01_c2, p01_c3, p20]:
+        assert 0.0 <= p <= 1.0, "p-value out of valid range!"
+    # p(0,1|[]) (dependent) should differ from p(0,2|[]) (independent)
+    assert abs(p01 - p02) > 0.01, "SPN p-values did not react to true data structure!"
+    print("CIT(SPN) pipeline test passed.")
+    print("=" * 60)
+
+
+def test_cit_all_methods():
+    # Generate synthetic data with dependence and independence
+    np.random.seed(42)
+    n, d = 120, 4
+    X = np.random.randn(n, d)
+    # Make variable 1 strongly correlated with variable 0
+    X[:, 1] = X[:, 0] + 0.1 * np.random.randn(n)
+    # Variable 2 is independent
+
+    methods = [
+        dict(method="kci"),  # Kernel-based
+        dict(method="gsq"),  # G-squared (categorical)
+        dict(
+            method="spn",
+            epochs=5,
+            depth=2,
+            num_sums=4,
+            num_leaves=4,
+            num_repetitions=2,
+            dropout=0.0,
+            lr=0.001,
+        ),  # SPN config
+    ]
+    method_names = ["KCI", "GSQ", "SPN"]
+    X_gsq = (X * 2).astype(int)
+    results = {}
+
+    for method, name in zip(methods, method_names):
+        print(f"\nTesting method: {name}")
+        data = X_gsq if name == "GSQ" else X
+        ci_test = CIT(data, **method)
+        res = {}
+        # --- For old backend: use int,int,[list], for SPN: also check list/list/list
+        res["p(0,1|[])"] = ci_test(0, 1, [])
+        res["p(0,2|[])"] = ci_test(0, 2, [])
+        res["p(0,1|[2])"] = ci_test(0, 1, [2])
+        if name == "SPN":
+            res["p([0],[1]|[3])"] = ci_test([0], [1], [3])
+        else:
+            # For old-style, stick to ints otherwise might crash
+            res["p(1,3|[2])"] = ci_test(1, 3, [2])
+        for key, val in res.items():
+            print(f"{name} {key} = {val:.4f}")
+            assert 0.0 <= val <= 1.0
+        results[name] = res
+
+    # Ensures methods are not all always identical (if so, bug in dispatch)
+    vals = [tuple(i.values()) for i in results.values()]
+    assert any(
+        vals[0] != v for v in vals[1:]
+    ), "All methods returned identical p-values? Check method dispatch logic!"
+
+    print("\nMulti-method CIT pipeline (KCI, GSQ, SPN) test passed.")
+
+
 if __name__ == "__main__":
-    test_spn_cit_basic()
-    test_spn_pipeline_integrity()
-    test_spn_pvalue_variety()
+    # test_spn_cit_basic()
+    # test_spn_pipeline_integrity()
+    # test_spn_pvalue_variety()
+    # test_cit_spn_pipeline()
+    test_cit_all_methods()
