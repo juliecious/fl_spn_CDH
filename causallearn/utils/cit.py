@@ -331,6 +331,7 @@ class KCI(CIT_Base):
                 )[0]
 
         self.pvalue_cache[cache_key] = p
+        print(f"\t KCI p_value: {p}")
         return p
 
 
@@ -740,6 +741,8 @@ class SPN(CIT_Base):
 
     def _initialize_and_train_spn(self):
         """Initialize and train the EinsumNetwork for SPN-based CI testing."""
+        torch.set_num_threads(1)
+        torch.set_default_dtype(torch.float32)
         # Check feature count
         if self.num_features < 2:
             raise ValueError(
@@ -886,7 +889,7 @@ class SPN(CIT_Base):
 
         return Xs, Ys, conds, cache_key
 
-    def __call__(self, X, Y, condition_set=None):
+    def __call__(self, X, Y, condition_set=None, *args, **kwargs):
         """
         SPN-based Conditional Independence Test with Bootstrap P-value
 
@@ -1096,6 +1099,7 @@ class SPN(CIT_Base):
 
             # Cache result
             self.pvalue_cache[cache_key] = p_value
+            print(f"\t SPN p_value: {p_value}")
             return p_value
 
         except Exception as e:

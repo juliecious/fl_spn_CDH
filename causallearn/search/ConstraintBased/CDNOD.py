@@ -174,7 +174,7 @@ def cdnod_alg(
     data : data set (numpy ndarray), shape (n_samples, n_features). The input data, where n_samples is the number of samples and n_features is the number of features.
     alpha : desired significance level (float) in (0, 1)
     indep_test : name of the independence test being used
-            [fisherz, chisq, gsq, mv_fisherz, kci]
+            [fisherz, chisq, gsq, mv_fisherz, kci, spn]
            - "Fisher_Z": Fisher's Z conditional independence test
            - "Chi_sq": Chi-squared conditional independence test
            - "G_sq": G-squared conditional independence test
@@ -205,7 +205,6 @@ def cdnod_alg(
     """
 
     start = time.time()
-
     data_aug = np.concatenate((data, c_indx), axis=1)
     indep_test_all = CIT(data_aug, indep_test, **kwargs)
 
@@ -228,7 +227,7 @@ def cdnod_alg(
         2: fed cdnod voting-based;
     """
     flag = -1
-    print(f"#######  Skeleton Discovery Stage 1: No surrogate. Flag={flag}")
+    print(f"*****#######  Skeleton Discovery Stage 1: No surrogate. Flag={flag}")
     cg_0 = SkeletonDiscovery.skeleton_discovery(
         flag, cg_list, data, K, alpha, indep_test_all, stable
     )
@@ -253,7 +252,7 @@ def cdnod_alg(
         4: fed cdnod GMM-based.
     """
     flag = -1
-    print(f"#######  Skeleton Discovery Stage 2: with surrogate. Flag={flag}")
+    print(f"*****#######  Skeleton Discovery Stage 2: with surrogate. Flag={flag}")
     cg_1 = SkeletonDiscovery.skeleton_discovery_with_surrogate_GMM(
         flag, cg_0, cg_list, data_aug, K, alpha, indep_test_all, stable
     )
@@ -312,7 +311,7 @@ def cdnod_alg(
     Stage 3: Independent change. Use HSIC
     This code is devoloped based on CDNOD long-version paper and their MATLAB code.
     """
-    print("#######  Direction ditermination: using HSIC.")
+    print("#######  Direction determination: using HSIC.")
     # 1. Find all undirected edges. d=obs+sur
     # 1.1 Get undirected edges from all surrogate variables.
     vh = []  # variables in heteregeneity.

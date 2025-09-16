@@ -4,10 +4,11 @@ sys.path.append("")
 import numpy as np
 from causallearn.search.ConstraintBased.CDNOD import cdnod
 from causallearn.utils.cit import kci
-from causallearn.utils.data_utils import set_random_seed, simulate_dag
 from causallearn.utils.data_utils import (
     my_simulate_general_hetero,
     my_simulate_linear_gaussian,
+    set_random_seed,
+    simulate_dag,
 )
 from causallearn.utils.data_utils import count_skeleton_accuracy
 from causallearn.utils.data_utils import (
