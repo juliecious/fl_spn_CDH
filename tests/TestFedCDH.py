@@ -188,11 +188,11 @@ if __name__ == "__main__":
     )
 
     # Existing parameters
-    parser.add_argument("--N", default=10, type=int, help="Number of test instances")
+    parser.add_argument("--N", default=3, type=int, help="Number of test instances")
     parser.add_argument("--d", default=6, type=int, help="Number of variables")
-    parser.add_argument("--K", default=10, type=int, help="Number of federated clients")
+    parser.add_argument("--K", default=2, type=int, help="Number of federated clients")
     parser.add_argument(
-        "--n", default=100, type=int, help="Number of samples per client"
+        "--n", default=1000, type=int, help="Number of samples per client"
     )
     parser.add_argument(
         "--model",
@@ -204,7 +204,7 @@ if __name__ == "__main__":
     # New CI method selection parameter
     parser.add_argument(
         "--ci_method",
-        default="kci",
+        default="spn",
         type=str,
         choices=["kci", "spn", "gsq"],
         help="Conditional independence test method: kci (traditional), gsq, or spn (Sum-Product Networks)",
