@@ -16,7 +16,7 @@ logging.basicConfig(
 )
 
 # Generate a centralized test data
-d, s0 = 8, 2
+d, s0, K = 8, 2, 1
 sample_num = 5_000
 graph_type, sem_type = "ER", "gauss"
 true_DAG_bin = simulate_dag(d, s0, graph_type)  # 產生隨機因果結構

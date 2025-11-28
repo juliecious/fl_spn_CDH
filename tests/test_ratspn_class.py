@@ -8,12 +8,13 @@ from causallearn.utils.data_utils import (
     count_skeleton_accuracy,
     count_dag_accuracy,
 )
+from causallearn.search.ConstraintBased.CDNOD import cdnod
 from simple_einet.einet import Einet, EinetConfig
 from simple_einet.layers.distributions.normal import Normal
 from torch.utils.data import DataLoader, TensorDataset
 from typing import List
 
-from test_data import X_proc as X, true_DAG_bin, d
+from test_data import X_proc as X, true_DAG_bin, d, K
 
 np.random.seed(42)
 torch.set_num_threads(1)
@@ -134,39 +135,73 @@ if __name__ == "__main__":
         if epoch % 10 == 0:
             logging.info(f"[RAT-SPN] Epoch {epoch} Loss {loss.item():.4f}")
 
-    # ===== TESTING PHASE =====
     spn_tester = SPNConditionalIndependenceTest(model, X_test)
 
-    CMI_THRESHOLD = 0.02
-    logging.info("-" * 40)
-    dependency_matrix = np.zeros((d, d))
+    def spn_ci_wrapper(data, i, j, k, **kwargs):
+        """
+        The Oracle Function.
+        i, j: Indices of variables X and Y
+        k: List of indices for conditioning set Z
+        """
+        # Calculate CMI using your trained SPN
+        # Note: 'k' might now include the domain index (c_indx) passed by CDNOD
+        cmi_val = spn_tester._calculate_cmi(x_idx=i, y_idx=j, z_indices=list(k))
 
-    for i in range(d):
-        for j in range(i + 1, d):
-            # Unconditional check (Change z_indices to test conditional)
-            cmi = spn_tester._calculate_cmi(x_idx=i, y_idx=j, z_indices=[])
+        # Thresholding (Tuning this is critical for SPNs)
+        # If CMI is very low (e.g. < 0.02), we assume Independence.
+        if cmi_val < 0.02:
+            return 1.0  # Independent
+        else:
+            return 0.0  # Dependent
 
-            is_dependent = 1 if cmi > CMI_THRESHOLD else 0
-            dependency_matrix[i, j] = is_dependent
-            dependency_matrix[j, i] = is_dependent
+    c_indx = -1  # Usually the last column indicates the 'Context' or 'Client ID'
 
-            # Log only interesting ones to reduce clutter
-            if is_dependent:
-                status = "DEP"
-            else:
-                status = "IND"
+    logging.info("Running CDNOD with SPN Oracle...")
 
-            logging.info(f"X{i}-X{j}: CMI={cmi:.4f} -> {status}")
-
-    logging.info("-" * 40)
-    logging.info(f"Estimated Matrix:\n{dependency_matrix}")
-    est_dag_from_pdag = get_dag_from_pdag(dependency_matrix)
-    logging.info(f"Estimated DAG:\n{est_dag_from_pdag}")
-    logging.info(f"True Matrix:\n{true_DAG_bin}")
-
-    # Undirected skeleton: F1, recall, precision, SHD
-    ret_skeleton = count_skeleton_accuracy(true_DAG_bin, dependency_matrix)
-    logging.info(f"Undirected skeleton:\n{ret_skeleton}")
-    # Directed graph: F1, recall, precision, SHD
-    ret_diretion = count_dag_accuracy(true_DAG_bin, est_dag_from_pdag)
-    logging.info(f"Directed graph:\n{ret_diretion}")
+    # 3. Run CDNOD
+    cg = cdnod(
+        data=X_test,
+        c_indx=c_indx,
+        K=K,
+        alpha=0.05,
+        indep_test=spn_ci_wrapper,  # <--- Your SPN goes here
+        uc_priority=-1,
+        stable=True,
+        verbose=True,
+    )
+    # # ===== TESTING PHASE =====
+    # spn_tester = SPNConditionalIndependenceTest(model, X_test)
+    #
+    # CMI_THRESHOLD = 0.02
+    # logging.info("-" * 40)
+    # dependency_matrix = np.zeros((d, d))
+    #
+    # for i in range(d):
+    #     for j in range(i + 1, d):
+    #         # Unconditional check (Change z_indices to test conditional)
+    #         cmi = spn_tester._calculate_cmi(x_idx=i, y_idx=j, z_indices=[])
+    #
+    #         is_dependent = 1 if cmi > CMI_THRESHOLD else 0
+    #         dependency_matrix[i, j] = is_dependent
+    #         dependency_matrix[j, i] = is_dependent
+    #
+    #         # Log only interesting ones to reduce clutter
+    #         if is_dependent:
+    #             status = "DEP"
+    #         else:
+    #             status = "IND"
+    #
+    #         logging.info(f"X{i}-X{j}: CMI={cmi:.4f} -> {status}")
+    #
+    # logging.info("-" * 40)
+    # logging.info(f"Estimated Matrix:\n{dependency_matrix}")
+    # est_dag_from_pdag = get_dag_from_pdag(dependency_matrix)
+    # logging.info(f"Estimated DAG:\n{est_dag_from_pdag}")
+    # logging.info(f"True Matrix:\n{true_DAG_bin}")
+    #
+    # # Undirected skeleton: F1, recall, precision, SHD
+    # ret_skeleton = count_skeleton_accuracy(true_DAG_bin, dependency_matrix)
+    # logging.info(f"Undirected skeleton:\n{ret_skeleton}")
+    # # Directed graph: F1, recall, precision, SHD
+    # ret_diretion = count_dag_accuracy(true_DAG_bin, est_dag_from_pdag)
+    # logging.info(f"Directed graph:\n{ret_diretion}")

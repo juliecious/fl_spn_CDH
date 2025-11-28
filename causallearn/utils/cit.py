@@ -1,8 +1,12 @@
+import logging
 import os, json, codecs, time, hashlib
 import numpy as np
 from math import log, sqrt
 from collections.abc import Iterable
 from scipy.stats import chi2, norm
+from typing import List
+
+from torch.utils.data import DataLoader, TensorDataset
 
 from causallearn.utils.KCI.KCI import (
     KCI_CInd,
@@ -15,15 +19,13 @@ from causallearn.utils.KCI.KCI import (
 )
 from causallearn.utils.PCUtils import Helper
 
-try:
-    import torch
-    from sklearn.preprocessing import StandardScaler
-    from simple_einet.einet import Einet, EinetConfig
-    from simple_einet.layers.distributions.normal import Normal
+import torch
+from sklearn.preprocessing import StandardScaler
+from simple_einet.einet import Einet, EinetConfig
+from simple_einet.layers.distributions.normal import Normal
 
-    SPN_AVAILABLE = True
-except ImportError:
-    SPN_AVAILABLE = False
+torch.set_num_threads(1)
+torch.set_default_dtype(torch.float32)
 
 
 CONST_BINCOUNT_UNIQUE_THRESHOLD = 1e5
@@ -62,11 +64,7 @@ def CIT(data, method="fisherz", **kwargs):
     elif method == d_separation:
         return D_Separation(data, **kwargs)
     elif method == spn:
-        if not SPN_AVAILABLE:
-            raise ImportError(
-                "SPN CI test requires simple_einet and pytorch. Please install: pip install torch simple-einet"
-            )
-        return SPN(data, method_name=method, **kwargs)
+        return SPN(data, **kwargs)
     else:
         raise ValueError("Unknown method: {}".format(method))
 
@@ -697,295 +695,127 @@ class D_Separation(CIT_Base):
 
 
 class SPN(CIT_Base):
-    """
-    Sum-Product Network based Conditional Independence Test
-
-    This class leverages EinsumNetworks (simple-einet) for tractable
-    probabilistic inference, replacing kernel-based summary statistics
-    with exact marginal likelihood computation.
-
-    Key advantages over kernel methods:
-    1. Tractable inference: O(network_size) vs O(n^3) for kernel methods
-    2. Exact marginalization: Uses nan-based marginalization for proper P(X_subset)
-    3. Scalable: Network parameters fixed, independent of sample size
-    4. Theoretically sound: Based on exact probabilistic inference
-    """
-
-    def __init__(self, data, **kwargs):
+    def __init__(
+        self,
+        data: np.ndarray,
+        threshold: float = 0.015,
+        device: str = "cpu",
+        num_sums: int = 5,
+        num_leaves: int = 10,
+        num_repetitions: int = 5,
+        depth: int = 3,
+        dropout: float = 0.0,
+        **kwargs,
+    ):
         super().__init__(data, **kwargs)
+        self.device = device
+        self.threshold = threshold
+        self.data = (
+            data  # Keep reference if needed by CIT_Base, but we use tensor below
+        )
+        self.method = "spn"
 
-        # Extract and validate SPN parameters
-        spn_params = {
-            "epochs": kwargs.get("epochs", 100),
-            "lr": kwargs.get("lr", 0.01),
-            "depth": kwargs.get("depth", 2),
-            "num_sums": kwargs.get("num_sums", 8),
-            "num_leaves": kwargs.get("num_leaves", 12),
-            "num_repetitions": kwargs.get("num_repetitions", 6),
-            "dropout": kwargs.get("dropout", 0.0),
-        }
-
-        # Setup cache consistency
-        params_hash = hashlib.md5(
-            json.dumps(spn_params, sort_keys=True).encode("utf-8")
-        ).hexdigest()
-        self.check_cache_method_consistent("spn", params_hash)
-        self.assert_input_data_is_valid()
-
-        # Store parameters
-        self.spn_params = spn_params
-        self.sample_size_for_test = min(200, self.sample_size // 2)
-
-        # Train the model immediately upon initialization
-        self._initialize_and_train_spn()
-
-    def _initialize_and_train_spn(self):
-        """Initialize and train the EinsumNetwork for SPN-based CI testing."""
-        torch.set_num_threads(1)
-        torch.set_default_dtype(torch.float32)
-        # Check feature count
-        if self.num_features < 2:
-            raise ValueError(
-                f"SPN requires at least 2 features, got {self.num_features}"
-            )
-
-        # Data normalization
-        self.scaler = StandardScaler()
-        normalized_data = self.scaler.fit_transform(self.data)
-        if np.isnan(normalized_data).any() or np.isinf(normalized_data).any():
-            raise ValueError(
-                "SPN initialization: Normalized data contains NaN or Inf values."
-            )
-        self.data_tensor = torch.FloatTensor(normalized_data)
-
-        # 基於論文的架構參數
-        actual_depth = min(3, int(np.floor(np.log2(self.num_features))))
-        num_sums = min(10, self.spn_params.get("num_sums", 8))
-        num_leaves = min(12, self.spn_params.get("num_leaves", 12))
-        num_repetitions = min(6, self.spn_params.get("num_repetitions", 6))
-
+        # 1. Initialize SPN Model
+        num_features = data.shape[1]
         config = EinetConfig(
-            num_features=self.num_features,
-            depth=actual_depth,
-            num_sums=num_sums,
+            num_features=num_features,
             num_channels=1,
+            num_sums=num_sums,
             num_leaves=num_leaves,
             num_repetitions=num_repetitions,
             num_classes=1,
-            dropout=self.spn_params.get("dropout", 0.0),
+            depth=depth,
+            dropout=dropout,
             leaf_type=Normal,
+            layer_type="linsum",
+            structure="top-down",
         )
+        self.model = Einet(config).to(self.device)
 
-        self.einet = Einet(config)
+        # 2. Train Immediately (Standard CIT usually assumes ready-to-use)
+        self._train_model(data)
 
-        # 改進的訓練策略
-        optimizer = torch.optim.Adam(self.einet.parameters(), lr=0.0005)
-        scheduler = torch.optim.lr_scheduler.ReduceLROnPlateau(
-            optimizer, patience=20, factor=0.5, verbose=True
+        # 3. Prepare Inference Data
+        # For a standard CIT, we usually test on the same data provided,
+        # or you can modify this to accept a separate 'test' set if needed.
+        self.data_tensor = torch.tensor(data, dtype=torch.float32).to(self.device)
+
+    def _init_and_train_model(self):
+        num_features = self.data.shape[1]
+        config = EinetConfig(
+            num_features=num_features,
+            num_channels=1,
+            num_sums=5,
+            num_leaves=10,
+            num_repetitions=5,
+            num_classes=1,
+            depth=int(np.ceil(np.log2(num_features))),
+            dropout=0.0,
+            leaf_type=Normal,
+            layer_type="linsum",
+            structure="top-down",
         )
+        return Einet(config)
 
-        batch_size = min(100, len(self.data_tensor) // 4)
-        from torch.utils.data import DataLoader, TensorDataset
-
-        dataloader = DataLoader(
-            TensorDataset(self.data_tensor), batch_size=batch_size, shuffle=True
-        )
-
-        best_ll = float("-inf")
-        patience = 0
-        max_patience = 50
-        n_epochs = min(200, self.spn_params.get("epochs", 150))
-
-        for epoch in range(n_epochs):
-            epoch_loss = 0
-            epoch_ll = 0
-
-            for (batch_data,) in dataloader:
-                optimizer.zero_grad()
-                log_lls = self.einet(batch_data)
-                loss = -log_lls.mean()
-                loss.backward()
-                torch.nn.utils.clip_grad_norm_(self.einet.parameters(), 1.0)
-                optimizer.step()
-
-                epoch_loss += loss.item()
-                epoch_ll += log_lls.mean().item()
-
-            avg_ll = epoch_ll / len(dataloader)
-            scheduler.step(-avg_ll)  # 使用負對數似然作為調度指標
-
-            if epoch % 20 == 0:
-                print(
-                    f"[RAT-SPN] Epoch {epoch} Loss {epoch_loss / len(dataloader):.4f} "
-                    f"LogLL {avg_ll:.4f} Patience {patience}"
-                )
-
-            if avg_ll > best_ll:
-                best_ll = avg_ll
-                patience = 0
-            else:
-                patience += 1
-
-            if patience > max_patience:
-                print(f"[SPN] Early stopping at epoch {epoch}")
-                break
-
-    def _marginal_loglik(self, data_tensor, keep_dims):
+    def __call__(
+        self, x_idx: int, y_idx: int, z_indices: List[int], *args, **kwargs
+    ) -> float:
         """
-        Compute marginal log-likelihood using nan-marginalization
+        The wrapper method required by causallearn (PC/CDNOD).
 
-        This replaces traditional kernel-based marginal estimation
-        with exact SPN marginal computation - a key innovation.
-
-        Parameters:
-        -----------
-        data_tensor : torch.Tensor
-            Input data tensor
-        keep_dims : list
-            Dimensions to keep observed (others set to nan)
+        Args:
+            x_idx: Index of first variable.
+            y_idx: Index of second variable.
+            z_indices: List of indices for the conditioning set.
 
         Returns:
-        --------
-        torch.Tensor : Marginal log-likelihoods
+            p_value: 1.0 if Independent (CMI < Threshold), 0.0 if Dependent.
         """
-        # Create marginalization tensor: observed dims keep values, others become nan
-        marginalized_tensor = torch.full_like(data_tensor, float("nan"))
-        marginalized_tensor[:, keep_dims] = data_tensor[:, keep_dims]
+        # 1. Calculate Conditional Mutual Information
+        cmi_score = self._calculate_cmi(x_idx, y_idx, list(z_indices))
 
-        # EinsumNetwork computes exact marginal likelihood for nan features
-        with torch.no_grad():
-            loglik = self.einet(marginalized_tensor)
-            if torch.isnan(loglik).any():
-                print("Warning: SPN produced NaN log-likelihoods. Check data/scaling.")
-            return loglik
+        # 2. Thresholding (Pseudo p-value generation)
+        if cmi_score < self.threshold:
+            return 1.0  # Independent (Fail to reject H0)
+        else:
+            return 0.0  # Dependent (Reject H0)
 
-    def get_formatted_XYZ_and_cachekey(self, X, Y, condition_set):
-        """
-        Normalize X, Y, and condition_set to sorted int lists, check for invalid overlaps,
-        and generate a unique string cache key. Compatible with both single integer and iterable input for all arguments.
-
-        This function ensures:
-            1. All inputs (X, Y, condition_set) are converted to Python lists of int.
-            2. Duplicates are removed and indices are sorted for consistency.
-            3. X and Y do not overlap with condition_set; raises ValueError if overlap exists.
-            4. Returns a unique, order-agnostic cache key for memoization, invariant to input type and order.
-
-        Parameters
-        ----------
-        X : int, Iterable[int], or np.*int*
-            Indices of the first variable(s). Accepts a single int or any iterable of ints.
-        Y : int, Iterable[int], or np.*int*
-            Indices of the second variable(s). Accepts a single int or any iterable of ints.
-        condition_set : int, Iterable[int], or np.*int*
-            Conditioning variable indices. Accepts a single int or any iterable of ints.
-
-        Returns
-        -------
-        Xs : List[int]
-            Sorted list of unique indices for X. Always a list, even if a single variable.
-        Ys : List[int]
-            Sorted list of unique indices for Y. Always a list, even if a single variable.
-        condition_set : List[int]
-            Sorted list of unique conditioning indices.
-        cache_key : str
-            Unique cache key string for the (X, Y | condition_set) triplet, agnostic to input type and argument order.
-        """
-
-        # Ensure all arguments are lists of int
-        def _flatten(idx):
-            if idx is None:
-                return []
-            elif isinstance(idx, (list, tuple)):
-                return [int(i) for i in idx]
-            else:
-                return [int(idx)]
-
-        Xs = _flatten(X)
-        Ys = _flatten(Y)
-        conds = _flatten(condition_set)
-
-        # Remove duplicates and sort for uniqueness in cache key
-        Xs = sorted(set(Xs))
-        Ys = sorted(set(Ys))
-        conds = sorted(set(conds))
-
-        # X, Y cannot be in condition_set
-        for v in Xs + Ys:
-            if v in conds:
-                raise ValueError(
-                    "get_formatted_XYZ_and_cachekey: variable in X or Y also appears in condition_set."
-                )
-        # Build a unique string cache key for memoization (order/overlap safe)
-        cache_key = f"{'.'.join(map(str, Xs))};{'.'.join(map(str, Ys))}|{'.'.join(map(str, conds)) if conds else ''}"
-
-        return Xs, Ys, conds, cache_key
-
-    def __call__(self, X, Y, condition_set=None, *args, **kwargs):
-        num_permutations = 1000
-
-        Xs, Ys, condition_set, cache_key = self.get_formatted_XYZ_and_cachekey(
-            X, Y, condition_set
+    def _train_model(self, X_train):
+        """Internal training loop."""
+        logging.info("[SPN] Training internal Einet model...")
+        train_tensor = torch.tensor(X_train, dtype=torch.float32).to(self.device)
+        loader = DataLoader(TensorDataset(train_tensor), batch_size=128, shuffle=True)
+        optimizer = torch.optim.Adam(
+            self.model.parameters(), lr=0.01, weight_decay=1e-4
         )
-        if cache_key in self.pvalue_cache:
-            return self.pvalue_cache[cache_key]
 
-        try:
-            # Draw a subset for speed
-            n_samples = min(self.sample_size_for_test, self.sample_size)
-            sample_indices = np.random.choice(
-                self.sample_size, size=n_samples, replace=False
-            )
-            data_subset = self.data_tensor[sample_indices]
-            idx_x = Xs
-            idx_y = Ys
-            idx_z = condition_set
+        self.model.train()
+        loss = 0.0
+        for epoch in range(50):  # Fixed epochs for CIT convenience
+            for (batch,) in loader:
+                optimizer.zero_grad()
+                loss = -self.model(batch).mean()
+                loss.backward()
+                optimizer.step()
+            if epoch % 10 == 0:
+                logging.info(f"[RAT-SPN] Epoch {epoch} Loss {loss.item():.4f}")
+        self.model.eval()
 
-            # Compute test statistic: e.g., log-likelihood diff (dependent - independent)
-            keep_xyz = np.array(idx_x + idx_y + idx_z)
-            keep_xz = np.array(idx_x + idx_z)
-            keep_yz = np.array(idx_y + idx_z)
-            keep_z = np.array(idx_z)
-            ll_xyz = self._marginal_loglik(data_subset, keep_xyz).mean().item()
-            ll_xz = self._marginal_loglik(data_subset, keep_xz).mean().item()
-            ll_yz = self._marginal_loglik(data_subset, keep_yz).mean().item()
-            ll_z = (
-                self._marginal_loglik(data_subset, keep_z).mean().item()
-                if len(keep_z) > 0
-                else 0.0
-            )
+    def _get_log_prob(self, current_vars: List[int]):
+        """Marginalize and compute Log-Likelihood."""
+        batch = torch.full_like(self.data_tensor, float("nan"))
+        for idx in current_vars:
+            batch[:, idx] = self.data_tensor[:, idx]
 
-            # Statistic (as in likelihood ratio CI tests)
-            stat_obs = ll_xyz + ll_z - ll_xz - ll_yz
+        with torch.no_grad():
+            return self.model(batch).mean().item()
 
-            # Permutation null: shuffle X (or Y) relative to everything else
-            stat_null = []
-            for _ in range(num_permutations):
-                perm = np.random.permutation(n_samples)
-                data_perm = data_subset.clone()
-                data_perm[:, idx_x] = data_perm[perm][
-                    :, idx_x
-                ]  # permute X only, keep others fixed
-                # recompute log-likelihoods with permuted X
-                ll_xyz_p = self._marginal_loglik(data_perm, keep_xyz).mean().item()
-                ll_xz_p = self._marginal_loglik(data_perm, keep_xz).mean().item()
-                ll_yz_p = self._marginal_loglik(data_perm, keep_yz).mean().item()
-                ll_z_p = (
-                    self._marginal_loglik(data_perm, keep_z).mean().item()
-                    if len(keep_z) > 0
-                    else 0.0
-                )
-                stat_null.append(ll_xyz_p + ll_z_p - ll_xz_p - ll_yz_p)
+    def _calculate_cmi(self, x, y, z):
+        """CMI = H(X,Z) + H(Y,Z) - H(X,Y,Z) - H(Z)"""
+        # Approximated via Log-Likelihoods
+        ll_xyz = self._get_log_prob([x, y] + z)
+        ll_xz = self._get_log_prob([x] + z)
+        ll_yz = self._get_log_prob([y] + z)
+        ll_z = self._get_log_prob(z) if z else 0.0
 
-            # p-value: proportion of permuted statistics as or more extreme than observed
-            p = (np.sum(np.array(stat_null) >= stat_obs) + 1) / (num_permutations + 1)
-            self.pvalue_cache[cache_key] = p
-            return p
-
-        except Exception as e:
-            # ===== ERROR HANDLING =====
-            print(f"SPN CI test error: {str(e)[:100]}...")
-
-            # Return neutral p-value to avoid breaking causal discovery pipeline
-            fallback_p_value = 0.5
-            self.pvalue_cache[cache_key] = fallback_p_value
-            return fallback_p_value
+        return max(0.0, ll_xyz - ll_xz - ll_yz + ll_z)

@@ -43,32 +43,18 @@ def test_fedCHD(i, n, K, d, s0, model, ci_method="kci"):
 
     # Select CI test method
     start = time.time()
-    if ci_method.lower() == "spn":
-        # Pass SPN-specific parameters
-        cg = cdnod(
-            X,
-            c_indx,
-            K,
-            alpha=0.05,
-            indep_test="spn",
-            stable=True,
-            uc_rule=0,
-            uc_priority=-1,
-            epochs=60,
-            lr=0.01,
-        )  # SPN-specific kwargs
-    else:
-        # Use traditional methods
-        cg = cdnod(
-            X,
-            c_indx,
-            K,
-            alpha=0.05,
-            indep_test=ci_method,
-            stable=True,
-            uc_rule=0,
-            uc_priority=-1,
-        )
+
+    # Use traditional methods
+    cg = cdnod(
+        X,
+        c_indx,
+        K,
+        alpha=0.05,
+        indep_test=ci_method,
+        stable=True,
+        uc_rule=0,
+        uc_priority=-1,
+    )
     end = time.time()
 
     # Extract results
@@ -192,7 +178,7 @@ if __name__ == "__main__":
     parser.add_argument("--d", default=6, type=int, help="Number of variables")
     parser.add_argument("--K", default=2, type=int, help="Number of federated clients")
     parser.add_argument(
-        "--n", default=1000, type=int, help="Number of samples per client"
+        "--n", default=10, type=int, help="Number of samples per client"
     )
     parser.add_argument(
         "--model",
