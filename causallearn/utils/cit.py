@@ -698,7 +698,7 @@ class SPN(CIT_Base):
     def __init__(
         self,
         data: np.ndarray,
-        threshold: float = 0.015,
+        threshold: float = 1e-2,
         device: str = "cpu",
         num_sums: int = 5,
         num_leaves: int = 10,
@@ -740,23 +740,6 @@ class SPN(CIT_Base):
         # or you can modify this to accept a separate 'test' set if needed.
         self.data_tensor = torch.tensor(data, dtype=torch.float32).to(self.device)
 
-    def _init_and_train_model(self):
-        num_features = self.data.shape[1]
-        config = EinetConfig(
-            num_features=num_features,
-            num_channels=1,
-            num_sums=5,
-            num_leaves=10,
-            num_repetitions=5,
-            num_classes=1,
-            depth=int(np.ceil(np.log2(num_features))),
-            dropout=0.0,
-            leaf_type=Normal,
-            layer_type="linsum",
-            structure="top-down",
-        )
-        return Einet(config)
-
     def __call__(
         self, x_idx: int, y_idx: int, z_indices: List[int], *args, **kwargs
     ) -> float:
@@ -788,17 +771,41 @@ class SPN(CIT_Base):
         optimizer = torch.optim.Adam(
             self.model.parameters(), lr=0.01, weight_decay=1e-4
         )
+        scheduler = torch.optim.lr_scheduler.ReduceLROnPlateau(
+            optimizer, mode="min", factor=0.5, patience=5
+        )
 
         self.model.train()
-        loss = 0.0
-        for epoch in range(50):  # Fixed epochs for CIT convenience
+        best_loss = float("inf")
+        patience_counter = 0
+
+        for epoch in range(30):  # Fixed epochs for CIT convenience
+            epoch_loss = 0.0
             for (batch,) in loader:
                 optimizer.zero_grad()
                 loss = -self.model(batch).mean()
                 loss.backward()
+
+                torch.nn.utils.clip_grad_norm_(self.model.parameters(), max_norm=1.0)
+
                 optimizer.step()
+                epoch_loss += loss.item()
+            avg_loss = epoch_loss / len(loader)
+
+            # Update Scheduler
+            scheduler.step(avg_loss)
             if epoch % 10 == 0:
-                logging.info(f"[RAT-SPN] Epoch {epoch} Loss {loss.item():.4f}")
+                logging.info(
+                    f"    Epoch {epoch}: Avg Loss {avg_loss:.4f} | LR: {scheduler.get_last_lr()[0]:.6f}"
+                )
+            if avg_loss < best_loss - 1e-3:
+                best_loss = avg_loss
+                patience_counter = 0
+            else:
+                patience_counter += 1
+                if patience_counter >= 15:  # Stop if no improvement for 15 epochs
+                    logging.info(f"    [Early Stopping] Converged at epoch {epoch}")
+                    break
         self.model.eval()
 
     def _get_log_prob(self, current_vars: List[int]):
