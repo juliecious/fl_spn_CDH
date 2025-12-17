@@ -14,39 +14,6 @@ class FederatedSPNBase:
     def __init__(self, device="cpu"):
         self.device = device
 
-    def _get_log_prob(
-        self, model: Einet, data: torch.Tensor, current_vars: List[int] = None
-    ):
-        """
-        Computes Log-Likelihood for specific variables (Marginalization).
-        If current_vars is None, computes full joint log-prob.
-        """
-        # data shape: [N, D]
-        batch_size, num_features = data.shape
-
-        # If specific variables are requested, we marginalize the rest by setting them to NaN
-        if current_vars is not None:
-            # Create a clone to avoid modifying original data
-            # simple-einet uses NaNs to indicate marginalization
-            marginalized_data = torch.full_like(data, float("nan"))
-
-            # Map global indices to local model indices
-            # Note: In Vertical FL, we assume the data tensor passed here
-            # is ALREADY strictly the local subset or we map it.
-            # For simplicity in this base method, we assume 'data' matches model input dim.
-
-            # Copy valid data for observed variables
-            valid_indices = [i for i in current_vars if i < num_features]
-            if valid_indices:
-                marginalized_data[:, valid_indices] = data[:, valid_indices]
-
-            inp = marginalized_data
-        else:
-            inp = data
-
-        with torch.no_grad():
-            return model(inp)  # Returns [N, num_classes] (or [N, 1] if 1 class)
-
 
 class ClientSPN(FederatedSPNBase):
     """
@@ -98,7 +65,6 @@ class ClientSPN(FederatedSPNBase):
 
         # simple-einet expects [N, C, D] or [N, D]
         tensor_data = torch.tensor(X_local, dtype=torch.float32).to(self.device)
-
         optimizer = torch.optim.Adam(self.model.parameters(), lr=lr)
 
         # Simple training loop
@@ -233,16 +199,41 @@ class ServerSPN(FederatedSPNBase):
         """
         if self.scenario == "horizontal":
             return self._inference_horizontal(data, scope)
-        elif self.scenario == "vertical":
+        elif self.scenario in ["vertical", "hybrid"]:
+            # Both Vertical and Hybrid have feature subsets -> Use Product/Slicing logic
             return self._inference_vertical(data, scope)
-        elif self.scenario == "hybrid":
-            # For this implementation, we treat hybrid as vertical (disjoint features logic dominates structure)
-            # or horizontal depending on setup. Defaulting to Horizontal mixing logic for now if K=1.
-            if self.num_clusters > 1:
-                return self._inference_vertical(data, scope)
-            else:
-                return self._inference_horizontal(data, scope)
         return 0.0
+
+    def _get_client_log_prob(
+        self, client: ClientSPN, global_data: torch.Tensor, global_scope: List[int]
+    ):
+        """
+        Helper: Slices global data to match client's local features.
+        """
+        client_feats = self.feature_map[id(client)]
+        batch_size = global_data.shape[0]
+
+        # 1. Create a local tensor of the correct shape [N, D_local] with NaNs
+        # This handles the "200 vs 4" mismatch error.
+        local_data = torch.full(
+            (batch_size, len(client_feats)), float("nan"), device=self.device
+        )
+
+        # 2. Identify intersection of request scope and client features
+        # Map Global Index -> Local Index
+        local_scope_indices = []
+        for local_idx, global_idx in enumerate(client_feats):
+            if global_idx in global_scope:
+                # Fill observed data
+                local_data[:, local_idx] = global_data[:, global_idx]
+                local_scope_indices.append(local_idx)
+
+        # 3. If client covers NONE of the requested variables, return 0.0 (Log Likelihood of 1)
+        # However, for product aggregation, we might need valid shape.
+        # simple-einet handles all-nan input as marginalizing everything -> 0.0 log prob.
+
+        with torch.no_grad():
+            return client.model(local_data)
 
     def _inference_horizontal(self, data: torch.Tensor, scope: List[int]) -> float:
         """
@@ -259,7 +250,7 @@ class ServerSPN(FederatedSPNBase):
         client_lls = []
         for client in self.clients:
             # Horizontal: All clients have all features. Scope matches.
-            ll = self._get_log_prob(client.model, data, scope)
+            ll = self._get_client_log_prob(client, data, scope)
             client_lls.append(ll)  # List of [N, 1]
 
         # Stack: [N, K_clients]
@@ -292,43 +283,12 @@ class ServerSPN(FederatedSPNBase):
         )
 
         for client in self.clients:
-            client_feats = self.feature_map[id(client)]
+            # Query Client (Returns [N, K])
+            client_cluster_lls = self._get_client_log_prob(client, data, scope)
 
-            # Intersection: Which requested variables does this client have?
-            local_scope = [v for v in scope if v in client_feats]
-
-            if not local_scope:
-                continue  # Client doesn't cover any requested variables
-
-            # Map global indices to local (0..local_d)
-            # We need to construct the local data tensor
-            # data is [N, Global_D]. client expects [N, Local_D]
-            # but _get_log_prob handles marginalization via NaN.
-
-            # Create local-sized data with NaNs
-            local_data = torch.full(
-                (batch_size, len(client_feats)), float("nan"), device=self.device
-            )
-
-            # Fill observed values
-            # We need to know where 'global index i' maps to 'local index j'
-            # Assuming simple mapping: feature_indices are [0, 1, 2...] or [10, 11...]
-            # And client.model expects 0..local_features
-            for i, global_idx in enumerate(client_feats):
-                if global_idx in local_scope:
-                    local_data[:, i] = data[:, global_idx]
-
-            # Query Client
-            # Returns [N, Num_Clusters]
-            # Note: We pass None as scope because we constructed local_data manually with NaNs
-            # (which simple-einet treats as marginalization)
-            client_cluster_lls = client.model(local_data)
-
-            # Product Rule: Sum of Log-Likelihoods
+            # Product Rule in Log Space = Sum
             cluster_accumulators += client_cluster_lls
 
-        # Now we have [N, Num_Clusters] where each entry is log P(V | C=c)
-        # Final: LogSumExp_c ( log Prior(c) + log P(V|c) )
+            # Marginalize Latent Cluster
         final_vals = torch.logsumexp(cluster_accumulators + log_prior, dim=1)
-
         return final_vals.mean().item()
