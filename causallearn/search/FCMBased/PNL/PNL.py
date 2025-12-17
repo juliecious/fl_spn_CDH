@@ -63,7 +63,7 @@ class PNL(object):
             1) preprocessing to make xi rather close to Gaussian,
             2) learn the corresponding 'disturbance' under each assumed causal
             direction, and
-            3) performs the independence tests to see if the assumed cause if
+            3) performs the independence tests_old to see if the assumed cause if
             independent from the learned disturbance.
     """
 

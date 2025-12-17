@@ -36,7 +36,7 @@ class BottomUpParceLiNGAM:
         random_state : int, optional (default=None)
             ``random_state`` is the seed used by the random number generator.
         alpha : float, optional (default=0.1)
-            Significant level of statistical test. If alpha=0.0, rejection does not occur in statistical tests.
+            Significant level of statistical test. If alpha=0.0, rejection does not occur in statistical tests_old.
         regressor : regressor object implementing 'fit' and 'predict' function (default=None)
             Regressor to compute residuals.
             This regressor object must have ``fit``method and ``predict`` function like scikit-learn's model.

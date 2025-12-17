@@ -205,8 +205,14 @@ def cdnod_alg(
     """
 
     start = time.time()
+    # data_aug = np.concatenate((data, c_indx), axis=1)
+    # indep_test_all = CIT(data_aug, indep_test, **kwargs)
+
     data_aug = np.concatenate((data, c_indx), axis=1)
-    indep_test_all = CIT(data_aug, indep_test, **kwargs)
+    if callable(indep_test):  # Check if we passed the oracle_wrapper
+        indep_test_all = indep_test
+    else:
+        indep_test_all = CIT(data_aug, indep_test, **kwargs)
 
     s_a, d = data_aug.shape
     fed_data = data_aug.reshape(K, int(s_a / K), d)
@@ -214,7 +220,11 @@ def cdnod_alg(
     for i in range(K):
         fed_dt = fed_data[i]
         fed_cg = CausalGraph(no_of_var=data_aug.shape[1], node_names=None)
-        fed_indep_test = CIT(fed_dt, indep_test)
+        # fed_indep_test = CIT(fed_dt, indep_test)
+        if callable(indep_test):
+            fed_indep_test = indep_test
+        else:
+            fed_indep_test = CIT(fed_dt, indep_test)
         fed_cg.set_ind_test(fed_indep_test)
         cg_list.append(fed_cg)
 
@@ -423,8 +433,13 @@ def cdnod_alg_origianal(
 
     start = time.time()
 
+    # data_aug = np.concatenate((data, c_indx), axis=1)
+    # indep_test_all = CIT(data_aug, indep_test, **kwargs)
     data_aug = np.concatenate((data, c_indx), axis=1)
-    indep_test_all = CIT(data_aug, indep_test, **kwargs)
+    if callable(indep_test):  # Check if we passed the oracle_wrapper
+        indep_test_all = indep_test
+    else:
+        indep_test_all = CIT(data_aug, indep_test, **kwargs)
 
     s_a, s_b = data_aug.shape
     fed_data = data_aug.reshape(K, int(s_a / K), s_b)
@@ -432,7 +447,11 @@ def cdnod_alg_origianal(
     for i in range(K):
         fed_dt = fed_data[i]
         fed_cg = CausalGraph(no_of_var=data_aug.shape[1], node_names=None)
-        fed_indep_test = CIT(fed_dt, indep_test, **kwargs)
+        # fed_indep_test = CIT(fed_dt, indep_test, **kwargs)
+        if callable(indep_test):
+            fed_indep_test = indep_test
+        else:
+            fed_indep_test = CIT(fed_dt, indep_test)
         fed_cg.set_ind_test(fed_indep_test)
         cg_list.append(fed_cg)
 

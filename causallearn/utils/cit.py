@@ -176,7 +176,7 @@ class CIT_Base(object):
             ), "X, Y cannot be in condition_set."
             return [X], [Y], condition_set, _stringize([X], [Y], condition_set)
 
-        # also to support multi-dimensional unconditional X, Y (usually in kernel-based tests)
+        # also to support multi-dimensional unconditional X, Y (usually in kernel-based tests_old)
         Xs = (
             sorted(set(map(int, X))) if isinstance(X, Iterable) else [int(X)]
         )  # sorted for comparison
@@ -655,7 +655,7 @@ class MC_FisherZ(CIT_Base):
 class D_Separation(CIT_Base):
     def __init__(self, data, true_dag=None, **kwargs):
         """
-        Use d-separation as CI test, to ensure the correctness of constraint-based methods. (only used for tests)
+        Use d-separation as CI test, to ensure the correctness of constraint-based methods. (only used for tests_old)
         Parameters
         ----------
         data:   numpy.ndarray, just a placeholder, not used in D_Separation
@@ -698,18 +698,19 @@ class SPN(CIT_Base):
     def __init__(
         self,
         data: np.ndarray,
-        threshold: float = 1e-2,
+        threshold: float = 0.015,
         device: str = "cpu",
         num_sums: int = 5,
         num_leaves: int = 10,
         num_repetitions: int = 5,
         depth: int = 3,
-        dropout: float = 0.0,
+        weight_decay: float = 1e-4,
         **kwargs,
     ):
         super().__init__(data, **kwargs)
         self.device = device
         self.threshold = threshold
+        self.weight_decay = weight_decay
         self.data = (
             data  # Keep reference if needed by CIT_Base, but we use tensor below
         )
@@ -725,7 +726,6 @@ class SPN(CIT_Base):
             num_repetitions=num_repetitions,
             num_classes=1,
             depth=depth,
-            dropout=dropout,
             leaf_type=Normal,
             layer_type="linsum",
             structure="top-down",
@@ -769,7 +769,9 @@ class SPN(CIT_Base):
         train_tensor = torch.tensor(X_train, dtype=torch.float32).to(self.device)
         loader = DataLoader(TensorDataset(train_tensor), batch_size=128, shuffle=True)
         optimizer = torch.optim.Adam(
-            self.model.parameters(), lr=0.01, weight_decay=1e-4
+            self.model.parameters(),
+            lr=0.01,
+            weight_decay=self.weight_decay,
         )
         scheduler = torch.optim.lr_scheduler.ReduceLROnPlateau(
             optimizer, mode="min", factor=0.5, patience=5

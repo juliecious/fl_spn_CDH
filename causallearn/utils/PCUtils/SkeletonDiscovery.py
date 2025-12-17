@@ -42,7 +42,7 @@ def skeleton_discovery(
     ----------
     data : data set (numpy ndarray), shape (n_samples, n_features). The input data, where n_samples is the number of
             samples and n_features is the number of features.
-    alpha: float, desired significance level of independence tests (p_value) in (0,1)
+    alpha: float, desired significance level of independence tests_old (p_value) in (0,1)
     indep_test : class CIT, the independence test being used
             [fisherz, chisq, gsq, mv_fisherz, kci]
            - fisherz: Fisher's Z conditional independence test
@@ -296,7 +296,7 @@ def skeleton_discovery_with_surrogate(
     ----------
     data : data set (numpy ndarray), shape (n_samples, n_features). The input data, where n_samples is the number of
             samples and n_features is the number of features.
-    alpha: float, desired significance level of independence tests (p_value) in (0,1)
+    alpha: float, desired significance level of independence tests_old (p_value) in (0,1)
     indep_test : class CIT, the independence test being used
             [fisherz, chisq, gsq, mv_fisherz, kci]
            - fisherz: Fisher's Z conditional independence test
@@ -568,7 +568,7 @@ def skeleton_discovery_with_surrogate_GMM(
     ----------
     data : data set (numpy ndarray), shape (n_samples, n_features). The input data, where n_samples is the number of
             samples and n_features is the number of features.
-    alpha: float, desired significance level of independence tests (p_value) in (0,1)
+    alpha: float, desired significance level of independence tests_old (p_value) in (0,1)
     indep_test : class CIT, the independence test being used
             [fisherz, chisq, gsq, mv_fisherz, kci]
            - fisherz: Fisher's Z conditional independence test

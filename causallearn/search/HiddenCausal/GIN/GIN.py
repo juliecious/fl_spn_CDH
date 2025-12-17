@@ -30,7 +30,7 @@ def GIN(data, indep_test_method="kci", alpha=0.05):
     indep_test_method : str, default='kci'
         the name of the independence test being used
     alpha : float, default=0.05
-        desired significance level of independence tests (p_value) in (0,1)
+        desired significance level of independence tests_old (p_value) in (0,1)
     Returns
     -------
     G : general graph
