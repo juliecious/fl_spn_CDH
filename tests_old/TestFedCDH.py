@@ -66,14 +66,22 @@ def test_fedCDH(
         start_train = time.time()
 
         # Configure Scenario
-        if scenario == "vertical":
-            num_clusters = 5  # Use latent clusters for vertical
+        if scenario == "hybrid":
+            num_clusters = 20  # Use latent clusters for vertical
+            threshold_val = 0.005
+        elif scenario == "vertical":
+            num_clusters = 6
+            threshold_val = 0.002
         else:
             num_clusters = 1  # Single mixture component for Horizontal
+            threshold_val = 0.005
 
-        # Initialize Server
+        # 2. TUNING: Lower Threshold
         server = ServerSPN(
-            global_num_features=d_features, scenario=scenario, num_clusters=num_clusters
+            global_num_features=d_features,
+            scenario=scenario,
+            num_clusters=num_clusters,
+            threshold=threshold_val,
         )
 
         # Simulate Clients
@@ -140,7 +148,10 @@ def test_fedCDH(
             # We must support the Z_in=None case for marginal independence
             if Z_in is None:
                 Z_in = []
-            return server.ci_test(X_in, Y_in, Z_in, data_matrix=X_global)
+            # CDNOD queries indices up to d (the domain index).
+            # We must provide a matrix that includes this column to prevent "out of bounds".
+            data_aug = np.hstack([X_global, c_indx])
+            return server.ci_test(X_in, Y_in, Z_in, data_matrix=data_aug)
 
         oracle_wrapper.method = "spn"
         indep_test_obj = oracle_wrapper
@@ -289,7 +300,7 @@ if __name__ == "__main__":
 
     parser.add_argument(
         "--scenario",
-        default="horizontal",
+        default="vertical",
         type=str,
         help="Data split scenario: horizontal, vertical or hybrid",
     )

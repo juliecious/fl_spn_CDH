@@ -36,15 +36,15 @@ class ClientSPN(FederatedSPNBase):
         # Depth must be <= log2(num_features)
         max_depth = int(np.floor(np.log2(num_features)))
         # Use depth 2 if possible, otherwise use the maximum allowed
-        actual_depth = min(2, max_depth)
+        actual_depth = min(3, max_depth)
 
         # Configuration matches the paper's "Federated PC" setup
         # num_classes = num_clusters (The Latent Variable L)
         self.config = EinetConfig(
             num_features=num_features,
             num_channels=1,
-            num_sums=5,
-            num_leaves=10,
+            num_sums=10,
+            num_leaves=20,
             num_repetitions=5,
             depth=actual_depth,
             num_classes=num_clusters,  # Crucial: Each class represents a 'cluster' k
@@ -56,7 +56,7 @@ class ClientSPN(FederatedSPNBase):
         self.model = Einet(self.config).to(self.device)
         self.data_count = 0
 
-    def train(self, X_local: np.ndarray, epochs=20, lr=0.01, batch_size=128):
+    def train(self, X_local: np.ndarray, epochs=30, lr=0.01):
         """
         Trains the local model.
         """
@@ -114,13 +114,14 @@ class ServerSPN(FederatedSPNBase):
         scenario: str = "horizontal",
         num_clusters: int = 1,  # K (Latent clusters)
         device="cpu",
-        threshold: float = 0.01,
+        threshold: float = None,  # use Adaptive Logic by default
     ):
         super().__init__(device)
         self.global_num_features = global_num_features
         self.scenario = scenario
-        self.num_clusters = num_clusters  # Should match Client config
-        self.threshold = threshold
+        self.num_clusters = num_clusters
+        # If threshold is provided, use it as a 'margin' for the permutation test
+        self.threshold = threshold if threshold is not None else 0.005
 
         self.clients: List[ClientSPN] = []
         self.client_weights: List[float] = []  # For Horizontal mixing
@@ -149,10 +150,12 @@ class ServerSPN(FederatedSPNBase):
         Computes CMI(X; Y | Z) using the Federated Circuit.
 
         Args:
-            x_idx, y_idx: Target variables
+            x_idx: Target variables
+            y_idx: Target variables
             z_idx: Conditioning variables
             data_matrix: Proxy data (e.g. from the test set) to evaluate expectations.
         """
+        # Input normalization
         if isinstance(x_idx, (int, np.integer)):
             x_idx = [x_idx]
         if isinstance(y_idx, (int, np.integer)):
@@ -167,40 +170,52 @@ class ServerSPN(FederatedSPNBase):
         else:
             data_tensor = data_matrix
 
+        # 1. Calculate Observed CMI (Signal + Noise)
+        cmi_obs = self._calculate_cmi_value(data_tensor, x_idx, y_idx, z_idx)
+
+        # 2. Calculate Null CMI (Noise Baseline) via Permutation
+        # We shuffle X to break the X-Y relationship.
+        # Ideally, we shuffle X within Z-bins, but for continuous high-dim data
+        # and fast estimation, global shuffling provides a conservative "estimation noise" baseline.
+
+        # Create a shuffled version of data for X columns only
+        perm_indices = torch.randperm(data_tensor.size(0), device=self.device)
+        data_perm = data_tensor.clone()
+        # Shuffle only the X variables
+        for x_i in x_idx:
+            data_perm[:, x_i] = data_tensor[perm_indices, x_i]
+
+        cmi_null = self._calculate_cmi_value(data_perm, x_idx, y_idx, z_idx)
+
+        # 3. Bias Correction / Adaptive Decision
+        # If Signal > Noise + Margin, we declare Dependence.
+        # The 'threshold' now acts as a small safety margin (epsilon) rather than a raw score cutoff.
+
+        # We clamp cmi_null to be at least 0
+        cmi_null = max(0.0, cmi_null)
+
+        # Decision: 0.0 means Dependent (Reject Null), 1.0 means Independent (Accept Null)
+        if cmi_obs > cmi_null + self.threshold:
+            return 0.0  # Dependent
+        else:
+            return 1.0  # Independent
+
+    def _calculate_cmi_value(self, data_tensor, x_idx, y_idx, z_idx):
+        """Helper to compute raw CMI value."""
         # CMI(X;Y|Z) ≈ E[ log P(X|Y,Z) - log P(X|Z) ]
         #            = E[ log P(X,Y,Z) - log P(Y,Z) - (log P(X,Z) - log P(Z)) ]
         #            = E[ log P(XYZ) - log P(XZ) - log P(YZ) + log P(Z) ]
-
         ll_xyz = self._federated_inference(data_tensor, x_idx + y_idx + z_idx)
         ll_xz = self._federated_inference(data_tensor, x_idx + z_idx)
         ll_yz = self._federated_inference(data_tensor, y_idx + z_idx)
+        ll_z = self._federated_inference(data_tensor, z_idx) if z_idx else 0.0
 
-        if z_idx:
-            ll_z = self._federated_inference(data_tensor, z_idx)
-        else:
-            ll_z = 0.0
-
-        # Estimate CMI from the sample average log-likelihoods
-        cmi_est = ll_xyz - ll_xz - ll_yz + ll_z
-
-        # Ensure non-negative (theoretical constraint, though estimation noise exists)
-        cmi_est = max(0.0, cmi_est)
-
-        # Thresholding
-        is_independent = cmi_est < self.threshold
-
-        # Return p-value style (1.0 = Indep, 0.0 = Dep)
-        return 1.0 if is_independent else 0.0
+        return ll_xyz - ll_xz - ll_yz + ll_z
 
     def _federated_inference(self, data: torch.Tensor, scope: List[int]) -> float:
-        """
-        Computes mean log-likelihood E[log P(scope)] using the Federated Circuit structure.
-        Handles Horizontal (Sum) and Vertical (Mixture of Products).
-        """
         if self.scenario == "horizontal":
             return self._inference_horizontal(data, scope)
         elif self.scenario in ["vertical", "hybrid"]:
-            # Both Vertical and Hybrid have feature subsets -> Use Product/Slicing logic
             return self._inference_vertical(data, scope)
         return 0.0
 
