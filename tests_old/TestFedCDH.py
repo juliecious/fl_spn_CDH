@@ -18,6 +18,7 @@ from causallearn.utils.data_utils import (
 )
 import time
 import argparse
+import logging
 
 np.set_printoptions(suppress=True, precision=3)
 
@@ -34,7 +35,7 @@ def test_fedCDH(
     scenario="horizontal",
 ):
     set_random_seed(i)
-    print(
+    logging.info(
         f"Running Instance {i} | Client K={K_clients} | samples per K {n_samples_per_client} | features={d_features} | CI={ci_method} | Scenario={scenario} | Model={model_type}"
     )
 
@@ -62,19 +63,19 @@ def test_fedCDH(
 
     # 2. FEDERATED SETUP (Phase 1: Density Estimation)
     if ci_method == "spn":
-        print(">>> Phase 1: Federated Training...")
+        logging.info(">>> Phase 1: Federated Training...")
         start_train = time.time()
 
         # Configure Scenario
         if scenario == "hybrid":
             num_clusters = 20  # Use latent clusters for vertical
-            threshold_val = 0.005
+            threshold_val = 0.01
         elif scenario == "vertical":
-            num_clusters = 6
-            threshold_val = 0.002
+            num_clusters = 5
+            threshold_val = 0.01
         else:
             num_clusters = 1  # Single mixture component for Horizontal
-            threshold_val = 0.005
+            threshold_val = 0.025
 
         # 2. TUNING: Lower Threshold
         server = ServerSPN(
@@ -134,7 +135,7 @@ def test_fedCDH(
                 num_features=X_splits[k].shape[1],
                 num_clusters=num_clusters,
             )
-            client.train(X_splits[k], epochs=10)  # Fast training for demo
+            client.train(X_splits[k], epochs=100, lr=0.05)
 
             # Register with Server
             server.register_client(client, feature_indices=feat_indices[k])
@@ -151,7 +152,15 @@ def test_fedCDH(
             # CDNOD queries indices up to d (the domain index).
             # We must provide a matrix that includes this column to prevent "out of bounds".
             data_aug = np.hstack([X_global, c_indx])
-            return server.ci_test(X_in, Y_in, Z_in, data_matrix=data_aug)
+            # 10 perms is for high precision. 5 perms is acceptable for a CPU Demo.
+            return server.ci_test(
+                X_in,
+                Y_in,
+                Z_in,
+                data_matrix=data_aug,
+                num_permutations=5,
+                sigma_threshold=3.0,
+            )
 
         oracle_wrapper.method = "spn"
         indep_test_obj = oracle_wrapper
@@ -160,8 +169,8 @@ def test_fedCDH(
         # Benchmark Methods (KCI, FisherZ)
         indep_test_obj = ci_method
 
-        # 3. CAUSAL DISCOVERY (Phase 2)
-    print(">>> Phase 2: Causal Discovery (CDNOD)...")
+    # 3. CAUSAL DISCOVERY (Phase 2)
+    logging.info(">>> Phase 2: Causal Discovery (CDNOD)...")
     start_cd = time.time()
 
     # We pass the Wrapper Object if SPN, else string
@@ -194,7 +203,9 @@ def test_fedCDH(
     }
 
     # Pretty Print
-    print(f"   Result: Skel F1={result['f1_skeleton']:.2f} | Dir F1={result['f1']:.2f}")
+    logging.info(
+        f"   Result: Skel F1={result['f1_skeleton']:.2f} | Dir F1={result['f1']:.2f}"
+    )
     return result
 
 
@@ -202,9 +213,9 @@ def main(args):
     """
     Main evaluation function with CI method comparison
     """
-    print("=" * 60)
-    print("FEDCDH EVALUATION WITH CONFIGURABLE CI METHODS")
-    print("=" * 60)
+    logging.info("=" * 60)
+    logging.info("FEDCDH EVALUATION WITH CONFIGURABLE CI METHODS")
+    logging.info("=" * 60)
 
     res_list = []
     successful_runs = 0
@@ -224,17 +235,17 @@ def main(args):
             res_val = list(res.values())
 
             if None in res_val:
-                print(f"Warning: None values in results for instance {i}")
+                logging.info(f"Warning: None values in results for instance {i}")
             else:
                 res_list.append(res_val)
                 successful_runs += 1
 
         except Exception as e:
-            print(f"Error in instance {i}: {e}")
+            logging.info(f"Error in instance {i}: {e}")
             continue
 
     if successful_runs == 0:
-        print("No successful runs!")
+        logging.info("No successful runs!")
         return
 
     # Compute statistics
@@ -262,12 +273,15 @@ def main(args):
     time_train_idx = next(i for i, k in enumerate(result_keys) if k == "time_train")
     time_cd_idx = next(i for i, k in enumerate(result_keys) if k == "time_cd")
 
-    print()
-    print("SUMMARY:")
-    print(f"  Skeleton F1: {avg[skeleton_f1_idx]:.3f} ± {std[skeleton_f1_idx]:.3f}")
-    print(f"  Direction F1: {avg[direction_f1_idx]:.3f} ± {std[direction_f1_idx]:.3f}")
-    print(f"  Avg Train Time: {avg[time_train_idx]:.2f}s")
-    print(f"  Avg Discovery Time: {avg[time_cd_idx]:.2f}s")
+    logging.info("SUMMARY:")
+    logging.info(
+        f"  Skeleton F1: {avg[skeleton_f1_idx]:.3f} ± {std[skeleton_f1_idx]:.3f}"
+    )
+    logging.info(
+        f"  Direction F1: {avg[direction_f1_idx]:.3f} ± {std[direction_f1_idx]:.3f}"
+    )
+    logging.info(f"  Avg Train Time: {avg[time_train_idx]:.2f}s")
+    logging.info(f"  Avg Discovery Time: {avg[time_cd_idx]:.2f}s")
 
 
 if __name__ == "__main__":
@@ -280,7 +294,7 @@ if __name__ == "__main__":
     parser.add_argument("--d", default=6, type=int, help="Number of variables")
     parser.add_argument("--K", default=2, type=int, help="Number of federated clients")
     parser.add_argument(
-        "--n", default=100, type=int, help="Number of samples per client"
+        "--n", default=500, type=int, help="Number of samples per client"
     )
     parser.add_argument(
         "--model_type",
@@ -292,7 +306,7 @@ if __name__ == "__main__":
     # New CI method selection parameter
     parser.add_argument(
         "--ci_method",
-        default="spn",
+        default="kci",
         type=str,
         choices=["kci", "spn", "gsq"],
         help="Conditional independence test method: kci (traditional), gsq, or spn (Sum-Product Networks)",
@@ -300,7 +314,7 @@ if __name__ == "__main__":
 
     parser.add_argument(
         "--scenario",
-        default="vertical",
+        default="horizontal",
         type=str,
         help="Data split scenario: horizontal, vertical or hybrid",
     )

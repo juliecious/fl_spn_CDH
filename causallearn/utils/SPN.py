@@ -4,6 +4,8 @@ import logging
 from typing import List, Dict, Optional, Union
 from simple_einet.einet import Einet, EinetConfig
 from simple_einet.layers.distributions.normal import Normal
+from torch.utils.data import DataLoader, TensorDataset
+import torch.optim as optim
 
 
 class FederatedSPNBase:
@@ -56,48 +58,74 @@ class ClientSPN(FederatedSPNBase):
         self.model = Einet(self.config).to(self.device)
         self.data_count = 0
 
-    def train(self, X_local: np.ndarray, epochs=30, lr=0.01):
+    def train(self, X_local: np.ndarray, epochs=100, lr=0.05, batch_size=32):
         """
-        Trains the local model.
+        Trains the local model with Mini-batches, LR Scheduler, and Early Stopping.
         """
         self.data_count = X_local.shape[0]
         self.model.train()
 
         # simple-einet expects [N, C, D] or [N, D]
         tensor_data = torch.tensor(X_local, dtype=torch.float32).to(self.device)
-        optimizer = torch.optim.Adam(self.model.parameters(), lr=lr)
+        dataset = TensorDataset(tensor_data)
+        dataloader = DataLoader(
+            dataset, batch_size=batch_size, shuffle=True, drop_last=False
+        )
 
-        # Simple training loop
-        # (In production, use DataLoader)
+        optimizer = torch.optim.Adam(self.model.parameters(), lr=lr, weight_decay=1e-3)
+        scheduler = optim.lr_scheduler.ReduceLROnPlateau(
+            optimizer, mode="min", factor=0.5, patience=5
+        )
+
+        best_loss = float("inf")
+        patience_counter = 0
+        patience_limit = 15
+
         for epoch in range(epochs):
-            optimizer.zero_grad()
+            epoch_loss = 0.0
+            batch_count = 0
 
-            # Forward: Returns [N, K] log-likelihoods per class (cluster)
-            ll_output = self.model(tensor_data)
+            for (batch_x,) in dataloader:
+                optimizer.zero_grad()
 
-            # For standard training, we maximize Log-Likelihood of data
-            # If K=1 (Horizontal), ll_output is [N, 1] -> mean()
-            # If K>1 (Vertical), we sum over latent K (LogSumExp) -> mean()
-            if self.num_clusters > 1:
-                # Log-Likelihood of data = LogSumExp_k( P(X|C=k) + log P(C=k) )
-                # simple-einet's forward returns P(X | C) if num_classes > 1 (check einet.py forward)
-                # Actually, einet.py forward returns:
-                # "p(X) or p(X | C) if number of classes > 1"
-                # We treat the model output as log P(X|Z). We need to marginalize Z.
+                # Forward Pass
+                ll_output = self.model(batch_x)
 
-                # Assume uniform prior for training stability or learnable prior
-                # Simple-einet MixingLayer usually handles this, but here we access raw class outputs
-                log_prob = torch.logsumexp(ll_output, dim=1)
+                # Handling Clusters/Classes
+                if self.num_clusters > 1:
+                    # LogSumExp over clusters to get P(X)
+                    log_prob = torch.logsumexp(ll_output, dim=1)
+                else:
+                    log_prob = ll_output
+
+                # NLL Loss
+                loss = -log_prob.mean()
+                loss.backward()
+                optimizer.step()
+
+                epoch_loss += loss.item()
+                batch_count += 1
+
+                # Average loss for the epoch
+            avg_loss = epoch_loss / max(1, batch_count)
+
+            # 2. Scheduler Step
+            scheduler.step(avg_loss)
+
+            # 3. Early Stopping Check
+            if avg_loss < best_loss - 1e-4:
+                best_loss = avg_loss
+                patience_counter = 0
             else:
-                log_prob = ll_output
-
-            loss = -log_prob.mean()
-            loss.backward()
-            optimizer.step()
+                patience_counter += 1
+                if patience_counter >= patience_limit:
+                    # Optional: Print info if needed
+                    # print(f"Client {self.client_id} converged at epoch {epoch}")
+                    break
 
         self.model.eval()
         logging.info(
-            f"Client {self.client_id} finished training. Final Loss: {loss.item():.4f}"
+            f"Client {self.client_id} finished training. Final Loss: {best_loss:.4f}"
         )
         return self
 
@@ -144,6 +172,8 @@ class ServerSPN(FederatedSPNBase):
         y_idx: Union[int, List[int]],
         z_idx: List[int],
         data_matrix: np.ndarray,
+        num_permutations: int = 10,  # Number of shuffles to estimate noise
+        sigma_threshold: float = 3.0,
     ) -> float:
         """
         The Oracle Function used by CDNOD.
@@ -173,32 +203,30 @@ class ServerSPN(FederatedSPNBase):
         # 1. Calculate Observed CMI (Signal + Noise)
         cmi_obs = self._calculate_cmi_value(data_tensor, x_idx, y_idx, z_idx)
 
-        # 2. Calculate Null CMI (Noise Baseline) via Permutation
-        # We shuffle X to break the X-Y relationship.
-        # Ideally, we shuffle X within Z-bins, but for continuous high-dim data
-        # and fast estimation, global shuffling provides a conservative "estimation noise" baseline.
+        # 2. Estimate Noise Distribution (Null Hypothesis)
+        null_dist = []
+        for _ in range(num_permutations):
+            # Shuffle X to break dependency
+            perm_indices = torch.randperm(data_tensor.size(0), device=self.device)
+            data_perm = data_tensor.clone()
+            for x_i in x_idx:
+                data_perm[:, x_i] = data_tensor[perm_indices, x_i]
 
-        # Create a shuffled version of data for X columns only
-        perm_indices = torch.randperm(data_tensor.size(0), device=self.device)
-        data_perm = data_tensor.clone()
-        # Shuffle only the X variables
-        for x_i in x_idx:
-            data_perm[:, x_i] = data_tensor[perm_indices, x_i]
+            # Compute null CMI
+            val = self._calculate_cmi_value(data_perm, x_idx, y_idx, z_idx)
+            null_dist.append(max(0.0, val))  # Clamp at 0
 
-        cmi_null = self._calculate_cmi_value(data_perm, x_idx, y_idx, z_idx)
+        # 3. Z-Score Test
+        null_mean = np.mean(null_dist)
+        null_std = np.std(null_dist) + 1e-6  # Avoid div/0
 
-        # 3. Bias Correction / Adaptive Decision
-        # If Signal > Noise + Margin, we declare Dependence.
-        # The 'threshold' now acts as a small safety margin (epsilon) rather than a raw score cutoff.
+        z_score = (cmi_obs - null_mean) / null_std
 
-        # We clamp cmi_null to be at least 0
-        cmi_null = max(0.0, cmi_null)
-
-        # Decision: 0.0 means Dependent (Reject Null), 1.0 means Independent (Accept Null)
-        if cmi_obs > cmi_null + self.threshold:
-            return 0.0  # Dependent
+        # Decision: Is the observation significantly distinct from noise?
+        if z_score > sigma_threshold:
+            return 0.0  # Dependent (Reject Null)
         else:
-            return 1.0  # Independent
+            return 1.0  # Independent (Accept Null)
 
     def _calculate_cmi_value(self, data_tensor, x_idx, y_idx, z_idx):
         """Helper to compute raw CMI value."""
