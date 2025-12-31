@@ -66,6 +66,11 @@ def test_fedCDH(
         logging.info(">>> Phase 1: Federated Training...")
         start_train = time.time()
 
+        if d_features >= 20:
+            spn_config = {"depth": 5, "num_sums": 20, "num_leaves": 40}
+        else:
+            spn_config = {"depth": 3, "num_sums": 10, "num_leaves": 20}
+
         # Configure Scenario
         if scenario == "hybrid":
             num_clusters = 20  # Use latent clusters for vertical
@@ -134,6 +139,7 @@ def test_fedCDH(
                 client_id=k,
                 num_features=X_splits[k].shape[1],
                 num_clusters=num_clusters,
+                **spn_config,
             )
             client.train(X_splits[k], epochs=100, lr=0.05)
 
@@ -291,7 +297,7 @@ if __name__ == "__main__":
 
     # Existing parameters
     parser.add_argument("--N", default=3, type=int, help="Number of test instances")
-    parser.add_argument("--d", default=6, type=int, help="Number of variables")
+    parser.add_argument("--d", default=10, type=int, help="Number of variables")
     parser.add_argument("--K", default=2, type=int, help="Number of federated clients")
     parser.add_argument(
         "--n", default=500, type=int, help="Number of samples per client"
@@ -314,7 +320,7 @@ if __name__ == "__main__":
 
     parser.add_argument(
         "--scenario",
-        default="horizontal",
+        default="vertical",
         type=str,
         help="Data split scenario: horizontal, vertical or hybrid",
     )

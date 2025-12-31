@@ -29,25 +29,35 @@ class ClientSPN(FederatedSPNBase):
         num_features: int,
         num_clusters: int = 1,  # K in the paper (1 for Horizontal, >1 for Vertical)
         device="cpu",
+        depth: int = None,  # If None, calculated automatically
+        num_sums: int = 10,  # K in Sum-Product (Capacity)
+        num_leaves: int = 20,  # Resolution of leaf distributions
+        num_repetitions: int = 5,  # Ensembling factor
     ):
         super().__init__(device)
         self.client_id = client_id
         self.num_features = num_features
         self.num_clusters = num_clusters
 
-        # Depth must be <= log2(num_features)
-        max_depth = int(np.floor(np.log2(num_features)))
-        # Use depth 2 if possible, otherwise use the maximum allowed
-        actual_depth = min(3, max_depth)
+        # Calculate the mathematical limit for this specific client's feature count
+        # e.g., if features=6, log2(6)=2.58 -> max_depth=2
+        physical_max_depth = int(np.floor(np.log2(num_features)))
+
+        if depth is not None:
+            # If user requested a depth, use it, BUT do not exceed physical limit
+            actual_depth = min(depth, physical_max_depth)
+        else:
+            # Default logic
+            actual_depth = min(3, physical_max_depth)
 
         # Configuration matches the paper's "Federated PC" setup
         # num_classes = num_clusters (The Latent Variable L)
         self.config = EinetConfig(
             num_features=num_features,
             num_channels=1,
-            num_sums=10,
-            num_leaves=20,
-            num_repetitions=5,
+            num_sums=num_sums,
+            num_leaves=num_leaves,
+            num_repetitions=num_repetitions,
             depth=actual_depth,
             num_classes=num_clusters,  # Crucial: Each class represents a 'cluster' k
             leaf_type=Normal,
