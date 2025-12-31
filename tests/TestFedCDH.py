@@ -3,18 +3,16 @@ import sys
 sys.path.append("")
 import numpy as np
 from causallearn.search.ConstraintBased.CDNOD import cdnod
-from causallearn.utils.SPN import ServerSPN, ClientSPN
+from causallearn.utils.SPN import ServerSPN, ClientSPN, auto_tune_spn_config
 from causallearn.utils.data_utils import (
     my_simulate_general_hetero,
     my_simulate_linear_gaussian,
-    set_random_seed,
-    simulate_dag,
-)
-from causallearn.utils.data_utils import count_skeleton_accuracy
-from causallearn.utils.data_utils import (
+    count_dag_accuracy,
+    count_skeleton_accuracy,
     get_cpdag_from_cdnod,
     get_dag_from_pdag,
-    count_dag_accuracy,
+    set_random_seed,
+    simulate_dag,
 )
 import time
 import argparse
@@ -82,7 +80,31 @@ def test_fedCDH(
             num_clusters = 1  # Single mixture component for Horizontal
             threshold_val = 0.025
 
-        # 2. TUNING: Lower Threshold
+        # Extract Proxy Data (Simulate Client 0's view)
+        if scenario == "horizontal":
+            # Client 0 gets the first chunk of rows
+            proxy_indices = np.array_split(np.arange(X_global.shape[0]), K_clients)[0]
+            proxy_data = X_global[proxy_indices]
+        elif scenario == "vertical":
+            # Client 0 gets a subset of columns (features)
+            feats_per_client = d_features // K_clients
+            proxy_cols = list(range(0, feats_per_client))
+            proxy_data = X_global[:, proxy_cols]
+        elif scenario == "hybrid":
+            # Hybrid split logic (matching your splitting code below)
+            mid_feat = d_features // 2
+            cols = list(range(0, mid_feat + 1))
+            sample_splits = np.array_split(X_global, K_clients)
+            proxy_data = sample_splits[0][:, cols]
+
+        # Run Auto-Tuner
+        best_params = auto_tune_spn_config(
+            proxy_data,
+            num_clusters=num_clusters,
+            n_trials=15,  # Runs 15 quick experiments
+        )
+
+        #  Server & Client Initialization ---
         server = ServerSPN(
             global_num_features=d_features,
             scenario=scenario,
@@ -141,7 +163,7 @@ def test_fedCDH(
                 num_clusters=num_clusters,
                 **spn_config,
             )
-            client.train(X_splits[k], epochs=100, lr=0.05)
+            client.train(X_splits[k], epochs=30, lr=0.05)
 
             # Register with Server
             server.register_client(client, feature_indices=feat_indices[k])
@@ -158,14 +180,15 @@ def test_fedCDH(
             # CDNOD queries indices up to d (the domain index).
             # We must provide a matrix that includes this column to prevent "out of bounds".
             data_aug = np.hstack([X_global, c_indx])
+
             # 10 perms is for high precision. 5 perms is acceptable for a CPU Demo.
             return server.ci_test(
                 X_in,
                 Y_in,
                 Z_in,
                 data_matrix=data_aug,
-                num_permutations=5,
-                sigma_threshold=3.0,
+                num_permutations=2,
+                sigma_threshold=3.5,
             )
 
         oracle_wrapper.method = "spn"
@@ -296,11 +319,11 @@ if __name__ == "__main__":
     )
 
     # Existing parameters
-    parser.add_argument("--N", default=3, type=int, help="Number of test instances")
-    parser.add_argument("--d", default=10, type=int, help="Number of variables")
+    parser.add_argument("--N", default=1, type=int, help="Number of test instances")
+    parser.add_argument("--d", default=5, type=int, help="Number of variables")
     parser.add_argument("--K", default=2, type=int, help="Number of federated clients")
     parser.add_argument(
-        "--n", default=500, type=int, help="Number of samples per client"
+        "--n", default=200, type=int, help="Number of samples per client"
     )
     parser.add_argument(
         "--model_type",
@@ -312,7 +335,7 @@ if __name__ == "__main__":
     # New CI method selection parameter
     parser.add_argument(
         "--ci_method",
-        default="kci",
+        default="spn",
         type=str,
         choices=["kci", "spn", "gsq"],
         help="Conditional independence test method: kci (traditional), gsq, or spn (Sum-Product Networks)",
@@ -320,7 +343,7 @@ if __name__ == "__main__":
 
     parser.add_argument(
         "--scenario",
-        default="vertical",
+        default="hybrid",
         type=str,
         help="Data split scenario: horizontal, vertical or hybrid",
     )

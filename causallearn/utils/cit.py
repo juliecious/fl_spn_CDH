@@ -695,136 +695,145 @@ class D_Separation(CIT_Base):
 
 
 class SPN(CIT_Base):
-    def __init__(
-        self,
-        data: np.ndarray,
-        threshold: float = 0.015,
-        device: str = "cpu",
-        num_sums: int = 5,
-        num_leaves: int = 10,
-        num_repetitions: int = 5,
-        depth: int = 3,
-        weight_decay: float = 1e-4,
-        **kwargs,
-    ):
+    def __init__(self, data, global_model=None, **kwargs):
         super().__init__(data, **kwargs)
-        self.device = device
-        self.threshold = threshold
-        self.weight_decay = weight_decay
-        self.data = (
-            data  # Keep reference if needed by CIT_Base, but we use tensor below
-        )
-        self.method = "spn"
+        # Accept the pre-trained Federated/Global model
+        self.model = global_model
 
-        # 1. Initialize SPN Model
-        num_features = data.shape[1]
-        config = EinetConfig(
-            num_features=num_features,
-            num_channels=1,
-            num_sums=num_sums,
-            num_leaves=num_leaves,
-            num_repetitions=num_repetitions,
-            num_classes=1,
-            depth=depth,
-            leaf_type=Normal,
-            layer_type="linsum",
-            structure="top-down",
-        )
-        self.model = Einet(config).to(self.device)
+    def __call__(self, x_idx, y_idx, z_indices, *args, **kwargs):
+        # Delegate the test to the Global SPN's centralized method
+        return self.model.ci_test(x_idx, y_idx, z_indices)
 
-        # 2. Train Immediately (Standard CIT usually assumes ready-to-use)
-        self._train_model(data)
-
-        # 3. Prepare Inference Data
-        # For a standard CIT, we usually test on the same data provided,
-        # or you can modify this to accept a separate 'test' set if needed.
-        self.data_tensor = torch.tensor(data, dtype=torch.float32).to(self.device)
-
-    def __call__(
-        self, x_idx: int, y_idx: int, z_indices: List[int], *args, **kwargs
-    ) -> float:
-        """
-        The wrapper method required by causallearn (PC/CDNOD).
-
-        Args:
-            x_idx: Index of first variable.
-            y_idx: Index of second variable.
-            z_indices: List of indices for the conditioning set.
-
-        Returns:
-            p_value: 1.0 if Independent (CMI < Threshold), 0.0 if Dependent.
-        """
-        # 1. Calculate Conditional Mutual Information
-        cmi_score = self._calculate_cmi(x_idx, y_idx, list(z_indices))
-
-        # 2. Thresholding (Pseudo p-value generation)
-        if cmi_score < self.threshold:
-            return 1.0  # Independent (Fail to reject H0)
-        else:
-            return 0.0  # Dependent (Reject H0)
-
-    def _train_model(self, X_train):
-        """Internal training loop."""
-        logging.info("[SPN] Training internal Einet model...")
-        train_tensor = torch.tensor(X_train, dtype=torch.float32).to(self.device)
-        loader = DataLoader(TensorDataset(train_tensor), batch_size=128, shuffle=True)
-        optimizer = torch.optim.Adam(
-            self.model.parameters(),
-            lr=0.01,
-            weight_decay=self.weight_decay,
-        )
-        scheduler = torch.optim.lr_scheduler.ReduceLROnPlateau(
-            optimizer, mode="min", factor=0.5, patience=5
-        )
-
-        self.model.train()
-        best_loss = float("inf")
-        patience_counter = 0
-
-        for epoch in range(30):  # Fixed epochs for CIT convenience
-            epoch_loss = 0.0
-            for (batch,) in loader:
-                optimizer.zero_grad()
-                loss = -self.model(batch).mean()
-                loss.backward()
-
-                torch.nn.utils.clip_grad_norm_(self.model.parameters(), max_norm=1.0)
-
-                optimizer.step()
-                epoch_loss += loss.item()
-            avg_loss = epoch_loss / len(loader)
-
-            # Update Scheduler
-            scheduler.step(avg_loss)
-            if epoch % 10 == 0:
-                logging.info(
-                    f"    Epoch {epoch}: Avg Loss {avg_loss:.4f} | LR: {scheduler.get_last_lr()[0]:.6f}"
-                )
-            if avg_loss < best_loss - 1e-3:
-                best_loss = avg_loss
-                patience_counter = 0
-            else:
-                patience_counter += 1
-                if patience_counter >= 15:  # Stop if no improvement for 15 epochs
-                    logging.info(f"    [Early Stopping] Converged at epoch {epoch}")
-                    break
-        self.model.eval()
-
-    def _get_log_prob(self, current_vars: List[int]):
-        """Marginalize and compute Log-Likelihood."""
-        batch = torch.full_like(self.data_tensor, float("nan"))
-        for idx in current_vars:
-            batch[:, idx] = self.data_tensor[:, idx]
-
-        with torch.no_grad():
-            return self.model(batch).mean().item()
-
-    def _calculate_cmi(self, x, y, z):
-        """CMI = H(X,Z) + H(Y,Z) - H(X,Y,Z) - H(Z)"""
-        # Approximated via Log-Likelihoods
-        ll_xyz = self._get_log_prob([x, y] + z)
-        ll_xz = self._get_log_prob([x] + z)
-        ll_yz = self._get_log_prob([y] + z)
-        ll_z = self._get_log_prob(z) if z else 0.0
-
-        return max(0.0, ll_xyz - ll_xz - ll_yz + ll_z)
+    # def __init__(
+    #     self,
+    #     data: np.ndarray,
+    #     threshold: float = 0.015,
+    #     device: str = "cpu",
+    #     num_sums: int = 5,
+    #     num_leaves: int = 10,
+    #     num_repetitions: int = 5,
+    #     depth: int = 3,
+    #     weight_decay: float = 1e-4,
+    #     **kwargs,
+    # ):
+    #     super().__init__(data, **kwargs)
+    #     self.device = device
+    #     self.threshold = threshold
+    #     self.weight_decay = weight_decay
+    #     self.data = (
+    #         data  # Keep reference if needed by CIT_Base, but we use tensor below
+    #     )
+    #     self.method = "spn"
+    #
+    #     # 1. Initialize SPN Model
+    #     num_features = data.shape[1]
+    #     config = EinetConfig(
+    #         num_features=num_features,
+    #         num_channels=1,
+    #         num_sums=num_sums,
+    #         num_leaves=num_leaves,
+    #         num_repetitions=num_repetitions,
+    #         num_classes=1,
+    #         depth=depth,
+    #         leaf_type=Normal,
+    #         layer_type="linsum",
+    #         structure="top-down",
+    #     )
+    #     self.model = Einet(config).to(self.device)
+    #
+    #     # 2. Train Immediately (Standard CIT usually assumes ready-to-use)
+    #     self._train_model(data)
+    #
+    #     # 3. Prepare Inference Data
+    #     # For a standard CIT, we usually test on the same data provided,
+    #     # or you can modify this to accept a separate 'test' set if needed.
+    #     self.data_tensor = torch.tensor(data, dtype=torch.float32).to(self.device)
+    #
+    # def __call__(
+    #     self, x_idx: int, y_idx: int, z_indices: List[int], *args, **kwargs
+    # ) -> float:
+    #     """
+    #     The wrapper method required by causallearn (PC/CDNOD).
+    #
+    #     Args:
+    #         x_idx: Index of first variable.
+    #         y_idx: Index of second variable.
+    #         z_indices: List of indices for the conditioning set.
+    #
+    #     Returns:
+    #         p_value: 1.0 if Independent (CMI < Threshold), 0.0 if Dependent.
+    #     """
+    #     # 1. Calculate Conditional Mutual Information
+    #     cmi_score = self._calculate_cmi(x_idx, y_idx, list(z_indices))
+    #
+    #     # 2. Thresholding (Pseudo p-value generation)
+    #     if cmi_score < self.threshold:
+    #         return 1.0  # Independent (Fail to reject H0)
+    #     else:
+    #         return 0.0  # Dependent (Reject H0)
+    #
+    # def _train_model(self, X_train):
+    #     """Internal training loop."""
+    #     logging.info("[SPN] Training internal Einet model...")
+    #     train_tensor = torch.tensor(X_train, dtype=torch.float32).to(self.device)
+    #     loader = DataLoader(TensorDataset(train_tensor), batch_size=128, shuffle=True)
+    #     optimizer = torch.optim.Adam(
+    #         self.model.parameters(),
+    #         lr=0.01,
+    #         weight_decay=self.weight_decay,
+    #     )
+    #     scheduler = torch.optim.lr_scheduler.ReduceLROnPlateau(
+    #         optimizer, mode="min", factor=0.5, patience=5
+    #     )
+    #
+    #     self.model.train()
+    #     best_loss = float("inf")
+    #     patience_counter = 0
+    #
+    #     for epoch in range(30):  # Fixed epochs for CIT convenience
+    #         epoch_loss = 0.0
+    #         for (batch,) in loader:
+    #             optimizer.zero_grad()
+    #             loss = -self.model(batch).mean()
+    #             loss.backward()
+    #
+    #             torch.nn.utils.clip_grad_norm_(self.model.parameters(), max_norm=1.0)
+    #
+    #             optimizer.step()
+    #             epoch_loss += loss.item()
+    #         avg_loss = epoch_loss / len(loader)
+    #
+    #         # Update Scheduler
+    #         scheduler.step(avg_loss)
+    #         if epoch % 10 == 0:
+    #             logging.info(
+    #                 f"    Epoch {epoch}: Avg Loss {avg_loss:.4f} | LR: {scheduler.get_last_lr()[0]:.6f}"
+    #             )
+    #         if avg_loss < best_loss - 1e-3:
+    #             best_loss = avg_loss
+    #             patience_counter = 0
+    #         else:
+    #             patience_counter += 1
+    #             if patience_counter >= 15:  # Stop if no improvement for 15 epochs
+    #                 logging.info(f"    [Early Stopping] Converged at epoch {epoch}")
+    #                 break
+    #     self.model.eval()
+    #
+    # def _get_log_prob(self, current_vars: List[int]):
+    #     """Marginalize and compute Log-Likelihood."""
+    #     batch = torch.full_like(self.data_tensor, float("nan"))
+    #     for idx in current_vars:
+    #         batch[:, idx] = self.data_tensor[:, idx]
+    #
+    #     with torch.no_grad():
+    #         return self.model(batch).mean().item()
+    #
+    # def _calculate_cmi(self, x, y, z):
+    #     """CMI = H(X,Z) + H(Y,Z) - H(X,Y,Z) - H(Z)"""
+    #     # Approximated via Log-Likelihoods
+    #     ll_xyz = self._get_log_prob([x, y] + z)
+    #     ll_xz = self._get_log_prob([x] + z)
+    #     ll_yz = self._get_log_prob([y] + z)
+    #     ll_z = self._get_log_prob(z) if z else 0.0
+    #
+    #     return max(0.0, ll_xyz - ll_xz - ll_yz + ll_z)

@@ -6,6 +6,8 @@ from simple_einet.einet import Einet, EinetConfig
 from simple_einet.layers.distributions.normal import Normal
 from torch.utils.data import DataLoader, TensorDataset
 import torch.optim as optim
+import optuna
+from sklearn.model_selection import train_test_split
 
 
 class FederatedSPNBase:
@@ -33,22 +35,21 @@ class ClientSPN(FederatedSPNBase):
         num_sums: int = 10,  # K in Sum-Product (Capacity)
         num_leaves: int = 20,  # Resolution of leaf distributions
         num_repetitions: int = 5,  # Ensembling factor
+        lr: float = 0.05,
+        batch_size: int = 32,
     ):
         super().__init__(device)
         self.client_id = client_id
         self.num_features = num_features
         self.num_clusters = num_clusters
+        self.lr = lr
+        self.batch_size = batch_size
 
         # Calculate the mathematical limit for this specific client's feature count
         # e.g., if features=6, log2(6)=2.58 -> max_depth=2
         physical_max_depth = int(np.floor(np.log2(num_features)))
 
-        if depth is not None:
-            # If user requested a depth, use it, BUT do not exceed physical limit
-            actual_depth = min(depth, physical_max_depth)
-        else:
-            # Default logic
-            actual_depth = min(3, physical_max_depth)
+        actual_depth = min(depth, physical_max_depth)
 
         # Configuration matches the paper's "Federated PC" setup
         # num_classes = num_clusters (The Latent Variable L)
@@ -68,21 +69,25 @@ class ClientSPN(FederatedSPNBase):
         self.model = Einet(self.config).to(self.device)
         self.data_count = 0
 
-    def train(self, X_local: np.ndarray, epochs=100, lr=0.05, batch_size=32):
+    def train(self, X_local: np.ndarray, epochs=100, lr=None, batch_size=None):
         """
         Trains the local model with Mini-batches, LR Scheduler, and Early Stopping.
         """
         self.data_count = X_local.shape[0]
         self.model.train()
+        use_lr = lr if lr is not None else self.lr
+        use_bs = batch_size if batch_size is not None else self.batch_size
 
         # simple-einet expects [N, C, D] or [N, D]
         tensor_data = torch.tensor(X_local, dtype=torch.float32).to(self.device)
         dataset = TensorDataset(tensor_data)
         dataloader = DataLoader(
-            dataset, batch_size=batch_size, shuffle=True, drop_last=False
+            dataset, batch_size=use_bs, shuffle=True, drop_last=False
         )
 
-        optimizer = torch.optim.Adam(self.model.parameters(), lr=lr, weight_decay=1e-3)
+        optimizer = torch.optim.Adam(
+            self.model.parameters(), lr=use_lr, weight_decay=1e-3
+        )
         scheduler = optim.lr_scheduler.ReduceLROnPlateau(
             optimizer, mode="min", factor=0.5, patience=5
         )
@@ -345,3 +350,80 @@ class ServerSPN(FederatedSPNBase):
             # Marginalize Latent Cluster
         final_vals = torch.logsumexp(cluster_accumulators + log_prior, dim=1)
         return final_vals.mean().item()
+
+
+def auto_tune_spn_config(proxy_data, num_clusters=1, n_trials=15, device="cpu"):
+    """
+    Performs automated hyperparameter tuning on a slice of local data.
+    """
+    logging.info(
+        f"[Auto-Tune] Starting optimization on {proxy_data.shape} proxy samples..."
+    )
+
+    # 1. Split Proxy Data into Train/Val (80/20)
+    # Ensure we have enough data to split
+    if len(proxy_data) < 10:
+        logging.warning("[Auto-Tune] Not enough proxy data. Returning default config.")
+        return {
+            "num_sums": 10,
+            "num_leaves": 20,
+            "depth": 2,
+            "lr": 0.05,
+            "batch_size": 32,
+        }
+
+    train_data, val_data = train_test_split(proxy_data, test_size=0.2, random_state=42)
+    val_tensor = torch.tensor(val_data, dtype=torch.float32).to(device)
+
+    def objective(trial):
+        # --- Suggest Hyperparameters ---
+        num_sums = trial.suggest_int("num_sums", 5, 40)
+        num_leaves = trial.suggest_int("num_leaves", 5, 40)
+        depth = trial.suggest_int(
+            "depth", 1, 4
+        )  # 5 might be too deep for small features
+        lr = trial.suggest_float("lr", 1e-3, 1e-1, log=True)
+        batch_size = trial.suggest_categorical("batch_size", [32, 64, 128])
+
+        # --- Instantiate ClientSPN ---
+        # We use a dummy client_id=-1 since this is just for tuning
+        client = ClientSPN(
+            client_id=-1,
+            num_features=proxy_data.shape[1],
+            num_clusters=num_clusters,
+            device=device,
+            depth=depth,
+            num_sums=num_sums,
+            num_leaves=num_leaves,
+            num_repetitions=5,
+        )
+
+        # --- Short Training Loop (Warm-up) ---
+        # Train for only 5 epochs to get a performance signal quickly
+        try:
+            client.train(train_data, epochs=5, lr=lr, batch_size=batch_size)
+        except Exception as e:
+            # Prune invalid configs (e.g. diverging loss)
+            return float("inf")
+
+        # --- Evaluation ---
+        client.model.eval()
+        with torch.no_grad():
+            ll_output = client.model(val_tensor)
+            if num_clusters > 1:
+                log_prob = torch.logsumexp(ll_output, dim=1)
+            else:
+                log_prob = ll_output
+
+            # Minimize Negative Log-Likelihood
+            val_nll = -log_prob.mean().item()
+
+        return val_nll
+
+    # Run Optuna Study
+    optuna.logging.set_verbosity(optuna.logging.WARNING)
+    study = optuna.create_study(direction="minimize")
+    study.optimize(objective, n_trials=n_trials)
+
+    logging.info(f"[Auto-Tune] Best Params: {study.best_params}")
+    return study.best_params
