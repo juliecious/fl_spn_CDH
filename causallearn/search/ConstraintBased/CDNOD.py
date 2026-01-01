@@ -236,7 +236,7 @@ def cdnod_alg(
         1: print all fed p-values;
         2: fed cdnod voting-based;
     """
-    flag = -1
+    flag = 0
     print(f"*****#######  Skeleton Discovery Stage 1: No surrogate. Flag={flag}")
     cg_0 = SkeletonDiscovery.skeleton_discovery(
         flag, cg_list, data, K, alpha, indep_test_all, stable
@@ -261,7 +261,7 @@ def cdnod_alg(
         3: fed cdnod linearGaussian;
         4: fed cdnod GMM-based.
     """
-    flag = -1
+    flag = 0
     print(f"*****#######  Skeleton Discovery Stage 2: with surrogate. Flag={flag}")
     cg_1 = SkeletonDiscovery.skeleton_discovery_with_surrogate_GMM(
         flag, cg_0, cg_list, data_aug, K, alpha, indep_test_all, stable
