@@ -277,17 +277,30 @@ class ServerSPN(FederatedSPNBase):
 
     def _inference_horizontal(self, data: torch.Tensor, scope: List[int]) -> float:
         """
-        REFACTORED: Since FedAvg synchronizes weights, we use client[0] as the global proxy.
-        Cost: O(1) instead of O(K).
+        Ensemble Inference: P(X) = 1/K * Sum_k P_k(X)
+        Log-Space: log P(X) = logsumexp( log P_k(X) + log(1/K) )
         """
-        global_proxy = self.clients[0]
-        ll = self._get_client_log_prob(global_proxy, data, scope)
-        # Horizontal models return [N, 1] marginalized over Z (because num_clusters=1 usually)
-        # If num_clusters > 1 but Horizontal, we logsumexp locally.
-        if global_proxy.num_clusters > 1:
-            ll = torch.logsumexp(ll, dim=1)
+        # Prior for averaging: log(1/K)
+        log_weight = -np.log(len(self.clients))
 
-        return ll.mean().item()
+        client_lls = []
+        for client in self.clients:
+            # Query each client individually
+            ll = self._get_client_log_prob(client, data, scope)
+
+            # Handle multi-cluster clients if necessary
+            if client.num_clusters > 1:
+                ll = torch.logsumexp(ll, dim=1)
+
+            client_lls.append(ll)
+
+        # Stack shape: [K, N]
+        stacked_lls = torch.stack(client_lls, dim=0)
+
+        # LogSumExp over K (dim=0) to average probabilities
+        final_ll = torch.logsumexp(stacked_lls + log_weight, dim=0)
+
+        return final_ll.mean().item()
 
     def _inference_vertical(self, data: torch.Tensor, scope: List[int]) -> float:
         """
@@ -369,9 +382,9 @@ def auto_tune_spn_config(proxy_data, num_clusters=1, n_trials=15, device="cpu"):
     val_tensor = torch.tensor(val_data, dtype=torch.float32).to(device)
 
     def objective(trial):
-        num_sums = trial.suggest_int("num_sums", 5, 40)
-        num_leaves = trial.suggest_int("num_leaves", 5, 40)
-        depth = trial.suggest_int("depth", 1, 4)
+        num_sums = trial.suggest_int("num_sums", 20, 30)
+        num_leaves = trial.suggest_int("num_leaves", 10, 25)
+        depth = trial.suggest_int("depth", 2, 4)
         lr = trial.suggest_float("lr", 1e-3, 1e-1, log=True)
         batch_size = trial.suggest_categorical("batch_size", [32, 64, 128])
 

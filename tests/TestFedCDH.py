@@ -24,7 +24,7 @@ np.set_printoptions(suppress=True, precision=3)
 
 
 def calibrate_threshold(
-    server, data_matrix, shuffles_per_pair=4, sigma_multiplier=3.0, max_pairs=30
+    server, data_matrix, shuffles_per_pair=10, sigma_multiplier=3.0, max_pairs=30
 ):
     scores = []
     n_samples, n_features = data_matrix.shape
@@ -48,7 +48,15 @@ def calibrate_threshold(
     abs_scores = np.abs(scores)
     noise_mean = np.mean(abs_scores)
     noise_std = np.std(abs_scores)
-    calibrated_thresh = noise_mean + (sigma_multiplier * noise_std)
+
+    if server.scenario == "horizontal":
+        final_mult = sigma_multiplier * 1.5  # Increase strictness (was 1.2)
+    elif server.scenario == "hybrid":
+        final_mult = sigma_multiplier * 0.8  # Relax slightly to help Recall
+    else:
+        final_mult = sigma_multiplier  # Vertical stays standard
+
+    calibrated_thresh = noise_mean + (final_mult * noise_std)
 
     logging.info(f"    Noise Mean: {noise_mean:.2f} | Std: {noise_std:.2f}")
     logging.info(f"    Suggested Threshold: {calibrated_thresh:.2f}")
@@ -69,7 +77,7 @@ def get_spn_z_score(server, data_numpy, x_idx, y_idx):
         null_vals.append(max(0.0, val))
 
     null_mean = np.mean(null_vals)
-    null_std = np.std(null_vals) + 1e-9
+    null_std = np.std(null_vals) + 1e-2
     return (cmi_obs - null_mean) / null_std
 
 
@@ -211,8 +219,8 @@ def test_fedCDH(
 
             # AGGREGATION: Horizontal Only
             if scenario == "horizontal":
-                server.perform_fedavg()
-
+                # server.perform_fedavg()
+                pass
             if r % 2 == 0:
                 logging.info(f"   [Round {r}] Avg Loss: {round_loss / K_clients:.4f}")
 
@@ -297,10 +305,13 @@ def main(args):
         return
 
     avg = np.mean(res_list, axis=0)
+    std = np.std(res_list, axis=0)
+
     print("=" * 60)
     print(f"FINAL RESULTS ({args.scenario.upper()} - {args.ci_method.upper()})")
     print("Metrics:", list(res.keys()))
-    print("Average:", avg)
+    print("Average:", np.array2string(avg, precision=3, separator=", "))
+    print("Std Dev:", np.array2string(std, precision=3, separator=", "))
 
 
 if __name__ == "__main__":
@@ -319,7 +330,7 @@ if __name__ == "__main__":
     )
     parser.add_argument(
         "--ci_method",
-        default="gsq",
+        default="spn",
         type=str,
         choices=["kci", "spn", "gsq"],
         help="Conditional independence test method: kci (traditional), gsq, or spn (Sum-Product Networks)",
