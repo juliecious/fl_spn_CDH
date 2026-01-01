@@ -1,5 +1,7 @@
 import sys
 
+import torch
+
 sys.path.append("")
 import numpy as np
 from causallearn.search.ConstraintBased.CDNOD import cdnod
@@ -17,8 +19,96 @@ from causallearn.utils.data_utils import (
 import time
 import argparse
 import logging
+import itertools
 
 np.set_printoptions(suppress=True, precision=3)
+
+
+def calibrate_threshold(
+    server, data_matrix, shuffles_per_pair=4, sigma_multiplier=3.0, max_pairs=30
+):
+    """
+    Calibrates threshold using Mean + k*Std instead of Max/Percentile.
+    Robust against single outliers in the noise.
+    """
+    scores = []
+    n_samples, n_features = data_matrix.shape
+
+    # Strategy selection (Same as before)
+    if n_features < 10:
+        pairs_to_check = list(itertools.combinations(range(n_features), 2))
+    else:
+        pairs_to_check = [
+            np.random.choice(n_features, 2, replace=False) for _ in range(max_pairs)
+        ]
+
+    logging.info(f">>> [Calibration] Testing {len(pairs_to_check)} pairs...")
+
+    for idx_i, idx_j in pairs_to_check:
+        for _ in range(shuffles_per_pair):
+            decoy_matrix = data_matrix.copy()
+            np.random.shuffle(decoy_matrix[:, idx_j])
+            z_score = get_spn_z_score(server, decoy_matrix, idx_i, idx_j)
+            scores.append(z_score)
+
+    abs_scores = np.abs(scores)
+
+    # Mean + 3 Sigma (Robust)
+    noise_mean = np.mean(abs_scores)
+    noise_std = np.std(abs_scores)
+
+    # 3.0 is standard for "99.7% confidence" in a Normal distribution
+    calibrated_thresh = noise_mean + (sigma_multiplier * noise_std)
+
+    logging.info(f"    Noise Mean: {noise_mean:.2f} | Std: {noise_std:.2f}")
+    logging.info(
+        f"    Suggested Threshold (Mean + {sigma_multiplier}*Std): {calibrated_thresh:.2f}"
+    )
+
+    # Safety clamp: Don't let it go below 2.5 (too noisy) or above 5.0 (too strict)
+    final_threshold = np.clip(calibrated_thresh, 2.5, 5.0)
+
+    return final_threshold
+
+
+def get_spn_z_score(server, data_numpy, x_idx, y_idx):
+    """
+    Helper to extract the raw Z-score (Signal-to-Noise Ratio) from the SPN.
+    This mimics the internal logic of the CI test but returns the float score instead of boolean.
+    """
+    # Convert to tensor
+    data_t = torch.tensor(data_numpy, dtype=torch.float32).to(server.device)
+
+    # 1. Calculate Observed CMI (Conditional Mutual Information)
+    # Z is empty [] because we are calibrating pairwise independence
+    # _calculate_cmi_value should be available in your ServerSPN class logic
+    # If it's named differently (e.g. _calculate_cmi), adjust here.
+    cmi_obs = server._calculate_cmi_value(data_t, [x_idx], [y_idx], [])
+
+    # 2. Null Distribution (Permutation Test)
+    # We do a quick permutation to find the "Zero Baseline" for this specific pair
+    null_vals = []
+    # 5 permutations is enough for a rough Z-score estimate during calibration
+    for _ in range(5):
+        data_perm = data_t.clone()
+        perm_indices = torch.randperm(data_t.size(0))
+
+        # Shuffle X against Y (keeping others fixed)
+        data_perm[:, x_idx] = data_t[perm_indices, x_idx]
+
+        val = server._calculate_cmi_value(data_perm, [x_idx], [y_idx], [])
+        null_vals.append(max(0.0, val))  # CMI theoretically >= 0
+
+    null_mean = np.mean(null_vals)
+    null_std = np.std(null_vals)
+
+    # Avoid division by zero
+    if null_std < 1e-9:
+        null_std = 1e-9
+
+    # 3. Calculate Z-Score
+    z_score = (cmi_obs - null_mean) / null_std
+    return z_score
 
 
 # Simulation
@@ -59,49 +149,41 @@ def test_fedCDH(
     # Data Normalization (Crucial for SPNs)
     X_global = (X_global - X_global.mean(0)) / (X_global.std(0) + 1e-6)
 
+    logging.info(">>> Phase 1: Finding edges...")
     # 2. FEDERATED SETUP (Phase 1: Density Estimation)
     if ci_method == "spn":
-        logging.info(">>> Phase 1: Federated Training...")
         start_train = time.time()
-
-        if d_features >= 20:
-            spn_config = {"depth": 5, "num_sums": 20, "num_leaves": 40}
-        else:
-            spn_config = {"depth": 3, "num_sums": 10, "num_leaves": 20}
 
         # Configure Scenario
         if scenario == "hybrid":
-            num_clusters = 20  # Use latent clusters for vertical
-            threshold_val = 0.01
+            num_clusters = 10
         elif scenario == "vertical":
             num_clusters = 5
-            threshold_val = 0.01
-        else:
-            num_clusters = 1  # Single mixture component for Horizontal
-            threshold_val = 0.025
+        else:  # horizontal
+            num_clusters = 1
 
         # Extract Proxy Data (Simulate Client 0's view)
         if scenario == "horizontal":
-            # Client 0 gets the first chunk of rows
-            proxy_indices = np.array_split(np.arange(X_global.shape[0]), K_clients)[0]
-            proxy_data = X_global[proxy_indices]
-        elif scenario == "vertical":
-            # Client 0 gets a subset of columns (features)
-            feats_per_client = d_features // K_clients
-            proxy_cols = list(range(0, feats_per_client))
-            proxy_data = X_global[:, proxy_cols]
-        elif scenario == "hybrid":
-            # Hybrid split logic (matching your splitting code below)
-            mid_feat = d_features // 2
-            cols = list(range(0, mid_feat + 1))
-            sample_splits = np.array_split(X_global, K_clients)
-            proxy_data = sample_splits[0][:, cols]
+            # Client sees all features, but subset of rows
+            # We take the first chunk of data
+            chunk_size = X_global.shape[0] // K_clients
+            proxy_data = X_global[:chunk_size]
 
-        # Run Auto-Tuner
+        elif scenario == "vertical":
+            # Client sees all rows, but subset of features
+            # We take the first chunk of features
+            feat_chunk = d_features // K_clients
+            proxy_data = X_global[:, :feat_chunk]
+
+        elif scenario == "hybrid":
+            # Client sees subset rows AND subset features
+            chunk_size = X_global.shape[0] // K_clients
+            feat_chunk = d_features // 2  # Approximation of hybrid feature split
+            proxy_data = X_global[:chunk_size, :feat_chunk]
+
+        # Run Auto-Tuner to find optimal depth, leaves, lr, and batch_size
         best_params = auto_tune_spn_config(
-            proxy_data,
-            num_clusters=num_clusters,
-            n_trials=15,  # Runs 15 quick experiments
+            proxy_data, num_clusters=num_clusters, n_trials=5  # Keep low for speed
         )
 
         #  Server & Client Initialization ---
@@ -109,7 +191,7 @@ def test_fedCDH(
             global_num_features=d_features,
             scenario=scenario,
             num_clusters=num_clusters,
-            threshold=threshold_val,
+            threshold=0.01,  # Placeholder
         )
 
         # Simulate Clients
@@ -161,9 +243,9 @@ def test_fedCDH(
                 client_id=k,
                 num_features=X_splits[k].shape[1],
                 num_clusters=num_clusters,
-                **spn_config,
+                **best_params,  # Unpacks: depth, num_sums, lr, batch_size, etc.
             )
-            client.train(X_splits[k], epochs=30, lr=0.05)
+            client.train(X_splits[k], epochs=30)
 
             # Register with Server
             server.register_client(client, feature_indices=feat_indices[k])
@@ -171,15 +253,25 @@ def test_fedCDH(
         train_time = time.time() - start_train
         print(f">>> Phase 1 Complete ({train_time:.2f}s)")
 
+        # CDNOD queries indices up to d (the domain index).
+        # We must provide a matrix that includes this column to prevent "out of bounds".
+        data_aug = np.hstack([X_global, c_indx])
+
+        calibrated_threshold = calibrate_threshold(
+            server,
+            data_aug,
+            shuffles_per_pair=2,  # Fast calibration
+            sigma_multiplier=3.5,  # The "Goldilocks" setting
+        )
+        server.threshold = calibrated_threshold
+        suggested_threshold = calibrated_threshold
+
         # Define the Oracle Wrapper for CDNOD
         # This function signature must capture the 'server' object
         def oracle_wrapper(X_in, Y_in, Z_in=None, *args, **kwargs):
             # We must support the Z_in=None case for marginal independence
             if Z_in is None:
                 Z_in = []
-            # CDNOD queries indices up to d (the domain index).
-            # We must provide a matrix that includes this column to prevent "out of bounds".
-            data_aug = np.hstack([X_global, c_indx])
 
             # 10 perms is for high precision. 5 perms is acceptable for a CPU Demo.
             return server.ci_test(
@@ -188,13 +280,14 @@ def test_fedCDH(
                 Z_in,
                 data_matrix=data_aug,
                 num_permutations=2,
-                sigma_threshold=3.5,
+                sigma_threshold=suggested_threshold,
             )
 
         oracle_wrapper.method = "spn"
         indep_test_obj = oracle_wrapper
 
     else:
+        logging.info(">>> Phase 1: Finding edges...")
         # Benchmark Methods (KCI, FisherZ)
         indep_test_obj = ci_method
 
@@ -343,7 +436,7 @@ if __name__ == "__main__":
 
     parser.add_argument(
         "--scenario",
-        default="hybrid",
+        default="horizontal",
         type=str,
         help="Data split scenario: horizontal, vertical or hybrid",
     )
