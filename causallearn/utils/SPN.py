@@ -224,8 +224,19 @@ class ServerSPN(FederatedSPNBase):
         else:
             data_tensor = data_matrix
 
-        cmi_obs = self._calculate_cmi_value(data_tensor, x_idx, y_idx, z_idx)
+        # 1. Pre-calculate terms that don't change (Static)
+        # Optimization: These are calculated ONLY ONCE.
+        ll_z = self._federated_inference(data_tensor, z_idx) if z_idx else 0.0
+        ll_yz = self._federated_inference(data_tensor, y_idx + z_idx)
 
+        # 2. Calculate Observed CMI (Using the static terms)
+        ll_xyz = self._federated_inference(data_tensor, x_idx + y_idx + z_idx)
+        ll_xz = self._federated_inference(data_tensor, x_idx + z_idx)
+
+        # REFACTOR: Construct cmi_obs manually to avoid re-computing ll_z/ll_yz
+        cmi_obs = ll_xyz - ll_xz - ll_yz + ll_z
+
+        # 3. Permutation Loop (Using the static terms)
         null_dist = []
         for _ in range(num_permutations):
             perm_indices = torch.randperm(data_tensor.size(0), device=self.device)
@@ -233,7 +244,11 @@ class ServerSPN(FederatedSPNBase):
             for x_i in x_idx:
                 data_perm[:, x_i] = data_tensor[perm_indices, x_i]
 
-            val = self._calculate_cmi_value(data_perm, x_idx, y_idx, z_idx)
+            # Only calculate the terms that changed
+            ll_xyz_perm = self._federated_inference(data_perm, x_idx + y_idx + z_idx)
+            ll_xz_perm = self._federated_inference(data_perm, x_idx + z_idx)
+
+            val = ll_xyz_perm - ll_xz_perm - ll_yz + ll_z
             null_dist.append(max(0.0, val))
 
         null_mean = np.mean(null_dist)
@@ -277,30 +292,26 @@ class ServerSPN(FederatedSPNBase):
 
     def _inference_horizontal(self, data: torch.Tensor, scope: List[int]) -> float:
         """
-        Ensemble Inference: P(X) = 1/K * Sum_k P_k(X)
-        Log-Space: log P(X) = logsumexp( log P_k(X) + log(1/K) )
+        Federated Ensemble (Voting)
+        Instead of averaging weights (which destroys structure), we average predictions.
         """
-        # Prior for averaging: log(1/K)
-        log_weight = -np.log(len(self.clients))
-
+        # 1. Query every client for their local log-probability
         client_lls = []
         for client in self.clients:
-            # Query each client individually
-            ll = self._get_client_log_prob(client, data, scope)
-
-            # Handle multi-cluster clients if necessary
+            local_ll = self._get_client_log_prob(client, data, scope)
+            # Ensure shape is [N]
             if client.num_clusters > 1:
-                ll = torch.logsumexp(ll, dim=1)
+                local_ll = torch.logsumexp(local_ll, dim=1)
+            client_lls.append(local_ll)
 
-            client_lls.append(ll)
+        # 2. Stack and Average in Log-Space (LogSumExp)
+        # Formula: log( 1/K * sum(exp(ll_k)) ) = logsumexp(ll_k) - log(K)
+        stacked_lls = torch.stack(client_lls, dim=0)  # [K, N]
+        log_k = np.log(len(self.clients))
 
-        # Stack shape: [K, N]
-        stacked_lls = torch.stack(client_lls, dim=0)
+        ensemble_ll = torch.logsumexp(stacked_lls, dim=0) - log_k
 
-        # LogSumExp over K (dim=0) to average probabilities
-        final_ll = torch.logsumexp(stacked_lls + log_weight, dim=0)
-
-        return final_ll.mean().item()
+        return ensemble_ll.mean().item()
 
     def _inference_vertical(self, data: torch.Tensor, scope: List[int]) -> float:
         """
