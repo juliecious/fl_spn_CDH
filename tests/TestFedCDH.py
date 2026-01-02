@@ -19,6 +19,7 @@ import time
 import argparse
 import logging
 import itertools
+from tqdm import tqdm
 
 np.set_printoptions(suppress=True, precision=3)
 
@@ -38,7 +39,7 @@ def calibrate_threshold(
 
     logging.info(f">>> [Calibration] Testing {len(pairs_to_check)} pairs...")
 
-    for idx_i, idx_j in pairs_to_check:
+    for idx_i, idx_j in tqdm(pairs_to_check, desc="Calibrating Threshold"):
         for _ in range(shuffles_per_pair):
             decoy_matrix = data_matrix.copy()
             np.random.shuffle(decoy_matrix[:, idx_j])
@@ -50,9 +51,9 @@ def calibrate_threshold(
     noise_std = np.std(abs_scores)
 
     if server.scenario == "horizontal":
-        final_mult = sigma_multiplier * 1.5  # Increase strictness (was 1.2)
+        final_mult = sigma_multiplier * 1.0
     elif server.scenario == "hybrid":
-        final_mult = sigma_multiplier * 0.8  # Relax slightly to help Recall
+        final_mult = sigma_multiplier * 0.8
     else:
         final_mult = sigma_multiplier  # Vertical stays standard
 
@@ -317,14 +318,14 @@ def main(args):
 if __name__ == "__main__":
     parser = argparse.ArgumentParser()
     parser.add_argument("--N", default=1, type=int, help="Number of test instances")
-    parser.add_argument("--d", default=5, type=int, help="Number of variables")
+    parser.add_argument("--d", default=10, type=int, help="Number of variables")
     parser.add_argument("--K", default=2, type=int, help="Number of federated clients")
     parser.add_argument(
-        "--n", default=200, type=int, help="Number of samples per client"
+        "--n", default=1_00, type=int, help="Number of samples per client"
     )
     parser.add_argument(
         "--model_type",
-        default="linear",
+        default="general",
         type=str,
         help="Data generation model: linear or general",
     )
