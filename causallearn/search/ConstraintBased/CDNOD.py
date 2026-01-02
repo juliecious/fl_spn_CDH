@@ -17,6 +17,9 @@ from causallearn.search.ConstraintBased.PC import (
     skeleton_correction,
 )
 
+from sklearn.kernel_approximation import Nystroem
+from sklearn.kernel_approximation import RBFSampler
+from mlxtend.preprocessing import standardize
 from copy import deepcopy
 from causallearn.graph.Edge import Edge
 from causallearn.graph.Endpoint import Endpoint
@@ -34,10 +37,35 @@ def my_cov(X, Y: np.ndarray = None):
     return cov / factor
 
 
-from sklearn.kernel_approximation import Nystroem
-from sklearn.kernel_approximation import RBFSampler
-from sklearn.kernel_approximation import RBFSampler
-from mlxtend.preprocessing import standardize
+def get_hsic_score_fast(X, Y, C_f, iCcc):
+    """
+    Optimized version that accepts pre-computed C features and Inverse Covariance.
+    """
+    h = 5
+    feature_map = Nystroem(gamma=0.2, n_components=h, random_state=1)
+
+    X_f = feature_map.fit_transform(X)
+    Y_f = feature_map.fit_transform(Y)
+
+    XY = np.concatenate((X, Y), axis=1)
+    XY_f = feature_map.fit_transform(XY)
+
+    Cxyc = my_cov(XY_f, C_f)
+    Cxc = my_cov(X_f, C_f)
+    Cyc = my_cov(Y_f, C_f)
+
+    # iCcc is already computed!
+    Mu_xy = Cxyc @ iCcc @ C_f.T
+    Mu_x = Cxc @ iCcc @ C_f.T
+    Mu_y = Cyc @ iCcc @ C_f.T
+
+    hsic_x_y = np.sum(my_cov(Mu_x, Mu_xy) ** 2) / np.trace(my_cov(Mu_x))
+    hsic_y_x = np.sum(my_cov(Mu_y, Mu_xy) ** 2) / np.trace(my_cov(Mu_y))
+
+    if hsic_x_y < hsic_y_x:
+        return 1
+    else:
+        return 2
 
 
 def get_hsic_score(X, Y, C):
@@ -318,42 +346,37 @@ def cdnod_alg(
         raise ValueError("uc_rule should be in [0, 1, 2]")
 
     """
-    Stage 3: Independent change. Use HSIC
-    This code is devoloped based on CDNOD long-version paper and their MATLAB code.
+    Stage 3: Independent change. Use HSIC.
     """
-    print("#######  Direction determination: using HSIC.")
-    # 1. Find all undirected edges. d=obs+sur
-    # 1.1 Get undirected edges from all surrogate variables.
-    vh = []  # variables in heteregeneity.
+    print("#######  Direction determination: using HSIC (Optimized).")
+
+    # 1. Identify all undirected edges
+    vh = []
     for i in range(d - 1):
         if (cg.G.graph[i, d - 1] == 1) and (cg.G.graph[d - 1, i] == -1):
             vh.append(i)
+
     if len(vh) >= 2:
-        vh = combinations(vh, 2)
+        vh_pairs = combinations(vh, 2)
     else:
-        vh = []
-    # print(f"The list 1 is: {vh}. All combinations: {vhs}.")
+        vh_pairs = []
 
-    # 1.2 Get undirected edges from all undirected variables.
-    # vh = []
-    # for i in range(d-1):
-    #     for j in range(i,d-1):
-    #         if (cg.G.graph[i,j]==-1) and (cg.G.graph[j,i]==-1):
-    #             vh.append((i,j))
-    # print(f"the list 2 is: {vh}.")
+    # Pre-compute Nystroem features for C
+    # This is what makes it fast. We calculate the expensive Kernel C once.
+    feature_map = Nystroem(gamma=0.2, n_components=5, random_state=1)
+    C_f = feature_map.fit_transform(c_indx)
 
-    # 2. Calculate HSIC.
-    for v in vh:
+    # Pre-compute Inverse Covariance of C
+    Ccc = my_cov(C_f, C_f)
+    iCcc = np.linalg.inv(Ccc + np.eye(5) * 1e-10)
+
+    for v in vh_pairs:
         i, j = v
-        # print(f"i={i}, j={j}.")
-        """
-        Score_i_j:
-            1: i -> j;
-            2: j -> i.
-        """
-        score_i_j = get_hsic_score(
-            data[:, i].reshape(-1, 1), data[:, j].reshape(-1, 1), c_indx
+        # CALL THE FAST FUNCTION HERE:
+        score_i_j = get_hsic_score_fast(
+            data[:, i].reshape(-1, 1), data[:, j].reshape(-1, 1), C_f, iCcc
         )
+
         if score_i_j == 1:
             cg.G.add_edge(
                 Edge(cg.G.nodes[i], cg.G.nodes[j], Endpoint.TAIL, Endpoint.ARROW)
@@ -365,16 +388,6 @@ def cdnod_alg(
 
     end = time.time()
     cg.PC_elapsed = end - start
-
-    # from causallearn.utils.GraphUtils import GraphUtils
-    # pyd = GraphUtils.to_pydot(cg.G)
-    # pyd.write_png('result/fedcdn2/Lktest_cg6.png')
-
-    # pyd = GraphUtils.to_pydot(cg_2.G)
-    # pyd.write_png('result/Lktest_exp3_test2.png')
-
-    # pyd = GraphUtils.to_pydot(cg.G)
-    # pyd.write_png('result/Lktest_exp3_test3.png')
 
     return cg
 
