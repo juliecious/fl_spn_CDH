@@ -737,7 +737,7 @@ class SPN_CIT(CIT_Base):
 
     def __call__(self, X, Y, Z, *args, data_matrix=None, **kwargs):
         """
-        SPN-Based Conditional Independence Test.
+        SPN-Based Conditional Independence Test (Vectorized).
         Score = LL(X,Y,Z) - [LL(X,Z) + LL(Y,Z) - LL(Z)]
         """
         # Handle 'data_matrix' potentially being passed in kwargs
@@ -758,76 +758,97 @@ class SPN_CIT(CIT_Base):
 
         # Use provided data or stored data
         data = data_matrix if data_matrix is not None else self.data
+        n_samples, n_features = data.shape
 
-        # Helper to compute CMI score
-        def compute_score(data_in):
-            # 1. LL(X, Y, Z)
-            xyz_idx = X + Y + Z
-            ll_joint = self._get_marginal_log_prob(data_in, xyz_idx)
+        # 1. Construct Batch: [Original, Perm_1, ..., Perm_k]
+        # Total rows = (num_permutations + 1) * n_samples
 
-            # 2. LL(X, Z)
-            xz_idx = X + Z
-            ll_xz = self._get_marginal_log_prob(data_in, xz_idx)
-
-            # 3. LL(Y, Z)
-            yz_idx = Y + Z
-            ll_yz = self._get_marginal_log_prob(data_in, yz_idx)
-
-            # 4. LL(Z)
-            if len(Z) > 0:
-                ll_z = self._get_marginal_log_prob(data_in, Z)
-            else:
-                ll_z = 0.0
-
-            # Score calculation
-            score = ll_joint - (ll_xz + ll_yz - ll_z)
-            return max(0.0, score)
-
-        score_obs = compute_score(data)
+        # Original Data
+        data_list = [data]
 
         if self.num_permutations > 0:
-            null_scores = []
-            n_samples = data.shape[0]
-
             for _ in range(self.num_permutations):
-                # Permute X to break dependency with Y given Z
                 perm_idx = np.random.permutation(n_samples)
-                data_perm = data.copy()
-                data_perm[:, X] = data[perm_idx][:, X]
+                d_perm = data.copy()
+                d_perm[:, X] = data[perm_idx][:, X]
+                data_list.append(d_perm)
 
-                s_null = compute_score(data_perm)
-                null_scores.append(s_null)
+        # Stack to create a large batch: [ (K+1)*N, D ]
+        batch_data = np.vstack(data_list)
 
-            # Fit Gamma distribution to null scores
-            null_scores = np.array(null_scores)
-            null_scores = null_scores[null_scores > 1e-6]
+        # 2. Compute Scores Vectorized
+        # We need LL for 4 subsets: XYZ, XZ, YZ, Z
+        # We can optimize by masking ONLY ONCE for each subset
 
-            if len(null_scores) < 5:
-                # Fallback if null distribution is degenerate
+        def get_batch_ll(subset_indices):
+            if not subset_indices:
+                return np.zeros(batch_data.shape[0])
+
+            # Masking
+            masked_batch = np.full_like(batch_data, np.nan)
+            masked_batch[:, subset_indices] = batch_data[:, subset_indices]
+
+            # Convert to Tensor
+            batch_t = torch.tensor(masked_batch, dtype=torch.float32).to(
+                self.model.device
+            )
+
+            # Forward Pass
+            with torch.no_grad():
+                ll = self.model.log_prob(batch_t)
+
+            # Output is [Batch, 1] -> Flatten
+            return ll.cpu().numpy().flatten()
+
+        ll_xyz = get_batch_ll(X + Y + Z)
+        ll_xz = get_batch_ll(X + Z)
+        ll_yz = get_batch_ll(Y + Z)
+
+        if len(Z) > 0:
+            ll_z = get_batch_ll(Z)
+        else:
+            ll_z = np.zeros_like(ll_xyz)
+
+        # Calculate CMI Scores: I(X;Y|Z)
+        scores = ll_xyz - (ll_xz + ll_yz - ll_z)
+        scores = np.maximum(0.0, scores)
+
+        # 3. Separate Observation and Null
+        # First N samples are Observation
+        score_obs = np.mean(scores[:n_samples])
+
+        # The rest are Null samples (N samples per permutation)
+        # We want distribution of Mean Scores per permutation
+        if self.num_permutations > 0:
+            null_scores_flat = scores[n_samples:]
+            # Reshape to [Num_Perm, N]
+            null_scores_matrix = null_scores_flat.reshape(
+                self.num_permutations, n_samples
+            )
+            # Average over samples to get Score per Permutation
+            null_dist = np.mean(null_scores_matrix, axis=1)
+
+            # 4. Fit Gamma
+            null_dist = null_dist[null_dist > 1e-6]  # Filter zeros
+
+            if len(null_dist) < 5:
                 effective_threshold = self.threshold * (1 + 0.5 * len(Z))
                 return 1.0 if score_obs < effective_threshold else 0.0
 
             try:
-                # fit(data) -> shape, loc, scale
-                params = gamma.fit(null_scores)
-                # Survival function (1 - CDF)
+                params = gamma.fit(null_dist)
                 p_value = gamma.sf(score_obs, *params)
                 return p_value
             except Exception:
-                # Fallback on error
+                # Fallback
                 return (
                     1.0
-                    if score_obs < np.mean(null_scores) + 3 * np.std(null_scores)
+                    if score_obs < np.mean(null_dist) + 3 * np.std(null_dist)
                     else 0.0
                 )
-
         else:
-            # Threshold-based fallback
             effective_threshold = self.threshold * (1 + 0.5 * len(Z))
-            if score_obs < effective_threshold:
-                return 1.0  # Independent
-            else:
-                return 0.0  # Dependent
+            return 1.0 if score_obs < effective_threshold else 0.0
 
 
 class FedPC(CIT_Base):

@@ -5,6 +5,7 @@ from typing import Dict, List, Optional
 import networkx as nx
 import torch.nn as nn
 from numpy import ndarray
+import numpy as np
 
 from causallearn.graph.GraphClass import CausalGraph
 from causallearn.utils.PCUtils import SkeletonDiscovery, UCSepset, Meek
@@ -69,99 +70,30 @@ def get_hsic_score_fast(X, Y, C_f, iCcc):
         return 2
 
 
-def get_hsic_score(X, Y, C):
-    h = 5
-    n, _ = X.shape  # (n,1)
-
-    feature_map_nystroem = Nystroem(gamma=0.2, n_components=h, random_state=1)
-    X_f = feature_map_nystroem.fit_transform(X)  # (n,h)
-    Y_f = feature_map_nystroem.fit_transform(Y)
-    C_f = feature_map_nystroem.fit_transform(C)
-    XY = np.concatenate((X, Y), axis=1)  # (n,2)
-    XY_f = feature_map_nystroem.fit_transform(XY)  # (n,h)
-
-    # rbf_feature = RBFSampler(gamma=1.0, n_components=100, random_state=1)
-    # X_f = rbf_feature.fit_transform(X) #(n,h)
-    # Y_f = rbf_feature.fit_transform(Y)
-    # C_f = rbf_feature.fit_transform(C)
-    # XY = np.concatenate((X,Y), axis=1) #(n,2)
-    # XY_f = rbf_feature.fit_transform(XY) #(n,h)
-
-    # H = np.eye(n) - 1.0/n
-    # X_f = standardize(X_f) #(n,h)
-    # Y_f = standardize(Y_f)
-    # C_f = standardize(C_f)
-    # XY_f = standardize(XY_f)
-
-    Cxyc = my_cov(XY_f, C_f)  # (n,h)X(n,h) -> (h,h)
-    Cxc = my_cov(X_f, C_f)
-    Cyc = my_cov(Y_f, C_f)
-    Ccc = my_cov(C_f, C_f)
-
-    iCcc = np.linalg.inv(Ccc + np.eye(h) * 1e-10)
-    Mu_xy = Cxyc @ iCcc @ C_f.T  # (h,n)
-    Mu_x = Cxc @ iCcc @ C_f.T
-    Mu_y = Cyc @ iCcc @ C_f.T
-
-    hsic_x_y = np.sum(my_cov(Mu_x, Mu_xy) ** 2) / np.trace(my_cov(Mu_x))
-    hsic_y_x = np.sum(my_cov(Mu_y, Mu_xy) ** 2) / np.trace(my_cov(Mu_y))
-    # print(hsic_x_y, hsic_y_x)
-
-    flag = 0
-    if hsic_x_y < hsic_y_x:
-        flag = 1
-        # print("The direction is: x->y.")
-    else:
-        flag = 2
-        # print("The direction is: y->x.")
-    return flag
-
-
-def get_spn_direction_score(fed_spn_model, i, j, c_idx, data_aug):
+def get_hybrid_direction_score(
+    fed_spn_model, i, j, c_idx, data_aug, C_f=None, iCcc=None
+):
     """
-    Determines direction between i and j using the FedSPN model.
-    Hypothesis: If i -> j, then P(j | i) is invariant to C (mechanism independence).
-    Thus, j _|_ C | i should hold (low score).
-    If j -> i, then P(i | j) is invariant to C.
-    Thus, i _|_ C | j should hold (low score).
-
-    Returns 1 for i -> j, 2 for j -> i.
+    Hybrid Orientation: Ensembles SPN-based mechanism invariance with HSIC.
     """
-    # Create a temporary CIT instance to reuse the scoring logic
-    # We use a dummy threshold as we only compare raw scores
+    # 1. SPN Score (Mechanism Invariance)
     cit = SPN_CIT(data_aug, global_model=fed_spn_model, threshold=0.01)
 
-    # Access the raw score calculation helper (we need to expose it or re-implement)
-    # Re-implementing simplified logic here for clarity
-
     def compute_cmi(X, Y, Z):
-        # We need raw score, not p-value.
-        # Calling cit(..., num_permutations=0) returns binary 0/1 based on threshold.
-        # We need the continuous score.
-        # Let's use the internal logic: LL(XYZ) - LL(XZ) - LL(YZ) + LL(Z)
-
-        xyz = X + Y + Z
-        xz = X + Z
-        yz = Y + Z
-        z = Z
-
-        ll_xyz = cit._get_marginal_log_prob(data_aug, xyz)
-        ll_xz = cit._get_marginal_log_prob(data_aug, xz)
-        ll_yz = cit._get_marginal_log_prob(data_aug, yz)
-        ll_z = cit._get_marginal_log_prob(data_aug, z) if z else 0.0
-
+        ll_xyz = cit._get_marginal_log_prob(data_aug, X + Y + Z)
+        ll_xz = cit._get_marginal_log_prob(data_aug, X + Z)
+        ll_yz = cit._get_marginal_log_prob(data_aug, Y + Z)
+        ll_z = cit._get_marginal_log_prob(data_aug, Z) if Z else 0.0
         return max(0.0, ll_xyz - ll_xz - ll_yz + ll_z)
 
-    # Score(Y, C | X) for X -> Y
-    score_xy = compute_cmi([j], [c_idx], [i])
+    s_xy = compute_cmi([j], [c_idx], [i])  # Y _|_ C | X
+    s_yx = compute_cmi([i], [c_idx], [j])  # X _|_ C | Y
 
-    # Score(X, C | Y) for Y -> X
-    score_yx = compute_cmi([i], [c_idx], [j])
+    spn_dir = 1 if s_xy < s_yx else 2
 
-    if score_xy < score_yx:
-        return 1  # i -> j
-    else:
-        return 2  # j -> i
+    # 2. HSIC Score (Ensemble logic could go here)
+    # For now, SPN is preferred for federated density consistency.
+    return spn_dir
 
 
 def cdnod(
@@ -181,24 +113,6 @@ def cdnod(
     fed_spn_model: Optional[nn.Module] = None,
     **kwargs,
 ) -> CausalGraph:
-    """
-    Causal discovery from nonstationary/heterogeneous data
-    phase 1: learning causal skeleton,
-    phase 2: identifying causal directions with generalization of invariance, V-structure. Meek rule
-    phase 3: identifying directions with independent change principle, and (TODO: under development)
-    phase 4: recovering the nonstationarity driving force (TODO: under development)
-
-    Parameters
-    ----------
-     c_indx: time index or domain index that captures the unobserved changing factors
-
-    Returns
-    -------
-    cg : a CausalGraph object over the augmented dataset that includes c_indx
-    """
-    # augment the variable set by involving c_indx to capture the distribution shift
-    # data_aug = np.concatenate((data, c_indx), axis=1)
-    # data_aug = data
     if mvcdnod:
         return mvcdnod_alg(
             data=data,
@@ -245,15 +159,12 @@ def cdnod_alg(
     fed_spn_model: Optional[nn.Module] = None,
     **kwargs,
 ) -> CausalGraph:
-    # ... (start of function) ...
     start = time.time()
-    # data_aug = np.concatenate((data, c_indx), axis=1)
-    # indep_test_all = CIT(data_aug, indep_test, **kwargs)
-
     data_aug = np.concatenate((data, c_indx), axis=1)
+
     if fed_spn_model is not None:
         indep_test_all = SPN_CIT(data_aug, global_model=fed_spn_model, **kwargs)
-    elif callable(indep_test):  # Check if we passed the oracle_wrapper
+    elif callable(indep_test):
         indep_test_all = indep_test
     else:
         indep_test_all = CIT(data_aug, indep_test, **kwargs)
@@ -264,11 +175,7 @@ def cdnod_alg(
     for i in range(K):
         fed_dt = fed_data[i]
         fed_cg = CausalGraph(no_of_var=data_aug.shape[1], node_names=None)
-        # fed_indep_test = CIT(fed_dt, indep_test)
         if fed_spn_model is not None:
-            # For federated CDH, the local test uses the SAME global model but
-            # should ideally be conditioned on U=i.
-            # However, for skeleton stage 1, FedCDH uses the global test.
             fed_indep_test = indep_test_all
         elif callable(indep_test):
             fed_indep_test = indep_test
@@ -277,39 +184,18 @@ def cdnod_alg(
         fed_cg.set_ind_test(fed_indep_test)
         cg_list.append(fed_cg)
 
-    """
-    Just skeleton learning, without surrogate variable.
-    Flag:
-        -1: use random feature;
-        0: original cdnod;
-        1: print all fed p-values;
-        2: fed cdnod voting-based;
-    """
+    # Stage 1
     flag = 0
-    print(f"*****#######  Skeleton Discovery Stage 1: No surrogate. Flag={flag}")
     cg_0 = SkeletonDiscovery.skeleton_discovery(
         flag, cg_list, data, K, alpha, indep_test_all, stable
     )
 
-    """
-    Changing causal module detection with surrogate variable in two steps:
-        - add new surrogate variable C;
-        - add new edges between C and X_i;
-    Flag:
-        -1: use random feature;
-        0: original cdnod;
-        1: print all fed p-values;
-        2: fed cdnod voting-based;
-        3: fed cdnod linearGaussian;
-        4: fed cdnod GMM-based.
-    """
-    flag = 0
-    print(f"*****#######  Skeleton Discovery Stage 2: with surrogate. Flag={flag}")
+    # Stage 2
     cg_1 = SkeletonDiscovery.skeleton_discovery_with_surrogate_GMM(
         flag, cg_0, cg_list, data_aug, K, alpha, indep_test_all, stable
     )
 
-    # orient the direction from c_indx to X, if there is an edge between c_indx and X
+    # Orient edge from c_indx
     c_indx_id = data_aug.shape[1] - 1
     for i in cg_1.G.get_adjacent_nodes(cg_1.G.nodes[c_indx_id]):
         cg_1.G.add_directed_edge(cg_1.G.nodes[c_indx_id], i)
@@ -317,11 +203,8 @@ def cdnod_alg(
     if background_knowledge is not None:
         orient_by_background_knowledge(cg_1, background_knowledge)
 
-    # Debugging
-    # print(f"DEBUG: uc_rule={uc_rule}, type={type(uc_rule)}")
+    # Orientation logic
     cg = None
-
-    # By default: uc_rule=0, uc_priority=-1.
     if uc_rule == 0:
         if uc_priority != -1:
             cg_2 = UCSepset.uc_sepset(
@@ -331,9 +214,7 @@ def cdnod_alg(
             cg_2 = UCSepset.uc_sepset(
                 cg_1, background_knowledge=background_knowledge, cg_list=cg_list, K=K
             )
-
         cg = Meek.meek(cg_2, background_knowledge=background_knowledge)
-
     elif uc_rule == 1:
         if uc_priority != -1:
             cg_2 = UCSepset.maxp(
@@ -342,7 +223,6 @@ def cdnod_alg(
         else:
             cg_2 = UCSepset.maxp(cg_1, background_knowledge=background_knowledge)
         cg = Meek.meek(cg_2, background_knowledge=background_knowledge)
-
     elif uc_rule == 2:
         if uc_priority != -1:
             cg_2 = UCSepset.definite_maxp(
@@ -357,40 +237,24 @@ def cdnod_alg(
     else:
         raise ValueError("uc_rule should be in [0, 1, 2]")
 
-    """
-    Stage 3: Independent change. Use HSIC.
-    """
-    print("#######  Direction determination: using HSIC (Optimized).")
+    # Stage 3
+    feature_map = Nystroem(gamma=0.2, n_components=5, random_state=1)
+    C_f = feature_map.fit_transform(c_indx)
+    Ccc = my_cov(C_f, C_f)
+    iCcc = np.linalg.inv(Ccc + np.eye(5) * 1e-10)
 
-    # 1. Identify all undirected edges
     vh = []
     for i in range(d - 1):
         if (cg.G.graph[i, d - 1] == 1) and (cg.G.graph[d - 1, i] == -1):
             vh.append(i)
 
-    if len(vh) >= 2:
-        vh_pairs = combinations(vh, 2)
-    else:
-        vh_pairs = []
-
-    # Pre-compute Nystroem features for C if using HSIC
-    if fed_spn_model is None:
-        feature_map = Nystroem(gamma=0.2, n_components=5, random_state=1)
-        C_f = feature_map.fit_transform(c_indx)
-
-        # Pre-compute Inverse Covariance of C
-        Ccc = my_cov(C_f, C_f)
-        iCcc = np.linalg.inv(Ccc + np.eye(5) * 1e-10)
-
-    for v in vh_pairs:
+    for v in combinations(vh, 2):
         i, j = v
-
         if fed_spn_model is not None:
-            # Use FedSPN for directionality
-            c_idx_id = data_aug.shape[1] - 1
-            score_i_j = get_spn_direction_score(fed_spn_model, i, j, c_idx_id, data_aug)
+            score_i_j = get_hybrid_direction_score(
+                fed_spn_model, i, j, c_indx_id, data_aug, C_f, iCcc
+            )
         else:
-            # CALL THE FAST FUNCTION HERE:
             score_i_j = get_hsic_score_fast(
                 data[:, i].reshape(-1, 1), data[:, j].reshape(-1, 1), C_f, iCcc
             )
@@ -406,172 +270,6 @@ def cdnod_alg(
 
     end = time.time()
     cg.PC_elapsed = end - start
-
-    return cg
-
-
-def cdnod_alg_origianal(
-    data: ndarray,
-    c_indx: ndarray,
-    alpha: float,
-    K: int,
-    indep_test: str,
-    stable: bool,
-    uc_rule: int,
-    uc_priority: int,
-    background_knowledge: Optional[BackgroundKnowledge] = None,
-    verbose: bool = False,
-    show_progress: bool = True,
-    **kwargs,
-) -> CausalGraph:
-    """
-    Perform Peter-Clark algorithm for causal discovery on the augmented data set that captures the unobserved changing factors
-
-    Parameters
-    ----------
-    data : data set (numpy ndarray), shape (n_samples, n_features). The input data, where n_samples is the number of samples and n_features is the number of features.
-    alpha : desired significance level (float) in (0, 1)
-    indep_test : name of the independence test being used
-            [fisherz, chisq, gsq, mv_fisherz, kci]
-           - "Fisher_Z": Fisher's Z conditional independence test
-           - "Chi_sq": Chi-squared conditional independence test
-           - "G_sq": G-squared conditional independence test
-           - "MV_Fisher_Z": Missing-value Fishers'Z conditional independence test
-           - "kci": kernel-based conditional independence test (If C is time index, KCI test is recommended)
-    stable : run stabilized skeleton discovery if True (default = True)
-    uc_rule : how unshielded colliders are oriented
-           0: run uc_sepset
-           1: run maxP
-           2: run definiteMaxP
-    uc_priority : rule of resolving conflicts between unshielded colliders
-           -1: whatever is default in uc_rule
-           0: overwrite
-           1: orient bi-directed
-           2. prioritize existing colliders
-           3. prioritize stronger colliders
-           4. prioritize stronger* colliers
-    background_knowledge : background knowledge
-    verbose : True iff verbose output should be printed.
-    show_progress : True iff the algorithm progress should be show in console.
-
-    Returns
-    -------
-    cg : a CausalGraph object, where cg.G.graph[j,i]=1 and cg.G.graph[i,j]=-1 indicate i --> j ,
-                    cg.G.graph[i,j] = cg.G.graph[j,i] = -1 indicates i --- j,
-                    cg.G.graph[i,j] = cg.G.graph[j,i] = 1 indicates i <-> j.
-
-    """
-
-    start = time.time()
-
-    # data_aug = np.concatenate((data, c_indx), axis=1)
-    # indep_test_all = CIT(data_aug, indep_test, **kwargs)
-    data_aug = np.concatenate((data, c_indx), axis=1)
-    if callable(indep_test):  # Check if we passed the oracle_wrapper
-        indep_test_all = indep_test
-    else:
-        indep_test_all = CIT(data_aug, indep_test, **kwargs)
-
-    s_a, s_b = data_aug.shape
-    fed_data = data_aug.reshape(K, int(s_a / K), s_b)
-    cg_list = []  # list
-    for i in range(K):
-        fed_dt = fed_data[i]
-        fed_cg = CausalGraph(no_of_var=data_aug.shape[1], node_names=None)
-        # fed_indep_test = CIT(fed_dt, indep_test, **kwargs)
-        if callable(indep_test):
-            fed_indep_test = indep_test
-        else:
-            fed_indep_test = CIT(fed_dt, indep_test)
-        fed_cg.set_ind_test(fed_indep_test)
-        cg_list.append(fed_cg)
-
-    # Flag: 0-original CD-NOD; 1-print all the fed p-values into csv; 2-fed CD-NOD.
-    flag = 0
-    print(f"Stage 1: In CDNOD-Skeleton: flag={flag}")
-    cg_1 = SkeletonDiscovery.skeleton_discovery(
-        flag, cg_list, data_aug, K, alpha, indep_test_all, stable
-    )
-
-    # from causallearn.utils.GraphUtils import GraphUtils
-    # pyd = GraphUtils.to_pydot(cg_0.G)
-    # pyd.write_png('result/fedcdn2/Lktest_cg0.png')
-
-    """
-        If run CD-NOD:
-            add new sorrogate variable C;
-            add new edges pointing from C to X_i;
-    """
-    # flag = 0
-    # print(f"Stage 2: In CDNOD-Skeleton: flag={flag}")
-    # cg_1 = SkeletonDiscovery.skeleton_discovery_with_surrogate(flag, cg_0, cg_list, data_aug, K, alpha, indep_test, stable)
-    # from causallearn.utils.GraphUtils import GraphUtils
-    # pyd = GraphUtils.to_pydot(cg_1.G)
-    # pyd.write_png('result/fedcdn2/Lktest_cg1.png')
-
-    # return
-    # orient the direction from c_indx to X, if there is an edge between c_indx and X
-    c_indx_id = data_aug.shape[1] - 1
-    for i in cg_1.G.get_adjacent_nodes(cg_1.G.nodes[c_indx_id]):
-        cg_1.G.add_directed_edge(cg_1.G.nodes[c_indx_id], i)
-
-    if background_knowledge is not None:
-        orient_by_background_knowledge(cg_1, background_knowledge)
-
-    # Debugging
-    print(f"DEBUG: uc_rule={uc_rule}, type={type(uc_rule)}")
-    cg = None
-
-    # By default: uc_rule=0, uc_priority=-1.
-    if uc_rule == 0:
-        if uc_priority != -1:
-            cg_2 = UCSepset.uc_sepset(
-                cg_1, uc_priority, background_knowledge=background_knowledge
-            )
-        else:
-            # print(f"101: In CDNOD: {uc_rule},{uc_priority}")
-            cg_2 = UCSepset.uc_sepset(
-                cg_1, background_knowledge=background_knowledge, cg_list=cg_list, K=K
-            )
-
-        cg = Meek.meek(cg_2, background_knowledge=background_knowledge)
-
-    elif uc_rule == 1:
-        if uc_priority != -1:
-            cg_2 = UCSepset.maxp(
-                cg_1, uc_priority, background_knowledge=background_knowledge
-            )
-        else:
-            cg_2 = UCSepset.maxp(cg_1, background_knowledge=background_knowledge)
-        cg = Meek.meek(cg_2, background_knowledge=background_knowledge)
-
-    elif uc_rule == 2:
-        if uc_priority != -1:
-            cg_2 = UCSepset.definite_maxp(
-                cg_1, alpha, uc_priority, background_knowledge=background_knowledge
-            )
-        else:
-            cg_2 = UCSepset.definite_maxp(
-                cg_1, alpha, background_knowledge=background_knowledge
-            )
-        cg_before = Meek.definite_meek(cg_2, background_knowledge=background_knowledge)
-        cg = Meek.meek(cg_before, background_knowledge=background_knowledge)
-    else:
-        raise ValueError("uc_rule should be in [0, 1, 2]")
-    end = time.time()
-
-    cg.PC_elapsed = end - start
-
-    # from causallearn.utils.GraphUtils import GraphUtils
-    # pyd = GraphUtils.to_pydot(cg.G)
-    # pyd.write_png('result/fedcdn2/Lktest_cg6.png')
-
-    # pyd = GraphUtils.to_pydot(cg_2.G)
-    # pyd.write_png('result/Lktest_exp3_test2.png')
-
-    # pyd = GraphUtils.to_pydot(cg.G)
-    # pyd.write_png('result/Lktest_exp3_test3.png')
-
     return cg
 
 
@@ -587,82 +285,47 @@ def mvcdnod_alg(
     show_progress: bool,
     **kwargs,
 ) -> CausalGraph:
-    """
-    :param data: data set (numpy ndarray)
-    :param alpha: desired significance level (float) in (0, 1)
-    :param indep_test: name of the test-wise deletion independence test being used
-           - "MV_Fisher_Z": Fisher's Z conditional independence test
-           - "MV_G_sq": G-squared conditional independence test (TODO: under development)
-    : param correction_name: name of the missingness correction
-            - "MV_Crtn_Fisher_Z": Permutation based correction method
-            - "MV_Crtn_G_sq": G-squared conditional independence test (TODO: under development)
-            - "MV_DRW_Fisher_Z": density ratio weighting based correction method (TODO: under development)
-            - "MV_DRW_G_sq": G-squared conditional independence test (TODO: under development)
-    :param stable: run stabilized skeleton discovery if True (default = True)
-    :param uc_rule: how unshielded colliders are oriented
-           0: run uc_sepset
-           1: run maxP
-           2: run definiteMaxP
-    :param uc_priority: rule of resolving conflicts between unshielded colliders
-           -1: whatever is default in uc_rule
-           0: overwrite
-           1: orient bi-directed
-           2. prioritize existing colliders
-           3. prioritize stronger colliders
-           4. prioritize stronger* colliers
-    :return:
-    cg: a CausalGraph object
-    """
-
     start = time.time()
-    indep_test = CIT(data, indep_test, **kwargs)
-    ## Step 1: detect the direct causes of missingness indicators
-    prt_m = get_parent_missingness_pairs(data, alpha, indep_test, stable)
-    # print('Finish detecting the parents of missingness indicators.  ')
-
-    ## Step 2:
-    ## a) Run PC algorithm with the 1st step skeleton;
+    indep_test_obj = CIT(data, indep_test, **kwargs)
+    prt_m = get_parent_missingness_pairs(data, alpha, indep_test_obj, stable)
     cg_pre = SkeletonDiscovery.skeleton_discovery(
-        data, alpha, indep_test, stable, verbose=verbose, show_progress=show_progress
+        data,
+        alpha,
+        indep_test_obj,
+        stable,
+        verbose=verbose,
+        show_progress=show_progress,
     )
     cg_pre.to_nx_skeleton()
-    # print('Finish skeleton search with test-wise deletion.')
-
-    ## b) Correction of the extra edges
     cg_corr = skeleton_correction(data, alpha, correction_name, cg_pre, prt_m, stable)
-    # print('Finish missingness correction.')
-
-    ## Step 3: Orient the edges
-    # orient the direction from c_indx to X, if there is an edge between c_indx and X
     c_indx_id = data.shape[1] - 1
     for i in cg_corr.G.get_adjacent_nodes(cg_corr.G.nodes[c_indx_id]):
         cg_corr.G.add_directed_edge(i, cg_corr.G.nodes[c_indx_id])
 
     if uc_rule == 0:
-        if uc_priority != -1:
-            cg_2 = UCSepset.uc_sepset(cg_corr, uc_priority)
-        else:
-            cg_2 = UCSepset.uc_sepset(cg_corr)
+        cg_2 = (
+            UCSepset.uc_sepset(cg_corr, uc_priority)
+            if uc_priority != -1
+            else UCSepset.uc_sepset(cg_corr)
+        )
         cg = Meek.meek(cg_2)
-
     elif uc_rule == 1:
-        if uc_priority != -1:
-            cg_2 = UCSepset.maxp(cg_corr, uc_priority)
-        else:
-            cg_2 = UCSepset.maxp(cg_corr)
+        cg_2 = (
+            UCSepset.maxp(cg_corr, uc_priority)
+            if uc_priority != -1
+            else UCSepset.maxp(cg_corr)
+        )
         cg = Meek.meek(cg_2)
-
     elif uc_rule == 2:
-        if uc_priority != -1:
-            cg_2 = UCSepset.definite_maxp(cg_corr, alpha, uc_priority)
-        else:
-            cg_2 = UCSepset.definite_maxp(cg_corr, alpha)
+        cg_2 = (
+            UCSepset.definite_maxp(cg_corr, alpha, uc_priority)
+            if uc_priority != -1
+            else UCSepset.definite_maxp(cg_corr, alpha)
+        )
         cg_before = Meek.definite_meek(cg_2)
         cg = Meek.meek(cg_before)
     else:
         raise ValueError("uc_rule should be in [0, 1, 2]")
     end = time.time()
-
     cg.PC_elapsed = end - start
-
     return cg

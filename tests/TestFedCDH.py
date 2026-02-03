@@ -11,7 +11,6 @@ sys.path.append("")
 
 from causallearn.search.ConstraintBased.CDNOD import cdnod
 from causallearn.utils.FedPC import (
-    FedPC,
     GlobalFedSPN,
     LocalSPNWrapper,
     auto_tune_spn_config,
@@ -139,70 +138,122 @@ def test_fedCDH(i, args):
         X_splits = []
         feature_maps = {}  # k -> list of indices
         global_strategy = "mixture"
+        num_clusters = 5  # Number of latent variables H
 
         if scenario == "horizontal":
             # Split samples (Rows), All Features
             X_splits = np.array_split(X_global, K_clients)
             for k in range(K_clients):
                 feature_maps[k] = list(range(d_features))
-            global_strategy = "mixture"
+
+            local_models = []
+            for k in range(K_clients):
+                logging.info(f"   Training Client {k+1}/{K_clients}...")
+                local_data = X_splits[k]
+                local_d = local_data.shape[1]
+                safe_depth = max(1, int(np.floor(np.log2(local_d))))
+                leaf = LocalSPNWrapper(
+                    num_features=local_d,
+                    device=device,
+                    num_sums=20,
+                    num_leaves=20,
+                    depth=safe_depth,
+                    num_repetitions=5,
+                    seed=i * 100 + k,
+                )
+                leaf.train_local(local_data, epochs=30, lr=0.01)
+                local_models.append(leaf)
+
+            global_spn = GlobalFedSPN(
+                local_models,
+                device=device,
+                feature_map=feature_maps,
+                strategy="mixture",
+            )
 
         elif scenario == "vertical":
-            # Split features (Cols), All Samples
-            # e.g., K=2, d=5 -> Client 0: [0,1,2], Client 1: [3,4]
+            # Latent Variable Federated Circuit (Mixture of Products)
+            # 1. Split features
             cols_per_client = np.array_split(range(d_features), K_clients)
             for k in range(K_clients):
-                cols = cols_per_client[k].tolist()
-                X_splits.append(X_global[:, cols])
-                feature_maps[k] = cols
-            global_strategy = "product"
+                feature_maps[k] = cols_per_client[k].tolist()
+                X_splits.append(X_global[:, feature_maps[k]])
+
+            # 2. Define Latent Components via Clustering (Proxy)
+            from sklearn.cluster import KMeans
+
+            kmeans = KMeans(n_clusters=num_clusters, n_init=10).fit(X_global)
+            labels = kmeans.labels_
+            weights = np.bincount(labels, minlength=num_clusters) / len(labels)
+
+            # 3. Train Client Components for each cluster
+            # clients_clusters[cluster_idx][client_idx]
+            clients_clusters = [[] for _ in range(num_clusters)]
+
+            for h in range(num_clusters):
+                cluster_mask = labels == h
+                if cluster_mask.sum() < 10:
+                    continue
+
+                for k in range(K_clients):
+                    logging.info(f"   Training Client {k+1}, Cluster {h+1}...")
+                    local_data_h = X_splits[k][cluster_mask]
+                    local_d = local_data_h.shape[1]
+                    safe_depth = max(1, int(np.floor(np.log2(local_d))))
+                    leaf = LocalSPNWrapper(
+                        num_features=local_d,
+                        device=device,
+                        num_sums=10,
+                        num_leaves=10,
+                        depth=safe_depth,
+                        num_repetitions=5,
+                        seed=i * 100 + h * 10 + k,
+                    )
+                    leaf.train_local(local_data_h, epochs=20, lr=0.01)
+                    clients_clusters[h].append(leaf)
+
+            # 4. Construct Hierarchy: GlobalFedSPN -> FederatedProduct -> LocalSPNWrapper
+            from causallearn.utils.FedPC import FederatedProduct
+
+            products = []
+            for h in range(num_clusters):
+                if len(clients_clusters[h]) == K_clients:
+                    prod = FederatedProduct(
+                        clients_clusters[h], feature_map=feature_maps, device=device
+                    )
+                    products.append(prod)
+
+            global_spn = GlobalFedSPN(
+                products, weights=weights[: len(products)], device=device
+            )
 
         elif scenario == "hybrid":
             # Simulation: Treat as Horizontal for density estimation benchmark purposes
-            # (simple mixture of experts) but acknowledging heterogeneity.
-            # Real Hybrid needs complex missing value handling not in scope for simple-einet wrapper yet.
-            # Falling back to Horizontal Logic for 'Hybrid' label to ensure run completion.
             X_splits = np.array_split(X_global, K_clients)
+            feature_maps = {k: list(range(d_features)) for k in range(K_clients)}
+            local_models = []
             for k in range(K_clients):
-                feature_maps[k] = list(range(d_features))
-            global_strategy = "mixture"
-
-        local_models = []
-
-        # Train Local SPNs
-        for k in range(K_clients):
-            logging.info(f"   Training Client {k+1}/{K_clients}...")
-
-            # Use local data slice
-            local_data = X_splits[k]
-            local_d = local_data.shape[1]
-
-            # Calculate safe depth based on LOCAL dimension
-            safe_depth = max(1, int(np.floor(np.log2(local_d))))
-
-            leaf = LocalSPNWrapper(
-                num_features=local_d,
+                logging.info(f"   Training Client {k+1}/{K_clients}...")
+                local_data = X_splits[k]
+                local_d = local_data.shape[1]
+                safe_depth = max(1, int(np.floor(np.log2(local_d))))
+                leaf = LocalSPNWrapper(
+                    num_features=local_d,
+                    device=device,
+                    num_sums=20,
+                    num_leaves=20,
+                    depth=safe_depth,
+                    num_repetitions=5,
+                    seed=i * 100 + k,
+                )
+                leaf.train_local(local_data, epochs=30, lr=0.01)
+                local_models.append(leaf)
+            global_spn = GlobalFedSPN(
+                local_models,
                 device=device,
-                num_sums=10,
-                num_leaves=10,
-                depth=safe_depth,
-                num_repetitions=5,
-                seed=i * 100 + k,  # Ensure structural heterogeneity per client
+                feature_map=feature_maps,
+                strategy="mixture",
             )
-
-            # Train
-            loss = leaf.train_local(local_data, epochs=30, lr=0.01)
-            logging.info(f"      Client {k} Loss: {loss:.4f}")
-            local_models.append(leaf)
-
-        # Create Global SPN
-        # Weights are uniform if sample sizes are equal
-        global_spn = GlobalFedSPN(
-            local_models,
-            device=device,
-            feature_map=feature_maps,
-            strategy=global_strategy,
-        )
 
         # Wrap for FedCDH (handling U index)
         # U is the last column (index d_features) in data_aug
@@ -219,7 +270,6 @@ def test_fedCDH(i, args):
     start_cd = time.time()
 
     # Run CDNOD
-    # Note: We pass fed_spn_model. If None, it falls back to 'fisherz' or whatever 'indep_test' is.
     cg = cdnod(
         X_global,
         c_indx,
@@ -227,9 +277,10 @@ def test_fedCDH(i, args):
         alpha=0.01,
         indep_test=ci_method,
         stable=True,
-        uc_rule=2,  # Definite MaxP for conservative orientation
+        uc_rule=2,
         uc_priority=-1,
         fed_spn_model=fed_spn_model,
+        num_permutations=50,  # Explicitly set for all scenarios
     )
     cd_time = time.time() - start_cd
 
