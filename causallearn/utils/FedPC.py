@@ -2,12 +2,13 @@ import torch
 import torch.nn as nn
 import numpy as np
 import logging
+from typing import List, Dict, Optional, Union
 from simple_einet.einet import Einet, EinetConfig
 from simple_einet.layers.distributions.normal import Normal
 from sklearn.cluster import KMeans
 
 
-class LocalLeafSPN(nn.Module):
+class LocalSPNWrapper(nn.Module):
     def __init__(
         self,
         num_features,
@@ -16,9 +17,17 @@ class LocalLeafSPN(nn.Module):
         num_sums=20,
         num_leaves=20,
         num_repetitions=10,
+        seed=None,
     ):
         super().__init__()
         self.device = device
+        self.mean = None
+        self.std = None
+
+        # Ensure structural heterogeneity by seeding
+        if seed is not None:
+            torch.manual_seed(seed)
+            np.random.seed(seed)
 
         # [FIX 1] Increased Capacity:
         # num_sums 5->20, num_leaves 5->20, repetitions 1->10
@@ -36,10 +45,22 @@ class LocalLeafSPN(nn.Module):
         )
         self.model = Einet(self.config).to(device)
 
+    def _normalize(self, data):
+        if self.mean is None or self.std is None:
+            return data
+        return (data - self.mean) / (self.std + 1e-6)
+
     def train_local(self, data, epochs=50, lr=0.005):
         """Train this specific leaf on its data slice."""
         if len(data) < 5:
             return 0.0
+
+        # Compute and store normalization stats
+        self.mean = torch.tensor(data.mean(axis=0), dtype=torch.float32).to(self.device)
+        self.std = torch.tensor(data.std(axis=0), dtype=torch.float32).to(self.device)
+
+        data_t = torch.tensor(data, dtype=torch.float32).to(self.device)
+        data_t = self._normalize(data_t)
 
         self.model.train()
 
@@ -47,8 +68,6 @@ class LocalLeafSPN(nn.Module):
         # Adam is fine if LR is low enough. 0.01 was too high.
         # Alternatively use SGD(lr=0.001) like Jonas, but Adam 0.005 is a good middle ground.
         optimizer = torch.optim.Adam(self.model.parameters(), lr=lr)
-
-        data_t = torch.tensor(data, dtype=torch.float32).to(self.device)
 
         final_ll = 0.0
         for _ in range(epochs):
@@ -61,10 +80,35 @@ class LocalLeafSPN(nn.Module):
         return final_ll
 
     def sample(self, n):
-        return self.model.sample(n)
+        samples = self.model.sample(n)
+        if self.mean is not None and self.std is not None:
+            samples = samples * (self.std + 1e-6) + self.mean
+        return samples
 
     def log_prob(self, x):
-        return self.model(x)
+        x_norm = self._normalize(x)
+        # Jacobian adjustment for log-likelihood:
+        # log P(x) = log P(z) + log |dz/dx|
+        # z = (x - mu) / sigma  =>  dz/dx = 1/sigma
+        # log |dz/dx| = - log(sigma)
+        # ONLY for observed variables
+        ll = self.model(x_norm)
+
+        if self.std is not None:
+            # Create mask for observed values (1 if observed, 0 if NaN)
+            mask = (~torch.isnan(x)).float()
+
+            # Calculate per-dimension log determinant: -log(sigma)
+            # Expand std to match batch size if needed (it is 1D tensor [D])
+            log_sigma = torch.log(self.std + 1e-6)
+
+            # Sum over dimensions, respecting the mask
+            # [Batch, D] * [D] -> [Batch, D] -> Sum -> [Batch]
+            log_det_jacobian = -(log_sigma * mask).sum(dim=1, keepdim=True)
+
+            ll = ll + log_det_jacobian
+
+        return ll
 
 
 class FedPC(nn.Module):
@@ -85,7 +129,7 @@ class FedPC(nn.Module):
         # Structure:
         # Root is a Sum Node (Cluster Mixture).
         # Children are Product Nodes (Client Composition).
-        # Grandchildren are LocalLeafSPNs.
+        # Grandchildren are LocalSPNWrapper.
 
         # self.leaves[cluster_idx][client_idx]
         self.leaves = nn.ModuleList(
@@ -109,7 +153,7 @@ class FedPC(nn.Module):
 
         for k in range(self.num_clusters):
             # Create a dedicated local model for each cluster component
-            leaf = LocalLeafSPN(
+            leaf = LocalSPNWrapper(
                 num_features=num_feat, device=self.device, **leaf_params
             )
             self.leaves[k][client_idx] = leaf
@@ -274,3 +318,123 @@ class FedPC(nn.Module):
         log_P_X_given_Z = torch.cat(cluster_log_probs, dim=1)
         log_weights = torch.log(self.cluster_weights + 1e-12).unsqueeze(0)
         return torch.logsumexp(log_weights + log_P_X_given_Z, dim=1)
+
+
+class GlobalFedSPN(nn.Module):
+    """
+    Global Federated SPN (Horizontal/Mixture Strategy).
+    Models P(X) = Sum_k alpha_k * P_k(X).
+    Supports conditioning on Client Index U for FedCDH.
+    """
+
+    def __init__(
+        self, clients: List[LocalSPNWrapper], weights: List[float] = None, device="cpu"
+    ):
+        super().__init__()
+        self.clients = nn.ModuleList(clients)
+        self.device = device
+
+        if weights is None:
+            # Default to uniform weights
+            n = len(clients)
+            weights = [1.0 / n] * n
+
+        self.weights = torch.tensor(weights, dtype=torch.float32).to(device)
+
+    def log_prob(self, x):
+        """
+        Computes log P(X) = log( Sum_k alpha_k * P_k(X) )
+        x: [N, D]
+        """
+        # Collect log probs from all clients: List of [N, 1]
+        # Each client model expects the full feature vector (or handles its subset)
+        # Assuming Horizontal FL where all clients see all features.
+        client_lls = [c.log_prob(x) for c in self.clients]
+
+        # Stack: [N, K]
+        ll_stack = torch.cat(client_lls, dim=1)
+
+        # Log weights: [1, K]
+        log_w = torch.log(self.weights + 1e-9).unsqueeze(0)
+
+        # LogSumExp over the client dimension (dim=1)
+        return torch.logsumexp(ll_stack + log_w, dim=1, keepdim=True)
+
+    def log_prob_conditional_u(self, x, u_idx):
+        """
+        Computes P(X | U=k).
+        In FedCDH, conditioning on the client index k simply means
+        using the k-th client's distribution.
+
+        x: [N, D]
+        u_idx: int (The client index k)
+        """
+        if 0 <= u_idx < len(self.clients):
+            return self.clients[u_idx].log_prob(x)
+        else:
+            raise ValueError(
+                f"Client index {u_idx} out of bounds (0 to {len(self.clients)-1})"
+            )
+
+
+def auto_tune_spn_config(proxy_data, num_clusters=1, n_trials=15, device="cpu"):
+    # ... placeholder or original implementation if needed ...
+    # For now, returning default dict as I overwrote the file
+    # But wait, I should keep the original implementation if possible.
+    # The read_file showed it at the end. I will copy it back.
+    import optuna
+    from sklearn.model_selection import train_test_split
+
+    logging.info(
+        f"[Auto-Tune] Starting optimization on {proxy_data.shape} proxy samples..."
+    )
+
+    # SAFETY: Handle NaNs in proxy data
+    proxy_data = np.nan_to_num(proxy_data, nan=0.0)
+
+    if len(proxy_data) < 10:
+        return {
+            "num_sums": 10,
+            "num_leaves": 20,
+            "depth": 2,
+            "lr": 0.05,
+            "batch_size": 32,
+        }
+
+    train_data, val_data = train_test_split(proxy_data, test_size=0.2, random_state=42)
+    val_tensor = torch.tensor(val_data, dtype=torch.float32).to(device)
+
+    def objective(trial):
+        num_sums = trial.suggest_int("num_sums", 20, 30)
+        num_leaves = trial.suggest_int("num_leaves", 10, 25)
+        depth = trial.suggest_int("depth", 2, 4)
+        lr = trial.suggest_float("lr", 1e-3, 1e-1, log=True)
+        batch_size = trial.suggest_categorical("batch_size", [32, 64, 128])
+
+        # IMPORTANT: Use LocalSPNWrapper here!
+        client = LocalSPNWrapper(
+            num_features=proxy_data.shape[1],
+            device=device,
+            depth=depth,
+            num_sums=num_sums,
+            num_leaves=num_leaves,
+            num_repetitions=5,
+        )
+
+        try:
+            client.train_local(train_data, epochs=5, lr=lr)
+        except Exception:
+            return float("inf")
+
+        client.model.eval()
+        with torch.no_grad():
+            ll_output = client.log_prob(val_tensor)
+            val_nll = -ll_output.mean().item()
+
+        return val_nll
+
+    optuna.logging.set_verbosity(optuna.logging.WARNING)
+    study = optuna.create_study(direction="minimize")
+    study.optimize(objective, n_trials=n_trials)
+    logging.info(f"[Auto-Tune] Best Params: {study.best_params}")
+    return study.best_params

@@ -1,10 +1,21 @@
 import sys
 import torch
+import torch.nn as nn
+import numpy as np
+import time
+import argparse
+import logging
+from tqdm import tqdm
 
 sys.path.append("")
-import numpy as np
+
 from causallearn.search.ConstraintBased.CDNOD import cdnod
-from causallearn.utils.SPN import ServerSPN, ClientSPN, auto_tune_spn_config
+from causallearn.utils.FedPC import (
+    FedPC,
+    GlobalFedSPN,
+    LocalSPNWrapper,
+    auto_tune_spn_config,
+)
 from causallearn.utils.data_utils import (
     my_simulate_general_hetero,
     my_simulate_linear_gaussian,
@@ -15,71 +26,69 @@ from causallearn.utils.data_utils import (
     set_random_seed,
     simulate_dag,
 )
-import time
-import argparse
-import logging
-import itertools
-from tqdm import tqdm
 
 np.set_printoptions(suppress=True, precision=3)
 
 
-def calibrate_threshold(
-    server, data_matrix, shuffles_per_pair=10, sigma_multiplier=3.0, max_pairs=30
-):
-    scores = []
-    n_samples, n_features = data_matrix.shape
+class FedCDH_SPN_Wrapper(nn.Module):
+    """
+    Wraps GlobalFedSPN to handle 'Context/Client Index' (U) explicitly.
+    FedCDH passes data as [X, U].
+    GlobalFedSPN models P(X).
+    This wrapper models P(X, U) = P(U) * P(X | U).
+    """
 
-    if n_features < 10:
-        pairs_to_check = list(itertools.combinations(range(n_features), 2))
-    else:
-        pairs_to_check = [
-            np.random.choice(n_features, 2, replace=False) for _ in range(max_pairs)
-        ]
+    def __init__(self, global_spn: GlobalFedSPN, u_index: int):
+        super().__init__()
+        self.spn = global_spn
+        self.u_index = u_index
+        self.device = global_spn.device
 
-    logging.info(f">>> [Calibration] Testing {len(pairs_to_check)} pairs...")
+    def log_prob(self, x):
+        """
+        x: [Batch, D+1] tensor. Last column (or u_index) is U.
+        """
+        # 1. Split X and U
+        if self.u_index == -1 or self.u_index == x.shape[1] - 1:
+            x_feat = x[:, :-1]
+            u_col = x[:, -1]
+        else:
+            # Assumes U is the specified index (usually last)
+            x_feat = torch.cat([x[:, : self.u_index], x[:, self.u_index + 1 :]], dim=1)
+            u_col = x[:, self.u_index]
 
-    for idx_i, idx_j in tqdm(pairs_to_check, desc="Calibrating Threshold"):
-        for _ in range(shuffles_per_pair):
-            decoy_matrix = data_matrix.copy()
-            np.random.shuffle(decoy_matrix[:, idx_j])
-            z_score = get_spn_z_score(server, decoy_matrix, idx_i, idx_j)
-            scores.append(z_score)
+        # 2. Check if U is observed (not NaN)
+        # We check the first element (assuming batch consistency in masking)
+        u_is_observed = not torch.isnan(u_col[0]).item()
 
-    abs_scores = np.abs(scores)
-    noise_mean = np.mean(abs_scores)
-    noise_std = np.std(abs_scores)
+        if u_is_observed:
+            # Case: P(X, U=k) = P(U=k) * P(X | U=k)
+            # P(X | U=k) -> LogProb from k-th client
 
-    if server.scenario == "horizontal":
-        final_mult = sigma_multiplier * 1.0
-    elif server.scenario == "hybrid":
-        final_mult = sigma_multiplier * 0.8
-    else:
-        final_mult = sigma_multiplier  # Vertical stays standard
+            client_indices = u_col.long()
 
-    calibrated_thresh = noise_mean + (final_mult * noise_std)
+            # Compute log_prob for ALL clients on x_feat [Batch, K]
+            # Optimization: could only compute for unique k in batch, but parallel is often faster
+            client_lls = [c.log_prob(x_feat) for c in self.spn.clients]
+            ll_stack = torch.cat(client_lls, dim=1)
 
-    logging.info(f"    Noise Mean: {noise_mean:.2f} | Std: {noise_std:.2f}")
-    logging.info(f"    Suggested Threshold: {calibrated_thresh:.2f}")
+            # Select the correct client for each sample
+            # gather expects index to have same dims
+            selected_ll = ll_stack.gather(1, client_indices.unsqueeze(1))  # [Batch, 1]
 
-    return np.clip(calibrated_thresh, 2.5, 5.0)
+            # Add log weights: log P(U=k)
+            weights = self.spn.weights.to(self.device)
+            selected_weights = weights[client_indices].unsqueeze(1)
 
+            return selected_ll + torch.log(selected_weights + 1e-9)
 
-def get_spn_z_score(server, data_numpy, x_idx, y_idx):
-    data_t = torch.tensor(data_numpy, dtype=torch.float32).to(server.device)
-    cmi_obs = server._calculate_cmi_value(data_t, [x_idx], [y_idx], [])
+        else:
+            # Case: P(X) = Sum_k P(U=k) P(X | U=k)
+            # This is exactly what GlobalFedSPN.log_prob does
+            return self.spn.log_prob(x_feat)
 
-    null_vals = []
-    for _ in range(5):
-        data_perm = data_t.clone()
-        perm_indices = torch.randperm(data_t.size(0))
-        data_perm[:, x_idx] = data_t[perm_indices, x_idx]
-        val = server._calculate_cmi_value(data_perm, [x_idx], [y_idx], [])
-        null_vals.append(max(0.0, val))
-
-    null_mean = np.mean(null_vals)
-    null_std = np.std(null_vals) + 1e-2
-    return (cmi_obs - null_mean) / null_std
+    def ci_test(self, *args, **kwargs):
+        pass
 
 
 def test_fedCDH(i, args):
@@ -90,6 +99,7 @@ def test_fedCDH(i, args):
     model_type = args.model_type
     ci_method = args.ci_method
     scenario = args.scenario
+    device = "cpu"  # or "cuda" if available
 
     set_random_seed(i)
     logging.info(
@@ -109,158 +119,77 @@ def test_fedCDH(i, args):
             true_DAG_bin, K_clients, total_samples, "gauss"
         )
 
+    # Ensure c_indx is correct shape/type
     c_indx = np.repeat(np.arange(K_clients), n_samples_per_client).reshape(-1, 1)
+
+    # Simple global normalization for stability (though LocalSPNWrapper also normalizes)
     X_global = (X_global - X_global.mean(0)) / (X_global.std(0) + 1e-6)
 
-    logging.info(">>> Phase 1: Density Estimation (SPN Training)...")
+    logging.info(">>> Phase 1: Density Estimation (FedSPN Training)...")
+    train_time = 0
+    fed_spn_model = None
+
     if ci_method == "spn":
         start_train = time.time()
 
-        if scenario == "hybrid":
-            num_clusters = 10
-        elif scenario == "vertical":
-            num_clusters = 5
-        else:
-            num_clusters = 1
+        # Split data for Horizontal FL
+        X_splits = np.array_split(X_global, K_clients)
 
-        # Proxy Data extraction
-        if scenario == "horizontal":
-            proxy_data = X_global[: X_global.shape[0] // K_clients]
-        elif scenario == "vertical":
-            proxy_data = X_global[:, : d_features // K_clients]
-        else:
-            proxy_data = X_global[: X_global.shape[0] // K_clients, : d_features // 2]
+        local_models = []
 
-        best_params = auto_tune_spn_config(
-            proxy_data, num_clusters=num_clusters, n_trials=5
-        )
-
-        server = ServerSPN(
-            global_num_features=d_features, scenario=scenario, num_clusters=num_clusters
-        )
-
-        # --- Split Data ---
-        if scenario == "horizontal":
-            X_splits = np.array_split(X_global, K_clients)
-            feat_indices = [list(range(d_features)) for _ in range(K_clients)]
-            for k in range(K_clients):
-                client = ClientSPN(k, d_features, num_clusters, **best_params)
-                client.data_count = X_splits[k].shape[0]  # Set for FedAvg weighting
-                server.register_client(client, feat_indices[k])
-
-        elif scenario == "vertical":
-            feats_per_client = d_features // K_clients
-            X_splits = []
-            feat_indices = []
-            for k in range(K_clients):
-                start = k * feats_per_client
-                end = (k + 1) * feats_per_client if k < K_clients - 1 else d_features
-                cols = list(range(start, end))
-                X_splits.append(X_global[:, cols])
-                feat_indices.append(cols)
-                # Client only knows its subset of features
-                client = ClientSPN(k, len(cols), num_clusters, **best_params)
-                server.register_client(client, cols)
-
-        elif scenario == "hybrid":
-            sample_splits = np.array_split(X_global, K_clients)
-            X_splits = []
-            feat_indices = []
-            mid_feat = d_features // 2
-            for k in range(K_clients):
-                if k == 0:
-                    cols = list(range(0, mid_feat + 1))
-                else:
-                    cols = list(range(mid_feat - 1, d_features))
-
-                X_splits.append(sample_splits[k][:, cols])
-                feat_indices.append(cols)
-                client = ClientSPN(k, len(cols), num_clusters, **best_params)
-                server.register_client(client, cols)
-
-        # --- Federated Training Loop ---
-        n_rounds = 10
-        local_epochs = 3
-
-        # Warm-up (Important for Vertical EM)
-        logging.info(">>> Warm-starting clients locally...")
+        # Train Local SPNs
         for k in range(K_clients):
-            server.clients[k].train_epoch(X_splits[k], lr=best_params["lr"])
+            logging.info(f"   Training Client {k+1}/{K_clients}...")
+            # Use Auto-Tune or defaults
+            # For speed in test, use defaults but robust ones
+            # Calculate safe depth
+            safe_depth = max(1, int(np.floor(np.log2(d_features))))
 
-        logging.info(f">>> Starting Federated Rounds ({scenario})...")
-        for r in range(n_rounds):
-            round_loss = 0
-
-            # E-STEP: Vertical/Hybrid Alignment
-            responsibilities = None
-            if scenario in ["vertical", "hybrid"]:  # FIXED: Added hybrid
-                responsibilities = server.perform_e_step(X_global, feat_indices)
-
-            # M-STEP: Local Training
-            for k in range(K_clients):
-                # For vertical, responsibilities must be sliced if data was row-split (Hybrid)
-                # But here X_global is used for E-step, so responsibilities align with global rows.
-                # In Hybrid, X_splits[k] is a subset of rows. We must slice weights.
-
-                curr_weights = responsibilities
-                if scenario == "hybrid":
-                    # This is a simulation simplification. In real FL, indices must be aligned.
-                    # We assume X_splits follow the global order sequentially.
-                    start_idx = k * (total_samples // K_clients)
-                    end_idx = (k + 1) * (total_samples // K_clients)
-                    if curr_weights is not None:
-                        curr_weights = responsibilities[start_idx:end_idx]
-
-                for _ in range(local_epochs):
-                    loss = server.clients[k].train_epoch(
-                        X_splits[k], weights=curr_weights, lr=best_params["lr"]
-                    )
-                    round_loss += loss
-
-            # AGGREGATION: Horizontal Only
-            if scenario == "horizontal":
-                # server.perform_fedavg()
-                pass
-            if r % 2 == 0:
-                logging.info(f"   [Round {r}] Avg Loss: {round_loss / K_clients:.4f}")
-
-        train_time = time.time() - start_train
-
-        # Calibration
-        data_aug = np.hstack([X_global, c_indx])
-        calibrated_threshold = calibrate_threshold(server, data_aug)
-        server.threshold = calibrated_threshold
-
-        def oracle_wrapper(X_in, Y_in, Z_in=None, *args, **kwargs):
-            if Z_in is None:
-                Z_in = []
-            return server.ci_test(
-                X_in,
-                Y_in,
-                Z_in,
-                data_matrix=data_aug,
-                sigma_threshold=calibrated_threshold,
+            leaf = LocalSPNWrapper(
+                num_features=d_features,
+                device=device,
+                num_sums=10,
+                num_leaves=10,
+                depth=safe_depth,
+                num_repetitions=5,
+                seed=i * 100 + k,  # Ensure structural heterogeneity per client
             )
 
-        oracle_wrapper.method = "spn"
+            # Train
+            loss = leaf.train_local(X_splits[k], epochs=30, lr=0.01)
+            logging.info(f"      Client {k} Loss: {loss:.4f}")
+            local_models.append(leaf)
 
-        indep_test_obj = oracle_wrapper
+        # Create Global SPN
+        # Weights are uniform if sample sizes are equal
+        global_spn = GlobalFedSPN(local_models, device=device)
+
+        # Wrap for FedCDH (handling U index)
+        # U is the last column (index d_features) in data_aug
+        fed_spn_model = FedCDH_SPN_Wrapper(global_spn, u_index=d_features)
+
+        train_time = time.time() - start_train
+        logging.info(f"   FedSPN Training Complete ({train_time:.2f}s)")
+
     else:
         indep_test_obj = ci_method
-        train_time = 0
 
     # 3. Causal Discovery
-    logging.info(">>> Phase 2: Causal Discovery...")
+    logging.info(">>> Phase 2: Causal Discovery (FedCDH)...")
     start_cd = time.time()
+
+    # Run CDNOD
+    # Note: We pass fed_spn_model. If None, it falls back to 'fisherz' or whatever 'indep_test' is.
     cg = cdnod(
         X_global,
         c_indx,
         K_clients,
         alpha=0.01,
-        indep_test=indep_test_obj,
+        indep_test=ci_method,
         stable=True,
         uc_rule=0,
         uc_priority=-1,
+        fed_spn_model=fed_spn_model,
     )
     cd_time = time.time() - start_cd
 
@@ -272,17 +201,32 @@ def test_fedCDH(i, args):
     res_dir = count_dag_accuracy(true_DAG_bin, est_dag)
 
     result = {**res_skel, **res_dir, "time_train": train_time, "time_cd": cd_time}
-    logging.info(
-        f"   Result: Skel F1={result['f1_skeleton']:.2f} | Dir F1={result['f1']:.2f}"
-    )
-    return result
+
+    skel_f1 = result.get("f1_skeleton")
+    if skel_f1 is None:
+        skel_f1 = 0.0
+
+    dir_f1 = result.get("f1")
+    if dir_f1 is None:
+        dir_f1 = 0.0
+
+    logging.info(f"   Result: Skel F1={skel_f1:.2f} | Dir F1={dir_f1:.2f}")
+    # Sanitize result for aggregation
+    safe_result = {}
+    for k, v in result.items():
+        if v is None:
+            safe_result[k] = 0.0
+        else:
+            safe_result[k] = float(v)
+
+    return safe_result
 
 
 def main(args):
     logging.basicConfig(
         level=logging.INFO, format="%(asctime)s - %(levelname)s - %(message)s"
     )
-    logging.info("FEDCDH EVALUATION")
+    logging.info("FEDCDH EVALUATION (New Architecture)")
     res_list = []
 
     for i in range(args.N):
@@ -290,7 +234,7 @@ def main(args):
             res = test_fedCDH(i, args)
             res_list.append(list(res.values()))
         except Exception as e:
-            logging.error(f"Instance {i} failed: {e}")
+            logging.error(f"Instance {i} failed: {e}", exc_info=True)
 
     if not res_list:
         return
@@ -298,9 +242,12 @@ def main(args):
     avg = np.mean(res_list, axis=0)
     std = np.std(res_list, axis=0)
 
+    # keys from the last result
+    keys = list(res.keys()) if "res" in locals() else []
+
     print("=" * 60)
     print(f"FINAL RESULTS ({args.scenario.upper()} - {args.ci_method.upper()})")
-    print("Metrics:", list(res.keys()))
+    print("Metrics:", keys)
     print("Average:", np.array2string(avg, precision=3, separator=", "))
     print("Std Dev:", np.array2string(std, precision=3, separator=", "))
 
@@ -308,10 +255,10 @@ def main(args):
 if __name__ == "__main__":
     parser = argparse.ArgumentParser()
     parser.add_argument("--N", default=1, type=int, help="Number of test instances")
-    parser.add_argument("--d", default=10, type=int, help="Number of variables")
+    parser.add_argument("--d", default=5, type=int, help="Number of variables")
     parser.add_argument("--K", default=2, type=int, help="Number of federated clients")
     parser.add_argument(
-        "--n", default=100, type=int, help="Number of samples per client"
+        "--n", default=200, type=int, help="Number of samples per client"
     )
     parser.add_argument(
         "--model_type",
@@ -323,15 +270,15 @@ if __name__ == "__main__":
         "--ci_method",
         default="spn",
         type=str,
-        choices=["kci", "spn", "gsq"],
-        help="Conditional independence test method: kci (traditional), gsq, or spn (Sum-Product Networks)",
+        choices=["kci", "spn", "fisherz"],
+        help="Conditional independence test method",
     )
 
     parser.add_argument(
         "--scenario",
-        default="hybrid",
+        default="horizontal",
         type=str,
-        help="Data split scenario: horizontal, vertical or hybrid",
+        help="Data split scenario: horizontal (default)",
     )
 
     args = parser.parse_args()

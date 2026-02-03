@@ -3,6 +3,7 @@ from itertools import permutations, combinations
 from typing import Dict, List, Optional
 
 import networkx as nx
+import torch.nn as nn
 from numpy import ndarray
 
 from causallearn.graph.GraphClass import CausalGraph
@@ -130,6 +131,7 @@ def cdnod(
     background_knowledge: Optional[BackgroundKnowledge] = None,
     verbose: bool = False,
     show_progress: bool = True,
+    fed_spn_model: Optional[nn.Module] = None,
     **kwargs,
 ) -> CausalGraph:
     """
@@ -176,6 +178,7 @@ def cdnod(
             background_knowledge=background_knowledge,
             verbose=verbose,
             show_progress=show_progress,
+            fed_spn_model=fed_spn_model,
             **kwargs,
         )
 
@@ -192,6 +195,7 @@ def cdnod_alg(
     background_knowledge: Optional[BackgroundKnowledge] = None,
     verbose: bool = False,
     show_progress: bool = True,
+    fed_spn_model: Optional[nn.Module] = None,
     **kwargs,
 ) -> CausalGraph:
     """
@@ -237,7 +241,9 @@ def cdnod_alg(
     # indep_test_all = CIT(data_aug, indep_test, **kwargs)
 
     data_aug = np.concatenate((data, c_indx), axis=1)
-    if callable(indep_test):  # Check if we passed the oracle_wrapper
+    if fed_spn_model is not None:
+        indep_test_all = SPN_CIT(data_aug, global_model=fed_spn_model, **kwargs)
+    elif callable(indep_test):  # Check if we passed the oracle_wrapper
         indep_test_all = indep_test
     else:
         indep_test_all = CIT(data_aug, indep_test, **kwargs)
@@ -249,7 +255,12 @@ def cdnod_alg(
         fed_dt = fed_data[i]
         fed_cg = CausalGraph(no_of_var=data_aug.shape[1], node_names=None)
         # fed_indep_test = CIT(fed_dt, indep_test)
-        if callable(indep_test):
+        if fed_spn_model is not None:
+            # For federated CDH, the local test uses the SAME global model but
+            # should ideally be conditioned on U=i.
+            # However, for skeleton stage 1, FedCDH uses the global test.
+            fed_indep_test = indep_test_all
+        elif callable(indep_test):
             fed_indep_test = indep_test
         else:
             fed_indep_test = CIT(fed_dt, indep_test)

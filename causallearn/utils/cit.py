@@ -65,7 +65,7 @@ def CIT(data, method="fisherz", **kwargs):
     elif method == d_separation:
         return D_Separation(data, **kwargs)
     elif method == spn:
-        return SPN(data, **kwargs)
+        return SPN_CIT(data, **kwargs)
     elif method == fedpc:
         return FedPC(data, **kwargs)
     else:
@@ -697,15 +697,90 @@ class D_Separation(CIT_Base):
         return p
 
 
-class SPN(CIT_Base):
-    def __init__(self, data, global_model=None, **kwargs):
+class SPN_CIT(CIT_Base):
+    def __init__(self, data, global_model=None, threshold=0.01, **kwargs):
         super().__init__(data, **kwargs)
-        # Accept the pre-trained Federated/Global model
         self.model = global_model
+        self.threshold = threshold
+        self.check_cache_method_consistent("spn", "threshold_" + str(threshold))
 
-    def __call__(self, x_idx, y_idx, z_indices, *args, **kwargs):
-        # Delegate the test to the Global SPN's centralized method
-        return self.model.ci_test(x_idx, y_idx, z_indices)
+    def _get_marginal_log_prob(self, data, keep_indices):
+        """
+        Computes marginal log-likelihood for variables in keep_indices.
+        Other variables are marginalized out by setting them to NaN.
+        """
+        # Create a mask for variables to keep
+        # We start with all NaNs (marginalize everything)
+        masked_data = np.full_like(data, np.nan)
+
+        # Restore values for the variables we want to keep
+        masked_data[:, keep_indices] = data[:, keep_indices]
+
+        # Convert to tensor
+        data_t = torch.tensor(masked_data, dtype=torch.float32).to(self.model.device)
+
+        # Helper to avoid batch size issues if needed, but FedPC handles it
+        with torch.no_grad():
+            ll = self.model.log_prob(data_t)
+
+        return ll.mean().item()
+
+    def __call__(self, X, Y, Z, *args, data_matrix=None, **kwargs):
+        """
+        SPN-Based Conditional Independence Test.
+        Score = LL(X,Y,Z) - [LL(X,Z) + LL(Y,Z) - LL(Z)]
+        """
+        # Handle 'data_matrix' potentially being passed in kwargs
+        if data_matrix is None:
+            data_matrix = kwargs.get("data_matrix", None)
+
+        # Format indices
+        if isinstance(X, (int, np.integer)):
+            X = [int(X)]
+        if isinstance(Y, (int, np.integer)):
+            Y = [int(Y)]
+        if isinstance(Z, (int, np.integer)):
+            Z = [int(Z)]
+        elif Z is None:
+            Z = []
+        else:
+            Z = list(Z)
+
+        # Use provided data or stored data
+        data = data_matrix if data_matrix is not None else self.data
+
+        # 1. LL(X, Y, Z)
+        xyz_idx = X + Y + Z
+        ll_joint = self._get_marginal_log_prob(data, xyz_idx)
+
+        # 2. LL(X, Z)
+        xz_idx = X + Z
+        ll_xz = self._get_marginal_log_prob(data, xz_idx)
+
+        # 3. LL(Y, Z)
+        yz_idx = Y + Z
+        ll_yz = self._get_marginal_log_prob(data, yz_idx)
+
+        # 4. LL(Z)
+        if len(Z) > 0:
+            ll_z = self._get_marginal_log_prob(data, Z)
+        else:
+            ll_z = 0.0  # log(1)
+
+        # Score calculation (Approx Mutual Information)
+        # I(X;Y|Z) approx LL(X,Y,Z) - LL(X,Z) - LL(Y,Z) + LL(Z)
+        score = ll_joint - (ll_xz + ll_yz - ll_z)
+
+        # Ensure score is non-negative (numerical instability protection)
+        score = max(0.0, score)
+
+        # Decision - Dynamic thresholding based on Z size
+        effective_threshold = self.threshold * (1 + 0.5 * len(Z))
+
+        if score < effective_threshold:
+            return 1.0  # Independent
+        else:
+            return 0.0  # Dependent
 
 
 class FedPC(CIT_Base):
