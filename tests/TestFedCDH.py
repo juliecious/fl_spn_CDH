@@ -82,16 +82,15 @@ def get_spn_z_score(server, data_numpy, x_idx, y_idx):
     return (cmi_obs - null_mean) / null_std
 
 
-def test_fedCDH(
-    i,
-    n_samples_per_client,
-    K_clients,
-    d_features,
-    s0,
-    model_type,
-    ci_method,
-    scenario="horizontal",
-):
+def test_fedCDH(i, args):
+    n_samples_per_client = args.n
+    K_clients = args.K
+    d_features = args.d
+    s0 = args.d
+    model_type = args.model_type
+    ci_method = args.ci_method
+    scenario = args.scenario
+
     set_random_seed(i)
     logging.info(
         f"Running Instance {i} | K={K_clients} | N_per_K={n_samples_per_client} | D={d_features} | Scenario={scenario}"
@@ -288,16 +287,7 @@ def main(args):
 
     for i in range(args.N):
         try:
-            res = test_fedCDH(
-                i,
-                args.n,
-                args.K,
-                args.d,
-                args.d,
-                args.model_type,
-                args.ci_method,
-                args.scenario,
-            )
+            res = test_fedCDH(i, args)
             res_list.append(list(res.values()))
         except Exception as e:
             logging.error(f"Instance {i} failed: {e}")
@@ -321,7 +311,7 @@ if __name__ == "__main__":
     parser.add_argument("--d", default=10, type=int, help="Number of variables")
     parser.add_argument("--K", default=2, type=int, help="Number of federated clients")
     parser.add_argument(
-        "--n", default=1_00, type=int, help="Number of samples per client"
+        "--n", default=100, type=int, help="Number of samples per client"
     )
     parser.add_argument(
         "--model_type",
@@ -339,9 +329,10 @@ if __name__ == "__main__":
 
     parser.add_argument(
         "--scenario",
-        default="horizontal",
+        default="hybrid",
         type=str,
         help="Data split scenario: horizontal, vertical or hybrid",
     )
+
     args = parser.parse_args()
     main(args)

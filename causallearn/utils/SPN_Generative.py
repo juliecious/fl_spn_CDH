@@ -134,7 +134,7 @@ class ServerSPN(FederatedSPNBase):
         log_posterior = log_joint - log_marginal
         return torch.exp(log_posterior).cpu().numpy()
 
-    def generate_global_synthetic_data(self, n_samples=2000):
+    def generate_global_synthetic_data(self, n_samples=5_000):
         """
         The Core of Generative Discovery.
         Returns:

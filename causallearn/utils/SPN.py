@@ -371,6 +371,65 @@ class ServerSPN(FederatedSPNBase):
         responsibilities = torch.exp(log_posterior).cpu().numpy()
         return responsibilities
 
+    def generate_global_synthetic_data(self, n_samples=2000):
+        """
+        Robust Data Generation. Returns X (float) and C (int).
+        """
+        logging.info(f"Generating {n_samples} samples (Scenario: {self.scenario})...")
+
+        if self.scenario == "horizontal":
+            # Round-Robin Sampling from Clients
+            samples_per_client = n_samples // len(self.clients)
+            all_X, all_C = [], []
+
+            for k, client in enumerate(self.clients):
+                with torch.no_grad():
+                    s = (
+                        client.model.sample(num_samples=samples_per_client)
+                        .cpu()
+                        .numpy()
+                    )
+                    if s.ndim == 3:
+                        s = s.squeeze(1)
+                    all_X.append(s)
+                    all_C.append(np.full((samples_per_client, 1), k, dtype=int))
+
+            # Remainder
+            rem = n_samples - sum(len(x) for x in all_X)
+            if rem > 0:
+                with torch.no_grad():
+                    s = self.clients[0].model.sample(num_samples=rem).cpu().numpy()
+                    if s.ndim == 3:
+                        s = s.squeeze(1)
+                    all_X.append(s)
+                    all_C.append(np.full((rem, 1), 0, dtype=int))
+
+            return np.concatenate(all_X, axis=0), np.concatenate(all_C, axis=0)
+
+        elif self.scenario in ["vertical", "hybrid"]:
+            # Feature Stacking
+            col_parts = []
+            # Sort clients by their first feature index to stack correctly
+            sorted_clients = sorted(
+                self.clients, key=lambda c: self.feature_map[id(c)][0]
+            )
+
+            for client in sorted_clients:
+                with torch.no_grad():
+                    s = client.model.sample(num_samples=n_samples).cpu().numpy()
+                    if s.ndim == 3:
+                        s = s.squeeze(1)
+                    col_parts.append(s)
+
+            X_syn = np.hstack(col_parts)
+            # Default Context = 0 for Vertical (or random if you want to simulate heterogeneity)
+            C_syn = np.zeros((n_samples, 1), dtype=int)
+            return X_syn, C_syn
+
+        return np.zeros((n_samples, self.global_num_features)), np.zeros(
+            (n_samples, 1), dtype=int
+        )
+
 
 def auto_tune_spn_config(proxy_data, num_clusters=1, n_trials=15, device="cpu"):
     logging.info(
