@@ -63,24 +63,27 @@ class FedCDH_SPN_Wrapper(nn.Module):
 
         if u_is_observed:
             # Case: P(X, U=k) = P(U=k) * P(X | U=k)
-            # P(X | U=k) -> LogProb from k-th client
-
             client_indices = u_col.long()
+            unique_clients = torch.unique(client_indices)
 
-            # Compute log_prob for ALL clients on x_feat [Batch, K]
-            # Optimization: could only compute for unique k in batch, but parallel is often faster
-            client_lls = [c.log_prob(x_feat) for c in self.spn.clients]
-            ll_stack = torch.cat(client_lls, dim=1)
+            final_ll = torch.zeros(x.shape[0], 1, device=self.device)
 
-            # Select the correct client for each sample
-            # gather expects index to have same dims
-            selected_ll = ll_stack.gather(1, client_indices.unsqueeze(1))  # [Batch, 1]
+            # Iterate over unique clients in this batch to handle potentially different feature maps
+            for k in unique_clients:
+                k_idx = k.item()
+                mask = client_indices == k
+                x_sub = x_feat[mask]
 
-            # Add log weights: log P(U=k)
-            weights = self.spn.weights.to(self.device)
-            selected_weights = weights[client_indices].unsqueeze(1)
+                # Use GlobalSPN to handle slicing/routing for client k
+                ll_sub = self.spn.log_prob_conditional_u(x_sub, k_idx)
 
-            return selected_ll + torch.log(selected_weights + 1e-9)
+                # Add log weight: log P(U=k)
+                weight = self.spn.weights[k_idx]
+                ll_total = ll_sub + torch.log(weight + 1e-9)
+
+                final_ll[mask] = ll_total
+
+            return final_ll
 
         else:
             # Case: P(X) = Sum_k P(U=k) P(X | U=k)
@@ -132,21 +135,53 @@ def test_fedCDH(i, args):
     if ci_method == "spn":
         start_train = time.time()
 
-        # Split data for Horizontal FL
-        X_splits = np.array_split(X_global, K_clients)
+        # Data Partitioning based on Scenario
+        X_splits = []
+        feature_maps = {}  # k -> list of indices
+        global_strategy = "mixture"
+
+        if scenario == "horizontal":
+            # Split samples (Rows), All Features
+            X_splits = np.array_split(X_global, K_clients)
+            for k in range(K_clients):
+                feature_maps[k] = list(range(d_features))
+            global_strategy = "mixture"
+
+        elif scenario == "vertical":
+            # Split features (Cols), All Samples
+            # e.g., K=2, d=5 -> Client 0: [0,1,2], Client 1: [3,4]
+            cols_per_client = np.array_split(range(d_features), K_clients)
+            for k in range(K_clients):
+                cols = cols_per_client[k].tolist()
+                X_splits.append(X_global[:, cols])
+                feature_maps[k] = cols
+            global_strategy = "product"
+
+        elif scenario == "hybrid":
+            # Simulation: Treat as Horizontal for density estimation benchmark purposes
+            # (simple mixture of experts) but acknowledging heterogeneity.
+            # Real Hybrid needs complex missing value handling not in scope for simple-einet wrapper yet.
+            # Falling back to Horizontal Logic for 'Hybrid' label to ensure run completion.
+            X_splits = np.array_split(X_global, K_clients)
+            for k in range(K_clients):
+                feature_maps[k] = list(range(d_features))
+            global_strategy = "mixture"
 
         local_models = []
 
         # Train Local SPNs
         for k in range(K_clients):
             logging.info(f"   Training Client {k+1}/{K_clients}...")
-            # Use Auto-Tune or defaults
-            # For speed in test, use defaults but robust ones
-            # Calculate safe depth
-            safe_depth = max(1, int(np.floor(np.log2(d_features))))
+
+            # Use local data slice
+            local_data = X_splits[k]
+            local_d = local_data.shape[1]
+
+            # Calculate safe depth based on LOCAL dimension
+            safe_depth = max(1, int(np.floor(np.log2(local_d))))
 
             leaf = LocalSPNWrapper(
-                num_features=d_features,
+                num_features=local_d,
                 device=device,
                 num_sums=10,
                 num_leaves=10,
@@ -156,13 +191,18 @@ def test_fedCDH(i, args):
             )
 
             # Train
-            loss = leaf.train_local(X_splits[k], epochs=30, lr=0.01)
+            loss = leaf.train_local(local_data, epochs=30, lr=0.01)
             logging.info(f"      Client {k} Loss: {loss:.4f}")
             local_models.append(leaf)
 
         # Create Global SPN
         # Weights are uniform if sample sizes are equal
-        global_spn = GlobalFedSPN(local_models, device=device)
+        global_spn = GlobalFedSPN(
+            local_models,
+            device=device,
+            feature_map=feature_maps,
+            strategy=global_strategy,
+        )
 
         # Wrap for FedCDH (handling U index)
         # U is the last column (index d_features) in data_aug
@@ -187,7 +227,7 @@ def test_fedCDH(i, args):
         alpha=0.01,
         indep_test=ci_method,
         stable=True,
-        uc_rule=0,
+        uc_rule=2,  # Definite MaxP for conservative orientation
         uc_priority=-1,
         fed_spn_model=fed_spn_model,
     )

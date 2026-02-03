@@ -697,12 +697,22 @@ class D_Separation(CIT_Base):
         return p
 
 
+from scipy.stats import chi2, norm, gamma
+
+# ... (imports)
+
+
 class SPN_CIT(CIT_Base):
-    def __init__(self, data, global_model=None, threshold=0.01, **kwargs):
+    def __init__(
+        self, data, global_model=None, threshold=0.01, num_permutations=50, **kwargs
+    ):
         super().__init__(data, **kwargs)
         self.model = global_model
         self.threshold = threshold
-        self.check_cache_method_consistent("spn", "threshold_" + str(threshold))
+        self.num_permutations = num_permutations
+        self.check_cache_method_consistent(
+            "spn", "threshold_" + str(threshold) + "_perm_" + str(num_permutations)
+        )
 
     def _get_marginal_log_prob(self, data, keep_indices):
         """
@@ -749,38 +759,75 @@ class SPN_CIT(CIT_Base):
         # Use provided data or stored data
         data = data_matrix if data_matrix is not None else self.data
 
-        # 1. LL(X, Y, Z)
-        xyz_idx = X + Y + Z
-        ll_joint = self._get_marginal_log_prob(data, xyz_idx)
+        # Helper to compute CMI score
+        def compute_score(data_in):
+            # 1. LL(X, Y, Z)
+            xyz_idx = X + Y + Z
+            ll_joint = self._get_marginal_log_prob(data_in, xyz_idx)
 
-        # 2. LL(X, Z)
-        xz_idx = X + Z
-        ll_xz = self._get_marginal_log_prob(data, xz_idx)
+            # 2. LL(X, Z)
+            xz_idx = X + Z
+            ll_xz = self._get_marginal_log_prob(data_in, xz_idx)
 
-        # 3. LL(Y, Z)
-        yz_idx = Y + Z
-        ll_yz = self._get_marginal_log_prob(data, yz_idx)
+            # 3. LL(Y, Z)
+            yz_idx = Y + Z
+            ll_yz = self._get_marginal_log_prob(data_in, yz_idx)
 
-        # 4. LL(Z)
-        if len(Z) > 0:
-            ll_z = self._get_marginal_log_prob(data, Z)
+            # 4. LL(Z)
+            if len(Z) > 0:
+                ll_z = self._get_marginal_log_prob(data_in, Z)
+            else:
+                ll_z = 0.0
+
+            # Score calculation
+            score = ll_joint - (ll_xz + ll_yz - ll_z)
+            return max(0.0, score)
+
+        score_obs = compute_score(data)
+
+        if self.num_permutations > 0:
+            null_scores = []
+            n_samples = data.shape[0]
+
+            for _ in range(self.num_permutations):
+                # Permute X to break dependency with Y given Z
+                perm_idx = np.random.permutation(n_samples)
+                data_perm = data.copy()
+                data_perm[:, X] = data[perm_idx][:, X]
+
+                s_null = compute_score(data_perm)
+                null_scores.append(s_null)
+
+            # Fit Gamma distribution to null scores
+            null_scores = np.array(null_scores)
+            null_scores = null_scores[null_scores > 1e-6]
+
+            if len(null_scores) < 5:
+                # Fallback if null distribution is degenerate
+                effective_threshold = self.threshold * (1 + 0.5 * len(Z))
+                return 1.0 if score_obs < effective_threshold else 0.0
+
+            try:
+                # fit(data) -> shape, loc, scale
+                params = gamma.fit(null_scores)
+                # Survival function (1 - CDF)
+                p_value = gamma.sf(score_obs, *params)
+                return p_value
+            except Exception:
+                # Fallback on error
+                return (
+                    1.0
+                    if score_obs < np.mean(null_scores) + 3 * np.std(null_scores)
+                    else 0.0
+                )
+
         else:
-            ll_z = 0.0  # log(1)
-
-        # Score calculation (Approx Mutual Information)
-        # I(X;Y|Z) approx LL(X,Y,Z) - LL(X,Z) - LL(Y,Z) + LL(Z)
-        score = ll_joint - (ll_xz + ll_yz - ll_z)
-
-        # Ensure score is non-negative (numerical instability protection)
-        score = max(0.0, score)
-
-        # Decision - Dynamic thresholding based on Z size
-        effective_threshold = self.threshold * (1 + 0.5 * len(Z))
-
-        if score < effective_threshold:
-            return 1.0  # Independent
-        else:
-            return 0.0  # Dependent
+            # Threshold-based fallback
+            effective_threshold = self.threshold * (1 + 0.5 * len(Z))
+            if score_obs < effective_threshold:
+                return 1.0  # Independent
+            else:
+                return 0.0  # Dependent
 
 
 class FedPC(CIT_Base):

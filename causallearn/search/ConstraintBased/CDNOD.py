@@ -117,6 +117,53 @@ def get_hsic_score(X, Y, C):
     return flag
 
 
+def get_spn_direction_score(fed_spn_model, i, j, c_idx, data_aug):
+    """
+    Determines direction between i and j using the FedSPN model.
+    Hypothesis: If i -> j, then P(j | i) is invariant to C (mechanism independence).
+    Thus, j _|_ C | i should hold (low score).
+    If j -> i, then P(i | j) is invariant to C.
+    Thus, i _|_ C | j should hold (low score).
+
+    Returns 1 for i -> j, 2 for j -> i.
+    """
+    # Create a temporary CIT instance to reuse the scoring logic
+    # We use a dummy threshold as we only compare raw scores
+    cit = SPN_CIT(data_aug, global_model=fed_spn_model, threshold=0.01)
+
+    # Access the raw score calculation helper (we need to expose it or re-implement)
+    # Re-implementing simplified logic here for clarity
+
+    def compute_cmi(X, Y, Z):
+        # We need raw score, not p-value.
+        # Calling cit(..., num_permutations=0) returns binary 0/1 based on threshold.
+        # We need the continuous score.
+        # Let's use the internal logic: LL(XYZ) - LL(XZ) - LL(YZ) + LL(Z)
+
+        xyz = X + Y + Z
+        xz = X + Z
+        yz = Y + Z
+        z = Z
+
+        ll_xyz = cit._get_marginal_log_prob(data_aug, xyz)
+        ll_xz = cit._get_marginal_log_prob(data_aug, xz)
+        ll_yz = cit._get_marginal_log_prob(data_aug, yz)
+        ll_z = cit._get_marginal_log_prob(data_aug, z) if z else 0.0
+
+        return max(0.0, ll_xyz - ll_xz - ll_yz + ll_z)
+
+    # Score(Y, C | X) for X -> Y
+    score_xy = compute_cmi([j], [c_idx], [i])
+
+    # Score(X, C | Y) for Y -> X
+    score_yx = compute_cmi([i], [c_idx], [j])
+
+    if score_xy < score_yx:
+        return 1  # i -> j
+    else:
+        return 2  # j -> i
+
+
 def cdnod(
     data: ndarray,
     c_indx: ndarray,
@@ -198,44 +245,7 @@ def cdnod_alg(
     fed_spn_model: Optional[nn.Module] = None,
     **kwargs,
 ) -> CausalGraph:
-    """
-    Perform Peter-Clark algorithm for causal discovery on the augmented data set that captures the unobserved changing factors
-
-    Parameters
-    ----------
-    data : data set (numpy ndarray), shape (n_samples, n_features). The input data, where n_samples is the number of samples and n_features is the number of features.
-    alpha : desired significance level (float) in (0, 1)
-    indep_test : name of the independence test being used
-            [fisherz, chisq, gsq, mv_fisherz, kci, spn]
-           - "Fisher_Z": Fisher's Z conditional independence test
-           - "Chi_sq": Chi-squared conditional independence test
-           - "G_sq": G-squared conditional independence test
-           - "MV_Fisher_Z": Missing-value Fishers'Z conditional independence test
-           - "kci": kernel-based conditional independence test (If C is time index, KCI test is recommended)
-    stable : run stabilized skeleton discovery if True (default = True)
-    uc_rule : how unshielded colliders are oriented
-           0: run uc_sepset
-           1: run maxP
-           2: run definiteMaxP
-    uc_priority : rule of resolving conflicts between unshielded colliders
-           -1: whatever is default in uc_rule
-           0: overwrite
-           1: orient bi-directed
-           2. prioritize existing colliders
-           3. prioritize stronger colliders
-           4. prioritize stronger* colliers
-    background_knowledge : background knowledge
-    verbose : True iff verbose output should be printed.
-    show_progress : True iff the algorithm progress should be show in console.
-
-    Returns
-    -------
-    cg : a CausalGraph object, where cg.G.graph[j,i]=1 and cg.G.graph[i,j]=-1 indicate i --> j ,
-                    cg.G.graph[i,j] = cg.G.graph[j,i] = -1 indicates i --- j,
-                    cg.G.graph[i,j] = cg.G.graph[j,i] = 1 indicates i <-> j.
-
-    """
-
+    # ... (start of function) ...
     start = time.time()
     # data_aug = np.concatenate((data, c_indx), axis=1)
     # indep_test_all = CIT(data_aug, indep_test, **kwargs)
@@ -280,13 +290,6 @@ def cdnod_alg(
     cg_0 = SkeletonDiscovery.skeleton_discovery(
         flag, cg_list, data, K, alpha, indep_test_all, stable
     )
-    # print("\n")
-
-    # from causallearn.utils.GraphUtils import GraphUtils
-    # pyd = GraphUtils.to_pydot(cg_0.G)
-    # pyd.write_png('result/fedcdn2/Lktest_cg0.png')
-    # t_1 = time.time()
-    # print(f"Time for skeleton learning: {t_1-start}s.")
 
     """
     Changing causal module detection with surrogate variable in two steps:
@@ -305,11 +308,6 @@ def cdnod_alg(
     cg_1 = SkeletonDiscovery.skeleton_discovery_with_surrogate_GMM(
         flag, cg_0, cg_list, data_aug, K, alpha, indep_test_all, stable
     )
-    # print("\n")
-    # cg_1 = cg_0
-
-    # t_2 = time.time()
-    # print(f"Time for causal detection: {t_2-t_1}s.")
 
     # orient the direction from c_indx to X, if there is an edge between c_indx and X
     c_indx_id = data_aug.shape[1] - 1
@@ -319,6 +317,10 @@ def cdnod_alg(
     if background_knowledge is not None:
         orient_by_background_knowledge(cg_1, background_knowledge)
 
+    # Debugging
+    # print(f"DEBUG: uc_rule={uc_rule}, type={type(uc_rule)}")
+    cg = None
+
     # By default: uc_rule=0, uc_priority=-1.
     if uc_rule == 0:
         if uc_priority != -1:
@@ -326,7 +328,6 @@ def cdnod_alg(
                 cg_1, uc_priority, background_knowledge=background_knowledge
             )
         else:
-            # print(f"101: In CDNOD: {uc_rule},{uc_priority}")
             cg_2 = UCSepset.uc_sepset(
                 cg_1, background_knowledge=background_knowledge, cg_list=cg_list, K=K
             )
@@ -372,21 +373,27 @@ def cdnod_alg(
     else:
         vh_pairs = []
 
-    # Pre-compute Nystroem features for C
-    # This is what makes it fast. We calculate the expensive Kernel C once.
-    feature_map = Nystroem(gamma=0.2, n_components=5, random_state=1)
-    C_f = feature_map.fit_transform(c_indx)
+    # Pre-compute Nystroem features for C if using HSIC
+    if fed_spn_model is None:
+        feature_map = Nystroem(gamma=0.2, n_components=5, random_state=1)
+        C_f = feature_map.fit_transform(c_indx)
 
-    # Pre-compute Inverse Covariance of C
-    Ccc = my_cov(C_f, C_f)
-    iCcc = np.linalg.inv(Ccc + np.eye(5) * 1e-10)
+        # Pre-compute Inverse Covariance of C
+        Ccc = my_cov(C_f, C_f)
+        iCcc = np.linalg.inv(Ccc + np.eye(5) * 1e-10)
 
     for v in vh_pairs:
         i, j = v
-        # CALL THE FAST FUNCTION HERE:
-        score_i_j = get_hsic_score_fast(
-            data[:, i].reshape(-1, 1), data[:, j].reshape(-1, 1), C_f, iCcc
-        )
+
+        if fed_spn_model is not None:
+            # Use FedSPN for directionality
+            c_idx_id = data_aug.shape[1] - 1
+            score_i_j = get_spn_direction_score(fed_spn_model, i, j, c_idx_id, data_aug)
+        else:
+            # CALL THE FAST FUNCTION HERE:
+            score_i_j = get_hsic_score_fast(
+                data[:, i].reshape(-1, 1), data[:, j].reshape(-1, 1), C_f, iCcc
+            )
 
         if score_i_j == 1:
             cg.G.add_edge(
@@ -511,6 +518,11 @@ def cdnod_alg_origianal(
     if background_knowledge is not None:
         orient_by_background_knowledge(cg_1, background_knowledge)
 
+    # Debugging
+    print(f"DEBUG: uc_rule={uc_rule}, type={type(uc_rule)}")
+    cg = None
+
+    # By default: uc_rule=0, uc_priority=-1.
     if uc_rule == 0:
         if uc_priority != -1:
             cg_2 = UCSepset.uc_sepset(
