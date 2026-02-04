@@ -1,7 +1,10 @@
+import io
+import logging
+from typing import Dict, List
+
+import numpy as np
 import torch
 import torch.nn as nn
-import numpy as np
-import logging
 from simple_einet.einet import Einet, EinetConfig
 from simple_einet.layers.distributions.normal import Normal
 
@@ -189,6 +192,14 @@ class LocalSPNWrapper(nn.Module):
             ll = ll + log_det_jacobian
         return ll
 
+    def get_size_bytes(self) -> int:
+        """
+        Calculate the size of the model in bytes (simulating communication cost).
+        """
+        buffer = io.BytesIO()
+        torch.save(self.state_dict(), buffer)
+        return buffer.tell()
+
 
 class FederatedProduct(nn.Module):
     """
@@ -217,6 +228,10 @@ class FederatedProduct(nn.Module):
         # Sum log-probs (Product in prob space)
         ll_stack = torch.cat(client_lls, dim=1)
         return torch.sum(ll_stack, dim=1, keepdim=True)
+
+    def get_size_bytes(self) -> int:
+        """Sum of client sizes."""
+        return sum(c.get_size_bytes() for c in self.clients)
 
 
 class GlobalFedSPN(nn.Module):
@@ -345,6 +360,24 @@ class GlobalFedSPN(nn.Module):
             return self.components[u_idx].log_prob(x_c)
         else:
             raise ValueError(f"Index {u_idx} out of bounds")
+
+    def get_total_communication_cost(self) -> int:
+        """
+        Returns the total communication cost (in bytes) of the One-Shot Federated Training phase.
+        Cost = Sum of (Serialized Size of Client Models).
+        In a real scenario, this is the cost of uploading models to the server.
+        """
+        total_bytes = 0
+        for c in self.components:
+            # If component is LocalSPNWrapper or FederatedProduct, it has get_size_bytes
+            if hasattr(c, "get_size_bytes"):
+                total_bytes += c.get_size_bytes()
+            else:
+                # Fallback for generic nn.Module
+                buffer = io.BytesIO()
+                torch.save(c.state_dict(), buffer)
+                total_bytes += buffer.tell()
+        return total_bytes
 
 
 def auto_tune_spn_config(proxy_data, num_clusters=1, n_trials=15, device="cpu"):

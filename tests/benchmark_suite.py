@@ -51,6 +51,7 @@ def run_benchmarks():
         "shd",
         "time_train",
         "time_cd",
+        "comm_cost",
     ]
 
     results = []
@@ -99,32 +100,30 @@ def run_benchmarks():
 
 
 def plot_results(df):
-    metrics_to_plot = ["f1_skeleton", "f1", "shd_skeleton", "shd"]
-    labels = ["Skel F1", "DAG F1", "Skel SHD", "DAG SHD"]
-
-    x = np.arange(len(metrics_to_plot))
-    width = 0.2
-
-    fig, ax = plt.subplots(figsize=(12, 6))
+    metrics_left = ["f1_skeleton", "f1", "shd_skeleton", "shd"]
+    labels_left = ["Skel F1", "DAG F1", "Skel SHD", "DAG SHD"]
+    metrics_right = ["comm_cost"]
+    labels_right = ["Comm Cost (KB)"]
 
     methods = df["Method"].tolist()
-    # Colors: KCI=Blue, FedSPN(H)=Orange, FedSPN(V)=Green, FedSPN(Hyb)=Red
     colors = ["#1f77b4", "#ff7f0e", "#2ca02c", "#d62728"]
+    width = 0.2
 
+    fig, (ax1, ax2) = plt.subplots(
+        1, 2, figsize=(16, 6), gridspec_kw={"width_ratios": [3, 1]}
+    )
+
+    # --- Left Plot: Discovery Metrics ---
+    x_left = np.arange(len(metrics_left))
     for i, method in enumerate(methods):
-        vals = []
-        for m in metrics_to_plot:
-            vals.append(df[df["Method"] == method][m].values[0])
-
+        vals = [df[df["Method"] == method][m].values[0] for m in metrics_left]
         offset = (i - 1.5) * width
-        rects = ax.bar(x + offset, vals, width, label=method, color=colors[i])
-
-        # Label bars
+        rects = ax1.bar(x_left + offset, vals, width, label=method, color=colors[i])
         for rect in rects:
-            height = rect.get_height()
-            ax.annotate(
-                f"{height:.2f}",
-                xy=(rect.get_x() + rect.get_width() / 2, height),
+            h = rect.get_height()
+            ax1.annotate(
+                f"{h:.2f}",
+                xy=(rect.get_x() + rect.get_width() / 2, h),
                 xytext=(0, 3),
                 textcoords="offset points",
                 ha="center",
@@ -132,12 +131,36 @@ def plot_results(df):
                 fontsize=8,
             )
 
-    ax.set_ylabel("Score / Value")
-    ax.set_title("Federated Causal Discovery Performance (FedSPN vs KCI)")
-    ax.set_xticks(x)
-    ax.set_xticklabels(labels)
-    ax.legend()
-    ax.grid(axis="y", linestyle="--", alpha=0.7)
+    ax1.set_ylabel("Score / Value")
+    ax1.set_title("Causal Discovery Performance")
+    ax1.set_xticks(x_left)
+    ax1.set_xticklabels(labels_left)
+    ax1.grid(axis="y", linestyle="--", alpha=0.7)
+    ax1.legend(loc="upper left", fontsize="small")
+
+    # --- Right Plot: Communication Cost ---
+    x_right = np.arange(len(metrics_right))
+    for i, method in enumerate(methods):
+        vals = [df[df["Method"] == method][m].values[0] for m in metrics_right]
+        offset = (i - 1.5) * width
+        rects = ax2.bar(x_right + offset, vals, width, label=method, color=colors[i])
+        for rect in rects:
+            h = rect.get_height()
+            ax2.annotate(
+                f"{h:.1f}",
+                xy=(rect.get_x() + rect.get_width() / 2, h),
+                xytext=(0, 3),
+                textcoords="offset points",
+                ha="center",
+                va="bottom",
+                fontsize=8,
+            )
+
+    ax2.set_ylabel("KB")
+    ax2.set_title("Communication Cost")
+    ax2.set_xticks(x_right)
+    ax2.set_xticklabels(labels_right)
+    ax2.grid(axis="y", linestyle="--", alpha=0.7)
 
     output_dir = "tests/results"
     os.makedirs(output_dir, exist_ok=True)

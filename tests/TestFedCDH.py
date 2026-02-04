@@ -322,7 +322,21 @@ def test_fedCDH(i, args):
     res_skel = count_skeleton_accuracy(true_DAG_bin, est_cpdag)
     res_dir = count_dag_accuracy(true_DAG_bin, est_dag)
 
-    result = {**res_skel, **res_dir, "time_train": train_time, "time_cd": cd_time}
+    # Communication Cost Analysis
+    if fed_spn_model is not None and hasattr(
+        fed_spn_model.spn, "get_total_communication_cost"
+    ):
+        comm_cost = fed_spn_model.spn.get_total_communication_cost() / 1024.0  # KB
+    else:
+        comm_cost = 0.0
+
+    result = {
+        **res_skel,
+        **res_dir,
+        "time_train": train_time,
+        "time_cd": cd_time,
+        "comm_cost": comm_cost,
+    }
 
     skel_f1 = result.get("f1_skeleton")
     if skel_f1 is None:
