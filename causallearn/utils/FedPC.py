@@ -117,12 +117,16 @@ class LocalSPNWrapper(nn.Module):
     def _permute(self, x):
         if self.variable_order is None:
             return x
-        # x is [N, D]
+        # Ensure 2D for consistent indexing
+        if x.ndim == 1:
+            return x[self.variable_order]
         return x[:, self.variable_order]
 
     def _inv_permute(self, x):
         if self.variable_order is None:
             return x
+        if x.ndim == 1:
+            return x[self.inv_variable_order]
         return x[:, self.inv_variable_order]
 
     def train_local(self, data, weights=None, epochs=50, lr=0.005):
@@ -169,6 +173,8 @@ class LocalSPNWrapper(nn.Module):
 
     def sample(self, n):
         samples = self.model.sample(n)
+        # Force 2D [n, num_features]
+        samples = samples.view(n, -1)
         samples = self._inv_permute(samples)  # Restore original variable order
         if self.mean is not None and self.std is not None:
             samples = samples * (self.std + 1e-6) + self.mean
@@ -228,6 +234,26 @@ class FederatedProduct(nn.Module):
         # Sum log-probs (Product in prob space)
         ll_stack = torch.cat(client_lls, dim=1)
         return torch.sum(ll_stack, dim=1, keepdim=True)
+
+    def sample(self, n: int) -> torch.Tensor:
+        """
+        Sample from the product distribution.
+        Since P(X) = Prod P_k(X_k), we sample each component and concatenate.
+        """
+        # Determine total features
+        all_indices = []
+        for v in self.feature_map.values():
+            all_indices.extend(v)
+        num_features = len(set(all_indices))
+
+        samples = torch.zeros(n, num_features, device=self.device)
+        for i, client in enumerate(self.clients):
+            indices = self.feature_map[i]
+            client_samples = client.sample(n)
+            # Ensure client_samples is 2D
+            client_samples = client_samples.view(n, -1)
+            samples[:, indices] = client_samples
+        return samples.view(n, -1)
 
     def get_size_bytes(self) -> int:
         """Sum of client sizes."""
@@ -346,6 +372,58 @@ class GlobalFedSPN(nn.Module):
         ll_stack = torch.cat(comp_lls, dim=1)
         log_w = torch.log(self.weights + 1e-9).unsqueeze(0)
         return torch.logsumexp(ll_stack + log_w, dim=1, keepdim=True)
+
+    def sample(self, n: int) -> torch.Tensor:
+        """
+        Sample from the mixture distribution.
+        1. Choose component based on weights.
+        2. Sample from component.
+        """
+        if n <= 0:
+            return torch.tensor([], device=self.device)
+
+        # 1. Choose components
+        comp_indices = torch.multinomial(self.weights, n, replacement=True)
+        unique_comps, counts = torch.unique(comp_indices, return_counts=True)
+
+        # Determine total features
+        # If Horizontal, components have same features. If Vertical, they might differ.
+        # Product components (Vertical) already handle internal feature maps.
+        # For simplicity, we sample and fill.
+
+        # Determine dimensionality
+        if self.feature_map is not None:
+            all_indices = []
+            for v in self.feature_map.values():
+                all_indices.extend(v)
+            num_features = len(set(all_indices))
+        else:
+            # Assume all components have same features (Horizontal)
+            # Sample from first to get shape
+            test_sample = self.components[0].sample(1)
+            num_features = test_sample.shape[1]
+
+        samples = torch.zeros(n, num_features, device=self.device)
+
+        # Track filling
+        start_idx = 0
+        for comp_idx, count in zip(unique_comps, counts):
+            c = self.components[comp_idx.item()]
+            comp_samples = c.sample(count.item())
+            # Ensure 2D
+            comp_samples = comp_samples.view(count.item(), -1)
+
+            end_idx = start_idx + count.item()
+
+            if self.feature_map is not None:
+                indices = self.feature_map[comp_idx.item()]
+                samples[start_idx:end_idx, indices] = comp_samples
+            else:
+                samples[start_idx:end_idx, :] = comp_samples
+
+            start_idx = end_idx
+
+        return samples.view(n, -1)
 
     def log_prob_conditional_u(self, x, u_idx):
         """

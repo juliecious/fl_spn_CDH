@@ -67,64 +67,88 @@ def get_hsic_score_fast(X, Y, C_f, iCcc):
 
 
 def get_hybrid_direction_score(
-    fed_spn_model, i, j, c_idx, data_aug, C_f=None, iCcc=None
+    fed_spn_model,
+    i,
+    j,
+    c_idx,
+    data_aug,
+    C_f=None,
+    iCcc=None,
+    orientation_type="hybrid",
 ):
     """
     Hybrid Orientation: Ensembles SPN-based mechanism invariance with HSIC.
+    Uses synthetic data sampled from the SPN to preserve federated privacy.
     """
-    # 1. SPN Score (Mechanism Invariance)
-    cit = SPN_CIT(data_aug, global_model=fed_spn_model, threshold=0.01)
+    # 1. Generate Synthetic Data (Privacy-Preserving)
+    # We sample 1000 points to get a stable estimate of the global density
+    with torch.no_grad():
+        samples_t = fed_spn_model.sample(1000)
+        samples = samples_t.cpu().numpy()
 
-    def compute_cmi(X, Y, Z):
-        ll_xyz = cit._get_marginal_log_prob(data_aug, X + Y + Z)
-        ll_xz = cit._get_marginal_log_prob(data_aug, X + Z)
-        ll_yz = cit._get_marginal_log_prob(data_aug, Y + Z)
-        ll_z = cit._get_marginal_log_prob(data_aug, Z) if Z else 0.0
+    # Append domain index C to samples?
+    # fed_spn_model (FedCDH_SPN_Wrapper) includes U in its probability model.
+    # However, fed_spn_model.sample(n) might return [X, U] or just X depending on implementation.
+    # GlobalFedSPN.sample returns full features.
+
+    # Indices in synthetic data: i, j, c_idx
+    # c_idx is usually the last column.
+
+    # 2. SPN Score (Mechanism Invariance) on Synthetic Data
+    cit = SPN_CIT(samples, global_model=fed_spn_model, threshold=0.01)
+
+    def compute_cmi(X, Y, Z, data):
+        ll_xyz = cit._get_marginal_log_prob(data, X + Y + Z)
+        ll_xz = cit._get_marginal_log_prob(data, X + Z)
+        ll_yz = cit._get_marginal_log_prob(data, Y + Z)
+        ll_z = cit._get_marginal_log_prob(data, Z) if Z else 0.0
         return max(0.0, ll_xyz - ll_xz - ll_yz + ll_z)
 
-    s_xy = compute_cmi([j], [c_idx], [i])  # Y _|_ C | X
-    s_yx = compute_cmi([i], [c_idx], [j])  # X _|_ C | Y
+    s_xy = compute_cmi([j], [c_idx], [i], samples)  # Y _|_ C | X
+    s_yx = compute_cmi([i], [c_idx], [j], samples)  # X _|_ C | Y
 
     spn_dir = 1 if s_xy < s_yx else 2
+    if orientation_type == "spn":
+        return spn_dir
+
     # Normalized margin as confidence
     spn_conf = abs(s_xy - s_yx) / (max(s_xy, s_yx) + 1e-9)
 
-    # 2. HSIC Score (Baseline)
-    if C_f is not None and iCcc is not None:
-        # We need the raw HSIC scores to compute confidence
-        # Re-implementing HSIC score calculation to get confidence
-        h = 5
-        feature_map = Nystroem(gamma=0.2, n_components=h, random_state=1)
-        X_f = feature_map.fit_transform(data_aug[:, i].reshape(-1, 1))
-        Y_f = feature_map.fit_transform(data_aug[:, j].reshape(-1, 1))
+    # 3. HSIC Score (Baseline) on Synthetic Data
+    # Precompute C features for synthetic samples
+    c_syn = samples[:, c_idx].reshape(-1, 1)
+    feature_map = Nystroem(gamma=0.2, n_components=5, random_state=1)
+    C_f_syn = feature_map.fit_transform(c_syn)
+    Ccc_syn = my_cov(C_f_syn, C_f_syn)
+    iCcc_syn = np.linalg.inv(Ccc_syn + np.eye(5) * 1e-10)
 
-        # This is a bit expensive but only for undirected edges
-        Mu_x = my_cov(X_f, C_f) @ iCcc @ C_f.T
-        Mu_y = my_cov(Y_f, C_f) @ iCcc @ C_f.T
+    X_f = feature_map.fit_transform(samples[:, i].reshape(-1, 1))
+    Y_f = feature_map.fit_transform(samples[:, j].reshape(-1, 1))
 
-        # Simplified HSIC components for C-invariance
-        # We use the HSIC logic from the fast function
-        # but we need to compute both directions manually
-        XY = np.concatenate(
-            (data_aug[:, i].reshape(-1, 1), data_aug[:, j].reshape(-1, 1)), axis=1
-        )
-        XY_f = feature_map.fit_transform(XY)
-        Mu_xy = my_cov(XY_f, C_f) @ iCcc @ C_f.T
+    Mu_x = my_cov(X_f, C_f_syn) @ iCcc_syn @ C_f_syn.T
+    Mu_y = my_cov(Y_f, C_f_syn) @ iCcc_syn @ C_f_syn.T
 
-        h_x = np.sum(my_cov(Mu_x, Mu_xy) ** 2) / (np.trace(my_cov(Mu_x)) + 1e-9)
-        h_y = np.sum(my_cov(Mu_y, Mu_xy) ** 2) / (np.trace(my_cov(Mu_y)) + 1e-9)
+    XY = np.concatenate(
+        (samples[:, i].reshape(-1, 1), samples[:, j].reshape(-1, 1)), axis=1
+    )
+    XY_f = feature_map.fit_transform(XY)
+    Mu_xy = my_cov(XY_f, C_f_syn) @ iCcc_syn @ C_f_syn.T
 
-        hsic_dir = 1 if h_x < h_y else 2
-        hsic_conf = abs(h_x - h_y) / (max(h_x, h_y) + 1e-9)
+    h_x = np.sum(my_cov(Mu_x, Mu_xy) ** 2) / (np.trace(my_cov(Mu_x)) + 1e-9)
+    h_y = np.sum(my_cov(Mu_y, Mu_xy) ** 2) / (np.trace(my_cov(Mu_y)) + 1e-9)
 
-        # 3. Ensemble Logic
-        if spn_dir == hsic_dir:
-            return spn_dir
-        else:
-            # Conflict: Use the more confident method
-            return spn_dir if spn_conf > hsic_conf else hsic_dir
+    hsic_dir = 1 if h_x < h_y else 2
+    if orientation_type == "hsic":
+        return hsic_dir
 
-    return spn_dir
+    hsic_conf = abs(h_x - h_y) / (max(h_x, h_y) + 1e-9)
+
+    # 4. Ensemble Logic (Hybrid)
+    if spn_dir == hsic_dir:
+        return spn_dir
+    else:
+        # Conflict: Use the more confident method
+        return spn_dir if spn_conf > hsic_conf else hsic_dir
 
 
 def cdnod(
@@ -142,6 +166,7 @@ def cdnod(
     verbose: bool = False,
     show_progress: bool = True,
     fed_spn_model: Optional[nn.Module] = None,
+    orientation_type: str = "hybrid",
     **kwargs,
 ) -> CausalGraph:
     if mvcdnod:
@@ -171,6 +196,7 @@ def cdnod(
             verbose=verbose,
             show_progress=show_progress,
             fed_spn_model=fed_spn_model,
+            orientation_type=orientation_type,
             **kwargs,
         )
 
@@ -188,6 +214,7 @@ def cdnod_alg(
     verbose: bool = False,
     show_progress: bool = True,
     fed_spn_model: Optional[nn.Module] = None,
+    orientation_type: str = "hybrid",
     **kwargs,
 ) -> CausalGraph:
     start = time.time()
@@ -283,7 +310,14 @@ def cdnod_alg(
         i, j = v
         if fed_spn_model is not None:
             score_i_j = get_hybrid_direction_score(
-                fed_spn_model, i, j, c_indx_id, data_aug, C_f, iCcc
+                fed_spn_model,
+                i,
+                j,
+                c_indx_id,
+                data_aug,
+                C_f,
+                iCcc,
+                orientation_type=orientation_type,
             )
         else:
             score_i_j = get_hsic_score_fast(
