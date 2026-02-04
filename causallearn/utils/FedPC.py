@@ -1,11 +1,9 @@
 import torch
 import torch.nn as nn
 import numpy as np
-import logging
-from typing import List, Dict, Optional, Union
+from typing import Dict, List
 from simple_einet.einet import Einet, EinetConfig
 from simple_einet.layers.distributions.normal import Normal
-from sklearn.cluster import KMeans
 
 
 class LocalSPNWrapper(nn.Module):

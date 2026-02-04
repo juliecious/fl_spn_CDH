@@ -1,8 +1,7 @@
 import time
-from itertools import permutations, combinations
+from itertools import combinations
 from typing import Dict, List, Optional
 
-import networkx as nx
 import torch.nn as nn
 from numpy import ndarray
 import numpy as np
@@ -20,9 +19,6 @@ from causallearn.search.ConstraintBased.PC import (
 )
 
 from sklearn.kernel_approximation import Nystroem
-from sklearn.kernel_approximation import RBFSampler
-from mlxtend.preprocessing import standardize
-from copy import deepcopy
 from causallearn.graph.Edge import Edge
 from causallearn.graph.Endpoint import Endpoint
 

@@ -6,8 +6,6 @@ from collections.abc import Iterable
 from scipy.stats import chi2, norm
 from typing import List
 
-from torch.utils.data import DataLoader, TensorDataset
-
 from causallearn.utils.KCI.KCI import (
     KCI_CInd,
     KCI_UInd,
@@ -20,9 +18,6 @@ from causallearn.utils.KCI.KCI import (
 from causallearn.utils.PCUtils import Helper
 
 import torch
-from sklearn.preprocessing import StandardScaler
-from simple_einet.einet import Einet, EinetConfig
-from simple_einet.layers.distributions.normal import Normal
 
 torch.set_num_threads(1)
 torch.set_default_dtype(torch.float32)

@@ -5,7 +5,6 @@ import numpy as np
 import time
 import argparse
 import logging
-from tqdm import tqdm
 
 sys.path.append("")
 
@@ -13,7 +12,6 @@ from causallearn.search.ConstraintBased.CDNOD import cdnod
 from causallearn.utils.FedPC import (
     GlobalFedSPN,
     LocalSPNWrapper,
-    auto_tune_spn_config,
 )
 from causallearn.utils.data_utils import (
     my_simulate_general_hetero,
