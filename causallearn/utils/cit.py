@@ -735,7 +735,7 @@ class SPN_CIT(CIT_Base):
 
     def __call__(self, X, Y, Z, *args, data_matrix=None, **kwargs):
         """
-        SPN-Based Conditional Independence Test (Vectorized).
+        SPN-Based Conditional Independence Test (Adaptive & Vectorized).
         Score = LL(X,Y,Z) - [LL(X,Z) + LL(Y,Z) - LL(Z)]
         """
         # Handle 'data_matrix' potentially being passed in kwargs
@@ -758,95 +758,96 @@ class SPN_CIT(CIT_Base):
         data = data_matrix if data_matrix is not None else self.data
         n_samples, n_features = data.shape
 
-        # 1. Construct Batch: [Original, Perm_1, ..., Perm_k]
-        # Total rows = (num_permutations + 1) * n_samples
+        def get_ll(input_data, subset_indices):
+            if not subset_indices:
+                return np.zeros(input_data.shape[0])
+            masked_batch = np.full_like(input_data, np.nan)
+            masked_batch[:, subset_indices] = input_data[:, subset_indices]
+            batch_t = torch.tensor(masked_batch, dtype=torch.float32).to(
+                self.model.device
+            )
+            with torch.no_grad():
+                ll = self.model.log_prob(batch_t)
+            return ll.cpu().numpy().flatten()
 
-        # Original Data
-        data_list = [data]
+        # 1. Compute Observed Score
+        ll_xyz_obs = get_ll(data, X + Y + Z)
+        ll_xz_obs = get_ll(data, X + Z)
+        ll_yz_obs = get_ll(data, Y + Z)
+        ll_z_obs = get_ll(data, Z) if Z else 0.0
+        score_obs = np.mean(
+            np.maximum(0.0, ll_xyz_obs - (ll_xz_obs + ll_yz_obs - ll_z_obs))
+        )
 
-        if self.num_permutations > 0:
-            for _ in range(self.num_permutations):
+        if self.num_permutations <= 0:
+            effective_threshold = self.threshold * (1 + 0.5 * len(Z))
+            return 1.0 if score_obs < effective_threshold else 0.0
+
+        # 2. Adaptive Permutation Loop
+        null_dist = []
+        block_size = 10
+
+        for b in range(0, self.num_permutations, block_size):
+            current_batch_size = min(block_size, self.num_permutations - b)
+            data_list = []
+            for _ in range(current_batch_size):
                 perm_idx = np.random.permutation(n_samples)
                 d_perm = data.copy()
                 d_perm[:, X] = data[perm_idx][:, X]
                 data_list.append(d_perm)
 
-        # Stack to create a large batch: [ (K+1)*N, D ]
-        batch_data = np.vstack(data_list)
+            batch_data = np.vstack(data_list)
 
-        # 2. Compute Scores Vectorized
-        # We need LL for 4 subsets: XYZ, XZ, YZ, Z
-        # We can optimize by masking ONLY ONCE for each subset
+            # Compute null scores for block
+            ll_xyz_null = get_ll(batch_data, X + Y + Z)
+            ll_xz_null = get_ll(batch_data, X + Z)
+            ll_yz_null = get_ll(batch_data, Y + Z)
+            ll_z_null = get_ll(batch_data, Z) if Z else 0.0
 
-        def get_batch_ll(subset_indices):
-            if not subset_indices:
-                return np.zeros(batch_data.shape[0])
-
-            # Masking
-            masked_batch = np.full_like(batch_data, np.nan)
-            masked_batch[:, subset_indices] = batch_data[:, subset_indices]
-
-            # Convert to Tensor
-            batch_t = torch.tensor(masked_batch, dtype=torch.float32).to(
-                self.model.device
+            scores_null = np.maximum(
+                0.0, ll_xyz_null - (ll_xz_null + ll_yz_null - ll_z_null)
             )
 
-            # Forward Pass
-            with torch.no_grad():
-                ll = self.model.log_prob(batch_t)
-
-            # Output is [Batch, 1] -> Flatten
-            return ll.cpu().numpy().flatten()
-
-        ll_xyz = get_batch_ll(X + Y + Z)
-        ll_xz = get_batch_ll(X + Z)
-        ll_yz = get_batch_ll(Y + Z)
-
-        if len(Z) > 0:
-            ll_z = get_batch_ll(Z)
-        else:
-            ll_z = np.zeros_like(ll_xyz)
-
-        # Calculate CMI Scores: I(X;Y|Z)
-        scores = ll_xyz - (ll_xz + ll_yz - ll_z)
-        scores = np.maximum(0.0, scores)
-
-        # 3. Separate Observation and Null
-        # First N samples are Observation
-        score_obs = np.mean(scores[:n_samples])
-
-        # The rest are Null samples (N samples per permutation)
-        # We want distribution of Mean Scores per permutation
-        if self.num_permutations > 0:
-            null_scores_flat = scores[n_samples:]
-            # Reshape to [Num_Perm, N]
-            null_scores_matrix = null_scores_flat.reshape(
-                self.num_permutations, n_samples
+            # Reshape and average per permutation
+            null_dist.extend(
+                np.mean(
+                    scores_null.reshape(current_batch_size, n_samples), axis=1
+                ).tolist()
             )
-            # Average over samples to get Score per Permutation
-            null_dist = np.mean(null_scores_matrix, axis=1)
 
-            # 4. Fit Gamma
-            null_dist = null_dist[null_dist > 1e-6]  # Filter zeros
+            # 3. Check for Early Exit (after at least one block)
+            if len(null_dist) >= 10:
+                clean_null = np.array(null_dist)
+                # Add small epsilon for stability
+                clean_null = clean_null + 1e-7
 
-            if len(null_dist) < 5:
-                effective_threshold = self.threshold * (1 + 0.5 * len(Z))
-                return 1.0 if score_obs < effective_threshold else 0.0
+                try:
+                    params = gamma.fit(clean_null)
+                    p_val = gamma.sf(score_obs, *params)
 
-            try:
-                params = gamma.fit(null_dist)
-                p_value = gamma.sf(score_obs, *params)
-                return p_value
-            except Exception:
-                # Fallback
-                return (
-                    1.0
-                    if score_obs < np.mean(null_dist) + 3 * np.std(null_dist)
-                    else 0.0
-                )
-        else:
-            effective_threshold = self.threshold * (1 + 0.5 * len(Z))
-            return 1.0 if score_obs < effective_threshold else 0.0
+                    # More conservative Early Exit for research rigor
+                    if p_val > 0.5:
+                        return 1.0  # High confidence Independence
+                    if p_val < 0.0001:
+                        return 0.0  # High confidence Dependence
+                except Exception:
+                    # Fallback to Mean/Std check if Gamma fails
+                    mu, sigma = np.mean(clean_null), np.std(clean_null)
+                    if score_obs < mu:
+                        return 1.0
+                    if score_obs > mu + 6 * sigma:
+                        return 0.0
+
+        # 4. Final Decision
+        clean_null = np.array(null_dist) + 1e-7
+        try:
+            params = gamma.fit(clean_null)
+            return gamma.sf(score_obs, *params)
+        except Exception:
+            mu, sigma = np.mean(clean_null), np.std(clean_null)
+            # Normal approximation fallback
+            z_score = (score_obs - mu) / (sigma + 1e-9)
+            return 2 * (1 - norm.cdf(abs(z_score))) if z_score > 0 else 1.0
 
 
 class FedPC(CIT_Base):

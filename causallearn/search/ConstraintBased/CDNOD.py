@@ -86,9 +86,44 @@ def get_hybrid_direction_score(
     s_yx = compute_cmi([i], [c_idx], [j])  # X _|_ C | Y
 
     spn_dir = 1 if s_xy < s_yx else 2
+    # Normalized margin as confidence
+    spn_conf = abs(s_xy - s_yx) / (max(s_xy, s_yx) + 1e-9)
 
-    # 2. HSIC Score (Ensemble logic could go here)
-    # For now, SPN is preferred for federated density consistency.
+    # 2. HSIC Score (Baseline)
+    if C_f is not None and iCcc is not None:
+        # We need the raw HSIC scores to compute confidence
+        # Re-implementing HSIC score calculation to get confidence
+        h = 5
+        feature_map = Nystroem(gamma=0.2, n_components=h, random_state=1)
+        X_f = feature_map.fit_transform(data_aug[:, i].reshape(-1, 1))
+        Y_f = feature_map.fit_transform(data_aug[:, j].reshape(-1, 1))
+
+        # This is a bit expensive but only for undirected edges
+        Mu_x = my_cov(X_f, C_f) @ iCcc @ C_f.T
+        Mu_y = my_cov(Y_f, C_f) @ iCcc @ C_f.T
+
+        # Simplified HSIC components for C-invariance
+        # We use the HSIC logic from the fast function
+        # but we need to compute both directions manually
+        XY = np.concatenate(
+            (data_aug[:, i].reshape(-1, 1), data_aug[:, j].reshape(-1, 1)), axis=1
+        )
+        XY_f = feature_map.fit_transform(XY)
+        Mu_xy = my_cov(XY_f, C_f) @ iCcc @ C_f.T
+
+        h_x = np.sum(my_cov(Mu_x, Mu_xy) ** 2) / (np.trace(my_cov(Mu_x)) + 1e-9)
+        h_y = np.sum(my_cov(Mu_y, Mu_xy) ** 2) / (np.trace(my_cov(Mu_y)) + 1e-9)
+
+        hsic_dir = 1 if h_x < h_y else 2
+        hsic_conf = abs(h_x - h_y) / (max(h_x, h_y) + 1e-9)
+
+        # 3. Ensemble Logic
+        if spn_dir == hsic_dir:
+            return spn_dir
+        else:
+            # Conflict: Use the more confident method
+            return spn_dir if spn_conf > hsic_conf else hsic_dir
+
     return spn_dir
 
 

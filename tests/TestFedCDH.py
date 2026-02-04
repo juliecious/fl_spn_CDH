@@ -187,12 +187,31 @@ def test_fedCDH(i, args):
                 feature_maps[k] = cols_per_client[k].tolist()
                 X_splits.append(X_global[:, feature_maps[k]])
 
-            # Metadata phase for Vertical is local to clients (no cross-client reordering yet)
-            # but we can reorder features within each client.
-            # 2. Define Latent Components via Clustering (Proxy)
+            # MILESTONE 4: Auto-Tune Cluster Count (H) using BIC
             from sklearn.cluster import KMeans
 
-            kmeans = KMeans(n_clusters=num_clusters, n_init=10).fit(X_global)
+            best_h = 2
+            min_bic = float("inf")
+            n_samples, d_global = X_global.shape
+
+            for h_candidate in range(2, 9):
+                km = KMeans(n_clusters=h_candidate, n_init=5, random_state=42).fit(
+                    X_global
+                )
+                # BIC approximation for KMeans
+                # BIC = SSD + k * log(n) * d
+                bic = km.inertia_ + h_candidate * np.log(n_samples) * d_global
+                if bic < min_bic:
+                    min_bic = bic
+                    best_h = h_candidate
+
+            num_clusters = best_h
+            logging.info(f"   [Auto-Tune] Optimal Cluster Count H={num_clusters}")
+
+            # 2. Fit Final Clustering
+            kmeans = KMeans(n_clusters=num_clusters, n_init=10, random_state=42).fit(
+                X_global
+            )
             labels = kmeans.labels_
             weights = np.bincount(labels, minlength=num_clusters) / len(labels)
 
