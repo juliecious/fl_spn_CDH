@@ -1,9 +1,61 @@
 import torch
 import torch.nn as nn
 import numpy as np
+import logging
 from typing import Dict, List
 from simple_einet.einet import Einet, EinetConfig
 from simple_einet.layers.distributions.normal import Normal
+
+
+from scipy.cluster.hierarchy import linkage, leaves_list
+from scipy.spatial.distance import squareform
+
+
+class FederatedStructureLearner:
+    """
+    Learns a global variable dependency structure from federated metadata.
+    Goal: Find an ordering of variables that places dependent variables close together,
+    improving the effectiveness of the SPN's internal splitting rules.
+    """
+
+    def __init__(self, num_features: int):
+        self.num_features = num_features
+        self.local_correlations = []
+
+    def add_local_metadata(self, data: np.ndarray):
+        """Clients call this to share their local correlation matrix."""
+        # Use absolute correlation as proxy for dependence magnitude
+        corr = np.abs(np.corrcoef(data, rowvar=False))
+        # Handle NaNs (e.g. constant features)
+        corr = np.nan_to_num(corr, nan=0.0)
+        self.local_correlations.append(corr)
+
+    def get_causal_order(self) -> np.ndarray:
+        """
+        Aggregates correlations and returns a dependency-aware variable ordering.
+        Uses Hierarchical Clustering to group dependent variables.
+        """
+        if not self.local_correlations:
+            return np.arange(self.num_features)
+
+        # 1. Aggregate: Global Mean Dependency Matrix
+        global_corr = np.mean(self.local_correlations, axis=0)
+
+        # 2. Convert to Distance Matrix (1 - corr)
+        # We want highly correlated variables to have low distance
+        dist_matrix = 1.0 - global_corr
+        np.fill_diagonal(dist_matrix, 0)
+
+        # 3. Hierarchical Clustering (Ward's Method)
+        # squareform converts the matrix to the compressed distance vector expected by linkage
+        try:
+            Z = linkage(squareform(dist_matrix, checks=False), method="ward")
+            # 4. Extract Optimal Leaf Ordering
+            order = leaves_list(Z)
+            return order
+        except Exception:
+            # Fallback to identity order if clustering fails (e.g. too few features)
+            return np.arange(self.num_features)
 
 
 class LocalSPNWrapper(nn.Module):
@@ -16,11 +68,25 @@ class LocalSPNWrapper(nn.Module):
         num_leaves=20,
         num_repetitions=10,
         seed=None,
+        variable_order=None,
     ):
         super().__init__()
         self.device = device
         self.mean = None
         self.std = None
+
+        # Dependency-Aware Ordering
+        if variable_order is not None:
+            self.variable_order = torch.tensor(variable_order, dtype=torch.long).to(
+                device
+            )
+            # Inverse order for sampling/denormalization
+            self.inv_variable_order = torch.zeros_like(self.variable_order)
+            self.inv_variable_order[self.variable_order] = torch.arange(
+                num_features, device=device
+            )
+        else:
+            self.variable_order = None
 
         # Ensure structural heterogeneity by seeding
         if seed is not None:
@@ -46,6 +112,17 @@ class LocalSPNWrapper(nn.Module):
             return data
         return (data - self.mean) / (self.std + 1e-6)
 
+    def _permute(self, x):
+        if self.variable_order is None:
+            return x
+        # x is [N, D]
+        return x[:, self.variable_order]
+
+    def _inv_permute(self, x):
+        if self.variable_order is None:
+            return x
+        return x[:, self.inv_variable_order]
+
     def train_local(self, data, weights=None, epochs=50, lr=0.005):
         """
         Train this specific leaf on its data slice.
@@ -54,9 +131,7 @@ class LocalSPNWrapper(nn.Module):
         if len(data) < 5:
             return 0.0
 
-        # Compute and store normalization stats (only if not set or update?)
-        # For EM, we should probably keep stats fixed after first iter?
-        # But simple-einet handles data. Let's re-compute stats if this is first run.
+        # Compute and store normalization stats
         if self.mean is None:
             self.mean = torch.tensor(data.mean(axis=0), dtype=torch.float32).to(
                 self.device
@@ -67,6 +142,7 @@ class LocalSPNWrapper(nn.Module):
 
         data_t = torch.tensor(data, dtype=torch.float32).to(self.device)
         data_t = self._normalize(data_t)
+        data_t = self._permute(data_t)  # Apply dependency-aware ordering
 
         if weights is not None:
             weights_t = torch.tensor(weights, dtype=torch.float32).to(self.device)
@@ -80,8 +156,6 @@ class LocalSPNWrapper(nn.Module):
             ll = self.model(data_t)
 
             if weights is not None:
-                # Weighted Likelihood Maximization
-                # Loss = - Sum( w_i * ll_i ) / Sum(w_i)
                 loss = -(ll * weights_t.unsqueeze(1)).sum() / (weights_t.sum() + 1e-9)
             else:
                 loss = -ll.mean()
@@ -93,14 +167,23 @@ class LocalSPNWrapper(nn.Module):
 
     def sample(self, n):
         samples = self.model.sample(n)
+        samples = self._inv_permute(samples)  # Restore original variable order
         if self.mean is not None and self.std is not None:
             samples = samples * (self.std + 1e-6) + self.mean
         return samples
 
     def log_prob(self, x):
+        # 1. Normalize and Permute
         x_norm = self._normalize(x)
-        ll = self.model(x_norm)
+        x_perm = self._permute(x_norm)
+
+        # 2. Forward pass through Einet
+        ll = self.model(x_perm)
+
+        # 3. Log-Jacobian Correction
         if self.std is not None:
+            # Jacobian is based on scale sigma.
+            # Mask is based on ORIGINAL x (not permuted)
             mask = (~torch.isnan(x)).float()
             log_sigma = torch.log(self.std + 1e-6)
             log_det_jacobian = -(log_sigma * mask).sum(dim=1, keepdim=True)
@@ -166,6 +249,59 @@ class GlobalFedSPN(nn.Module):
 
         # Backward compatibility aliases
         self.clients = self.components
+
+    def train_weights_em(self, x, epochs=10, lr=0.01):
+        """
+        Refine the mixture weights using EM (Expectation-Maximization) on the server.
+        Optimizes P(X) = Sum_k w_k * Component_k(X) w.r.t w_k.
+        Useful for Vertical FL to better align the latent components.
+        """
+        if self.strategy != "mixture":
+            logging.warning("EM weight training only valid for 'mixture' strategy.")
+            return
+
+        prev_ll = -float("inf")
+
+        with torch.no_grad():
+            for epoch in range(epochs):
+                # 1. E-Step: Compute Responsibilities (Posteriors)
+                comp_lls = []
+                for i, c in enumerate(self.components):
+                    if self.feature_map is not None:
+                        idx = self.feature_map[i]
+                        x_c = x[:, idx]
+                    else:
+                        x_c = x
+                    comp_lls.append(c.log_prob(x_c))
+
+                ll_stack = torch.cat(comp_lls, dim=1)
+
+                # Log Prior
+                log_w = torch.log(self.weights + 1e-9).unsqueeze(0)
+
+                # Log Joint: [N, K]
+                log_joint = ll_stack + log_w
+
+                # Log Marginal (Evidence): [N, 1]
+                log_evidence = torch.logsumexp(log_joint, dim=1, keepdim=True)
+
+                # Log Posterior: [N, K]
+                log_posterior = log_joint - log_evidence
+
+                # Monitor convergence
+                current_ll = log_evidence.mean().item()
+                if abs(current_ll - prev_ll) < 1e-4:
+                    break
+                prev_ll = current_ll
+
+                # 2. M-Step: Update Weights
+                responsibilities = torch.exp(log_posterior)
+                new_weights = responsibilities.mean(dim=0)
+
+                # Update
+                self.weights = new_weights.detach()
+
+        logging.info(f"[FedPC] EM Refined Weights: {self.weights.cpu().numpy()}")
 
     def log_prob(self, x):
         """

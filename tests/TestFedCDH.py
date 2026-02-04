@@ -138,11 +138,20 @@ def test_fedCDH(i, args):
         global_strategy = "mixture"
         num_clusters = 5  # Number of latent variables H
 
+        # MILESTONE 1: Federated Structure Learning (Metadata Phase)
+        from causallearn.utils.FedPC import FederatedStructureLearner
+
+        struct_learner = FederatedStructureLearner(num_features=d_features)
+
         if scenario == "horizontal":
             # Split samples (Rows), All Features
             X_splits = np.array_split(X_global, K_clients)
             for k in range(K_clients):
                 feature_maps[k] = list(range(d_features))
+                struct_learner.add_local_metadata(X_splits[k])
+
+            causal_order = struct_learner.get_causal_order()
+            logging.info(f"   [Structure Learning] Global Causal Order: {causal_order}")
 
             local_models = []
             for k in range(K_clients):
@@ -158,6 +167,7 @@ def test_fedCDH(i, args):
                     depth=safe_depth,
                     num_repetitions=5,
                     seed=i * 100 + k,
+                    variable_order=causal_order,  # Apply learned structure
                 )
                 leaf.train_local(local_data, epochs=30, lr=0.01)
                 local_models.append(leaf)
@@ -177,6 +187,8 @@ def test_fedCDH(i, args):
                 feature_maps[k] = cols_per_client[k].tolist()
                 X_splits.append(X_global[:, feature_maps[k]])
 
+            # Metadata phase for Vertical is local to clients (no cross-client reordering yet)
+            # but we can reorder features within each client.
             # 2. Define Latent Components via Clustering (Proxy)
             from sklearn.cluster import KMeans
 
@@ -198,6 +210,12 @@ def test_fedCDH(i, args):
                     local_data_h = X_splits[k][cluster_mask]
                     local_d = local_data_h.shape[1]
                     safe_depth = max(1, int(np.floor(np.log2(local_d))))
+
+                    # Local Structure Learning for Vertical Client
+                    local_struct = FederatedStructureLearner(num_features=local_d)
+                    local_struct.add_local_metadata(local_data_h)
+                    local_order = local_struct.get_causal_order()
+
                     leaf = LocalSPNWrapper(
                         num_features=local_d,
                         device=device,
@@ -206,6 +224,7 @@ def test_fedCDH(i, args):
                         depth=safe_depth,
                         num_repetitions=5,
                         seed=i * 100 + h * 10 + k,
+                        variable_order=local_order,
                     )
                     leaf.train_local(local_data_h, epochs=20, lr=0.01)
                     clients_clusters[h].append(leaf)
@@ -224,11 +243,20 @@ def test_fedCDH(i, args):
             global_spn = GlobalFedSPN(
                 products, weights=weights[: len(products)], device=device
             )
+            # Milestone 3: Advanced Vertical FL - Refine weights via EM
+            global_spn.train_weights_em(
+                torch.tensor(X_global, dtype=torch.float32).to(device)
+            )
 
         elif scenario == "hybrid":
             # Simulation: Treat as Horizontal for density estimation benchmark purposes
             X_splits = np.array_split(X_global, K_clients)
             feature_maps = {k: list(range(d_features)) for k in range(K_clients)}
+
+            for k in range(K_clients):
+                struct_learner.add_local_metadata(X_splits[k])
+            causal_order = struct_learner.get_causal_order()
+
             local_models = []
             for k in range(K_clients):
                 logging.info(f"   Training Client {k+1}/{K_clients}...")
@@ -243,6 +271,7 @@ def test_fedCDH(i, args):
                     depth=safe_depth,
                     num_repetitions=5,
                     seed=i * 100 + k,
+                    variable_order=causal_order,
                 )
                 leaf.train_local(local_data, epochs=30, lr=0.01)
                 local_models.append(leaf)
@@ -251,6 +280,10 @@ def test_fedCDH(i, args):
                 device=device,
                 feature_map=feature_maps,
                 strategy="mixture",
+            )
+            # Milestone 3: Refine weights for Hybrid too (Mixture of Experts)
+            global_spn.train_weights_em(
+                torch.tensor(X_global, dtype=torch.float32).to(device)
             )
 
         # Wrap for FedCDH (handling U index)

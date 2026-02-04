@@ -47,6 +47,9 @@ def CIT(data, method="fisherz", **kwargs):
         TODO: ultimately kwargs should be replaced by explicit named parameters.
               check https://github.com/cmu-phil/causal-learn/pull/62#discussion_r927239028
     """
+    if not isinstance(method, str):
+        return method
+
     if method == fisherz:
         return FisherZ(data, **kwargs)
     elif method == kci:
