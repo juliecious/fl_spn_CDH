@@ -27,10 +27,10 @@ class Args:
     # ... (Args implementation remains same)
     def __init__(self, **kwargs):
         self.N = 1
-        self.d = 4
+        self.d = 11
         self.K = 2
-        self.n = 50
-        self.model_type = "general"
+        self.n = 30
+        self.model_type = "sachs"
         self.ci_method = "spn"
         self.scenario = "horizontal"
         self.__dict__.update(kwargs)
@@ -40,31 +40,54 @@ def run_benchmarks():
     # ... (run_benchmarks setup remains same)
     configs = [
         {
-            "name": "KCI (Horizontal)",
-            "args": {"ci_method": "kci", "scenario": "horizontal"},
+            "name": "KCI (Real Sachs)",
+            "args": {
+                "ci_method": "kci",
+                "scenario": "horizontal",
+                "model_type": "sachs_real",
+            },
         },
         {
-            "name": "FedSPN (Horizontal)",
+            "name": "Voting-FedPC (Real Sachs)",
+            "args": {
+                "ci_method": "voting_pc",
+                "scenario": "horizontal",
+                "model_type": "sachs_real",
+                "n": 853,
+                "d": 11,
+            },
+        },
+        {
+            "name": "FedSPN (Real Sachs - Horizontal)",
             "args": {
                 "ci_method": "spn",
                 "scenario": "horizontal",
+                "model_type": "sachs_real",
                 "ablation_orientation": "mi_only",
+                "n": 853,
+                "d": 11,
             },
         },
         {
-            "name": "FedSPN (Vertical)",
+            "name": "FedSPN (Real Sachs - Vertical)",
             "args": {
                 "ci_method": "spn",
                 "scenario": "vertical",
+                "model_type": "sachs_real",
                 "ablation_orientation": "mi_only",
+                "n": 853,
+                "d": 11,
             },
         },
         {
-            "name": "FedSPN (Hybrid)",
+            "name": "FedSPN (Real Sachs - Hybrid)",
             "args": {
                 "ci_method": "spn",
                 "scenario": "hybrid",
+                "model_type": "sachs_real",
                 "ablation_orientation": "mi_only",
+                "n": 853,
+                "d": 11,
             },
         },
     ]

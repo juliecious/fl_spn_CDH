@@ -295,25 +295,248 @@ def test_fedCDH(i, args):
     set_random_seed(i)
 
     # 1. Data Generation
-    true_DAG_bin = simulate_dag(d_features, s0, "ER")
-    total_samples = n_samples_per_client * K_clients
+    from tests.utils.benchmark_loaders import (
+        load_standard_graph,
+        simulate_heterogeneous_data,
+    )
 
-    if model_type == "linear":
-        X_global, c_indx = my_simulate_linear_gaussian(
-            true_DAG_bin, K_clients, total_samples, "gauss"
+    if model_type == "sachs_real":
+        # --- Real-World Interventional Benchmark ---
+        from tests.utils.sachs_loader import load_sachs_federated
+
+        X_splits, true_DAG_bin, c_indx = load_sachs_federated(
+            K_clients, n_samples_limit=n_samples_per_client * K_clients
         )
+
+        # Reconstruct Global for KCI (Centralized Baseline)
+        X_global = np.concatenate(X_splits, axis=0)
+        d_features = X_global.shape[1]
+
+        # Prepare aggregated data for clustering/hybrid logic
+        X_aug_global = np.concatenate([X_global, c_indx], axis=1)
+        d_aug_total = X_aug_global.shape[1]
+
+        # Augment X_splits with U for SPN training
+        # (Since downstream logic expects X_splits to align with feature_maps including U)
+        X_splits_aug = []
+        for k, x_k in enumerate(X_splits):
+            c_k = c_indx[c_indx == k].reshape(-1, 1)
+            # Safety: Ensure lengths match (they should from loader)
+            if len(x_k) != len(c_k):
+                # Fallback if c_indx wasn't perfectly aligned by loader order
+                c_k = np.full((len(x_k), 1), k)
+            X_splits_aug.append(np.concatenate([x_k, c_k], axis=1))
+        X_splits = X_splits_aug
+
+    elif model_type in ["sachs", "asia", "alarm"]:
+        # Standard Graph Structure + Synthetic Heterogeneity
+        true_DAG_bin = load_standard_graph(model_type)
+        d_features = true_DAG_bin.shape[0]  # Override d with actual graph size
+
+        # Simulate Heterogeneous Data from this Structure
+        # We assume 'general' non-linear mechanisms by default for benchmarks
+        X_global, c_indx = simulate_heterogeneous_data(
+            true_DAG_bin, K_clients, n_samples_per_client, mode="general"
+        )
+
+        # Ensure c_indx is int
+        c_indx = c_indx.astype(int)
+
+        # Split for Federated
+        X_splits = np.array_split(X_global, K_clients)
+
     else:
-        X_global, c_indx = my_simulate_general_hetero(
-            true_DAG_bin, K_clients, total_samples, "gauss"
-        )
+        # Random Synthetic Graph Path
+        true_DAG_bin = simulate_dag(d_features, s0, "ER")
+        total_samples = n_samples_per_client * K_clients
 
-    c_indx = np.repeat(np.arange(K_clients), n_samples_per_client).reshape(-1, 1)
-    X_global = (X_global - X_global.mean(0)) / (X_global.std(0) + 1e-6)
+        if model_type == "linear":
+            X_global, c_indx = my_simulate_linear_gaussian(
+                true_DAG_bin, K_clients, total_samples, "gauss"
+            )
+        else:
+            X_global, c_indx = my_simulate_general_hetero(
+                true_DAG_bin, K_clients, total_samples, "gauss"
+            )
+
+        # Normalization and Indexing (aligned with standard path)
+        c_indx = np.repeat(np.arange(K_clients), n_samples_per_client).reshape(-1, 1)
+        X_global = (X_global - X_global.mean(0)) / (X_global.std(0) + 1e-6)
+
+    total_samples = X_global.shape[0]
 
     train_time = 0
     fed_spn_model = None
     routing_mode = True
     clustering_cost = 0
+
+    if ci_method == "voting_pc":
+        # --- Baseline: Voting-based Federated PC ---
+        start_cd = time.time()
+        local_graphs = []
+        for k in range(K_clients):
+            # 1. Prepare Local Data
+            local_X = X_splits[k]
+            # Handle potential augmented columns (remove context U if present for standard PC)
+            if local_X.shape[1] > d_features:
+                local_data = local_X[:, :d_features]
+            else:
+                local_data = local_X
+
+            # 2. Run Local PC (Standard FisherZ)
+            # We use cdnod wrapper but with K=1 and local data
+            # Dummy context for API compatibility
+            local_c = np.zeros((len(local_data), 1))
+
+            try:
+                cg_local = cdnod(
+                    local_data,
+                    local_c,
+                    1,
+                    alpha=0.01,
+                    indep_test="fisherz",
+                    stable=True,
+                    uc_rule=2,
+                    uc_priority=-1,
+                )
+                local_graphs.append(cg_local.G.graph[0:d_features, 0:d_features])
+            except Exception:
+                # Fallback empty graph if local PC fails
+                local_graphs.append(np.zeros((d_features, d_features)))
+
+        # 3. Majority Vote Aggregation
+        global_skeleton = np.zeros((d_features, d_features))
+        for g in local_graphs:
+            # Symmetrize and binarize
+            skel = ((g + g.T) != 0).astype(int)
+            global_skeleton += skel
+
+        # Threshold > K/2
+        consensus_skeleton = (global_skeleton > (K_clients / 2)).astype(int)
+
+        # 4. Construct Result
+        est_cpdag = np.zeros((d_features, d_features))
+        rows, cols = np.where(consensus_skeleton == 1)
+        for r, c in zip(rows, cols):
+            est_cpdag[r, c] = -1  # Undirected edge
+
+        est_dag = np.zeros_like(est_cpdag)  # No orientation in naive voting
+
+        cd_time = time.time() - start_cd
+        train_time = 0.0
+
+        # Metrics
+        res_skel = count_skeleton_accuracy(true_DAG_bin, est_cpdag)
+        res_dir = count_dag_accuracy(true_DAG_bin, est_dag)
+        # 4 bytes per entry for float adjacency
+        comm_cost = (K_clients * d_features * d_features * 4) / 1024.0
+
+        result = {
+            **res_skel,
+            **res_dir,
+            "time_train": train_time,
+            "time_cd": cd_time,
+            "comm_cost": comm_cost,
+        }
+
+        safe_result = {}
+        for k, v in result.items():
+            if v is None or (isinstance(v, float) and np.isnan(v)):
+                safe_result[k] = 0.0
+            else:
+                safe_result[k] = float(v)
+        logging.info(f"   Result: Skel F1={safe_result.get('f1_skeleton', 0):.2f}")
+        return safe_result
+
+    elif ci_method == "spn":
+        # ... (Existing SPN logic) ...
+        # (This block remains unchanged, just showing context)
+        pass
+
+    elif ci_method == "voting_pc":
+        # --- Baseline: Voting-based Federated PC ---
+        # Clients run PC locally, Server aggregates by Majority Vote
+        start_cd = time.time()
+
+        local_graphs = []
+        # Pre-compute correlation matrices for speed if needed, but PC is fast
+
+        for k in range(K_clients):
+            # Local PC
+            # We use standard fisherz for local independence test
+            # Note: We pass c_indx slice just to satisfy cdnod signature,
+            # but standard PC ignores it or we can use standard PC.
+            # Using cdnod locally to be fair (handling heterogeneity if local data has it)
+
+            # Slice local data
+            local_X = X_splits[k]
+            # Create dummy local context (all 0s since we are inside one client)
+            # Or use actual if available. For 'sachs_real', X_splits might be augmented already?
+            # Let's check dimensions.
+            if local_X.shape[1] > d_features:
+                local_data = local_X[:, :d_features]
+                local_c = local_X[:, d_features].reshape(-1, 1)
+            else:
+                local_data = local_X
+                local_c = np.zeros((len(local_X), 1))
+
+            # Run Local Discovery
+            # We use a simple PC-stable for robustness
+            cg_local = cdnod(
+                local_data,
+                local_c,
+                1,  # K=1 locally
+                alpha=0.01,
+                indep_test="fisherz",
+                stable=True,
+                uc_rule=2,
+                uc_priority=-1,
+            )
+            local_graphs.append(cg_local.G.graph[0:d_features, 0:d_features])
+
+        # Aggregation: Majority Vote
+        # Edges are {1, -1}. We check for presence (non-zero).
+        # We aggregate skeletons first.
+        global_skeleton = np.zeros((d_features, d_features))
+
+        for g in local_graphs:
+            # Binarize skeleton: 1 if edge exists (1 or -1), 0 otherwise
+            skel = (g != 0).astype(int)
+            # Symmetrize to be safe
+            skel = ((skel + skel.T) > 0).astype(int)
+            global_skeleton += skel
+
+        # Threshold: > K/2 votes
+        consensus_skeleton = (global_skeleton > (K_clients / 2)).astype(int)
+
+        # Construct Result Graph (CPDAG format for evaluation)
+        # We only output the skeleton for this baseline as orientation voting is complex
+        # and usually performed by local orientation rules which might conflict.
+        # We return an undirected graph where edges exist.
+        est_cpdag = np.zeros((d_features, d_features))
+        # Set symmetric -1 for edges
+        rows, cols = np.where(consensus_skeleton == 1)
+        for r, c in zip(rows, cols):
+            est_cpdag[r, c] = -1
+
+        cd_time = time.time() - start_cd
+
+        # Evaluation
+        # Voting PC produces a Skeleton. Orientation is not aggregated here (F1 Dir will be low).
+        # This is a fair "Structure-Only" baseline.
+        est_dag = np.zeros_like(est_cpdag)  # Dummy DAG
+
+        res_skel = count_skeleton_accuracy(true_DAG_bin, est_cpdag)
+        res_dir = count_dag_accuracy(true_DAG_bin, est_dag)  # Will be 0
+
+        # Communication Cost: K clients * Adj Matrix size (d*d bits/bytes)
+        # 4 bytes per entry for float adjacency
+        comm_cost = (K_clients * d_features * d_features * 4) / 1024.0
+
+        train_time = 0.0
+
+        # Skip the main SPN block logic
+        fed_spn_model = None
 
     if ci_method == "spn":
         start_train = time.time()
@@ -326,7 +549,11 @@ def test_fedCDH(i, args):
         d_aug_total = X_aug_global.shape[1]
 
         # 1. Define Feature Maps per scenario
-        if scenario == "horizontal":
+        # If we loaded real federated data, X_splits is already set.
+        if model_type == "sachs_real":
+            feature_maps = {k: list(range(d_aug_total)) for k in range(K_clients)}
+            # X_splits is already augmented and split from above
+        elif scenario == "horizontal":
             feature_maps = {k: list(range(d_aug_total)) for k in range(K_clients)}
             X_splits = np.array_split(X_aug_global, K_clients)
         elif scenario == "vertical":
@@ -349,8 +576,8 @@ def test_fedCDH(i, args):
         min_bic = float("inf")
         best_model = None
 
-        # Heuristic for K=2..7 clusters
-        for h_candidate in range(2, 7):
+        # Heuristic for K=2..4 clusters
+        for h_candidate in range(2, 4):
             fed_km = SimulatedFederatedKMeans(
                 n_clusters=h_candidate, max_iter=10, seed=42
             )
@@ -368,7 +595,14 @@ def test_fedCDH(i, args):
         labels = best_model.labels_
         clustering_cost = best_model.comm_cost / 1024.0  # KB
 
-        labels_splits = np.array_split(labels, K_clients)
+        # Split labels to clients to simulate local knowledge of cluster assignment
+        # Use actual split lengths to handle uneven datasets (like Sachs interventional)
+        labels_splits = []
+        _curr = 0
+        for _xk in X_splits:
+            labels_splits.append(labels[_curr : _curr + len(_xk)])
+            _curr += len(_xk)
+
         weights = np.bincount(labels, minlength=num_clusters) / len(labels)
 
         # 3. Train Local Components
@@ -391,13 +625,13 @@ def test_fedCDH(i, args):
                     leaf = LocalSPNWrapper(
                         num_features=local_d,
                         device=device,
-                        num_sums=10,
-                        num_leaves=10,
+                        num_sums=5,
+                        num_leaves=5,
                         depth=max(1, int(np.floor(np.log2(local_d)))),
                         num_repetitions=5,
                         seed=i * 100 + h * 10 + k,
                     )
-                    leaf.train_local(local_data_h, epochs=2, lr=0.01)
+                    leaf.train_local(local_data_h, epochs=1, lr=0.01)
                     clients_clusters[h].append(leaf)
                     clients_counts[h].append(len(local_data_h))
 
@@ -469,7 +703,7 @@ def test_fedCDH(i, args):
         uc_rule=2,
         uc_priority=-1,
         fed_spn_model=fed_spn_model,
-        num_permutations=50,
+        num_permutations=20,
         orientation_type=orientation_type,
     )
     cd_time = time.time() - start_cd

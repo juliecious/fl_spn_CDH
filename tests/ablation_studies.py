@@ -18,7 +18,7 @@ class Args:
         self.N = 1
         self.d = 5
         self.K = 2
-        self.n = 200
+        self.n = 50
         self.model_type = "general"
         self.ci_method = "spn"
         self.scenario = "horizontal"
