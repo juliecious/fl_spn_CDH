@@ -106,6 +106,178 @@ class FedCDH_SPN_Wrapper(nn.Module):
         return samples.view(n, -1)
 
 
+class SimulatedFederatedKMeans:
+    """
+    Simulates Federated K-Means to estimate Communication Cost and respect Privacy.
+    Handles both Row-Partitioned (Horizontal/Hybrid) and Column-Partitioned (Vertical) data.
+    """
+
+    def __init__(self, n_clusters, max_iter=10, tol=1e-4, seed=42):
+        self.n_clusters = n_clusters
+        self.max_iter = max_iter
+        self.tol = tol
+        self.seed = seed
+        self.comm_cost = 0  # Bytes
+        self.labels_ = None
+        self.inertia_ = 0
+
+    def fit(self, X_splits, feature_maps, scenario):
+        np.random.seed(self.seed)
+        K_clients = len(X_splits)
+
+        # Determine global dimensionality and samples
+        # Note: In Vertical, X_splits[k] has shape (N, d_k). In Horizontal, (N_k, D).
+        if scenario == "vertical":
+            # Assume all clients have same N rows
+            N = X_splits[0].shape[0]
+            # Max index in feature_maps to find D
+            D = 0
+            for k in feature_maps:
+                D = max(D, max(feature_maps[k]) + 1)
+        else:
+            # Horizontal/Hybrid
+            N = sum(len(x) for x in X_splits)
+            D = X_splits[0].shape[1]
+
+        # Initialize Centroids (Server-side)
+        # Random uniform initialization
+        # For simulation, we cheat slightly to get bounds, but in real FL server would init blindly or ask for bounds (negligible cost)
+        if scenario == "vertical":
+            # Need bounds from all clients to init global centroids
+            # Cost: 2 * D floats (min/max) -> negligible
+            g_min, g_max = np.full(D, np.inf), np.full(D, -np.inf)
+            for k in range(K_clients):
+                cols = feature_maps[k]
+                l_min, l_max = X_splits[k].min(axis=0), X_splits[k].max(axis=0)
+                g_min[cols] = np.minimum(g_min[cols], l_min)
+                g_max[cols] = np.maximum(g_max[cols], l_max)
+        else:
+            x0 = X_splits[0]
+            g_min, g_max = x0.min(axis=0), x0.max(axis=0)  # Simplified
+
+        centroids = np.random.uniform(g_min, g_max, (self.n_clusters, D))
+
+        # Iteration Loop
+        for it in range(self.max_iter):
+            prev_centroids = centroids.copy()
+
+            if scenario == "vertical":
+                # --- Vertical FL K-Means ---
+                # 1. Server sends partial centroids to clients
+                # Cost: K_clients * (K_clusters * D_k) * 4
+                for k in range(K_clients):
+                    d_k = len(feature_maps[k])
+                    self.comm_cost += self.n_clusters * d_k * 4
+
+                # 2. Clients compute partial squared distances
+                # ||x - c||^2 = \sum_k ||x_k - c_k||^2
+                partial_dists = np.zeros((N, self.n_clusters))
+
+                for k in range(K_clients):
+                    cols = feature_maps[k]
+                    # (N, d_k) - (n_clust, d_k)
+                    # Expand to (N, n_clust, d_k)
+                    dist_k = np.sum(
+                        (X_splits[k][:, None, :] - centroids[None, :, cols]) ** 2,
+                        axis=2,
+                    )
+                    partial_dists += dist_k
+
+                # 3. Clients send partial distances to Server
+                # Cost: K_clients * (N * K_clusters) * 4  <-- Expensive!
+                self.comm_cost += K_clients * N * self.n_clusters * 4
+
+                # 4. Server assigns labels
+                self.labels_ = np.argmin(partial_dists, axis=1)
+                self.inertia_ = np.min(partial_dists, axis=1).sum()
+
+                # 5. Server sends labels back to clients
+                # Cost: K_clients * N * 4 (int)
+                self.comm_cost += K_clients * N * 4
+
+                # 6. Clients compute partial sums
+                # 7. Server aggregates
+                new_centroids = np.zeros_like(centroids)
+                global_counts = np.zeros(self.n_clusters)
+
+                # Counts are same for all clients (based on labels), can be computed by server or one client
+                # Let's say server computes counts.
+                for c in range(self.n_clusters):
+                    global_counts[c] = (self.labels_ == c).sum()
+
+                for k in range(K_clients):
+                    cols = feature_maps[k]
+                    # Compute sum for each cluster
+                    for c in range(self.n_clusters):
+                        mask = self.labels_ == c
+                        if global_counts[c] > 0:
+                            partial_sum = X_splits[k][mask].sum(axis=0)
+                            new_centroids[c, cols] = partial_sum / global_counts[c]
+
+                    # Cost: K_clusters * D_k * 4 (sending means/sums)
+                    self.comm_cost += self.n_clusters * len(cols) * 4
+
+            else:
+                # --- Horizontal/Hybrid FL K-Means ---
+                global_sums = np.zeros((self.n_clusters, D))
+                global_counts = np.zeros(self.n_clusters)
+                self.inertia_ = 0
+
+                all_labels = []
+
+                # 1. Server sends Centroids to Clients
+                # Cost: K_clients * (K_clusters * D) * 4
+                self.comm_cost += K_clients * self.n_clusters * D * 4
+
+                for k in range(K_clients):
+                    if len(X_splits[k]) == 0:
+                        all_labels.append(np.array([]))
+                        continue
+
+                    # 2. Client computes distances & labels locally
+                    dists = (
+                        np.linalg.norm(
+                            X_splits[k][:, None, :] - centroids[None, :, :], axis=2
+                        )
+                        ** 2
+                    )
+                    lbs = np.argmin(dists, axis=1)
+                    all_labels.append(lbs)
+
+                    self.inertia_ += np.min(dists, axis=1).sum()
+
+                    # 3. Client computes sums/counts
+                    for c in range(self.n_clusters):
+                        mask = lbs == c
+                        count = mask.sum()
+                        if count > 0:
+                            global_sums[c] += X_splits[k][mask].sum(axis=0)
+                            global_counts[c] += count
+
+                self.labels_ = (
+                    np.concatenate(all_labels) if all_labels else np.array([])
+                )
+
+                # 4. Clients send Sums/Counts to Server
+                # Cost: K_clients * (K_clusters * (D + 1)) * 4
+                self.comm_cost += K_clients * self.n_clusters * (D + 1) * 4
+
+                # 5. Server updates centroids
+                new_centroids = np.zeros_like(centroids)
+                for c in range(self.n_clusters):
+                    if global_counts[c] > 0:
+                        new_centroids[c] = global_sums[c] / global_counts[c]
+                    else:
+                        new_centroids[c] = centroids[c]
+
+            # Convergence Check
+            if np.linalg.norm(new_centroids - prev_centroids) < self.tol:
+                break
+            centroids = new_centroids
+
+        return self
+
+
 def test_fedCDH(i, args):
     n_samples_per_client = args.n
     K_clients = args.K
@@ -141,6 +313,7 @@ def test_fedCDH(i, args):
     train_time = 0
     fed_spn_model = None
     routing_mode = True
+    clustering_cost = 0
 
     if ci_method == "spn":
         start_train = time.time()
@@ -170,25 +343,31 @@ def test_fedCDH(i, args):
             feature_maps = {k: list(range(d_aug_total)) for k in range(K_clients)}
             X_splits = np.array_split(X_aug_global, K_clients)
 
-        # 2. Global Clustering (Proxy for Federated KMeans)
-        from sklearn.cluster import KMeans
-
+        # 2. Federated Clustering (Simulated)
+        # Find best K using BIC
         best_h = 2
         min_bic = float("inf")
+        best_model = None
+
+        # Heuristic for K=2..7 clusters
         for h_candidate in range(2, 7):
-            km = KMeans(n_clusters=h_candidate, n_init=3, random_state=42).fit(
-                X_aug_global
+            fed_km = SimulatedFederatedKMeans(
+                n_clusters=h_candidate, max_iter=10, seed=42
             )
-            bic = km.inertia_ + h_candidate * np.log(total_samples) * d_aug_total
+            fed_km.fit(X_splits, feature_maps, scenario)
+
+            # BIC = Inertia + k * log(N) * D
+            bic = fed_km.inertia_ + h_candidate * np.log(total_samples) * d_aug_total
+
             if bic < min_bic:
                 min_bic = bic
                 best_h = h_candidate
+                best_model = fed_km
 
         num_clusters = best_h
-        kmeans = KMeans(n_clusters=num_clusters, n_init=5, random_state=42).fit(
-            X_aug_global
-        )
-        labels = kmeans.labels_
+        labels = best_model.labels_
+        clustering_cost = best_model.comm_cost / 1024.0  # KB
+
         labels_splits = np.array_split(labels, K_clients)
         weights = np.bincount(labels, minlength=num_clusters) / len(labels)
 
@@ -307,6 +486,9 @@ def test_fedCDH(i, args):
         if fed_spn_model
         else 0.0
     )
+    # Add clustering cost
+    comm_cost += clustering_cost
+
     result = {
         **res_skel,
         **res_dir,

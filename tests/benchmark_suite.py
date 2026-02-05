@@ -13,7 +13,11 @@ if project_root not in sys.path:
 
 import pandas as pd
 import matplotlib.pyplot as plt
+import seaborn as sns
 import numpy as np
+
+# Set Seaborn theme
+sns.set_theme(style="whitegrid")
 
 # Import the test function from the local tests directory
 from tests.TestFedCDH import test_fedCDH
@@ -81,28 +85,35 @@ def run_benchmarks():
 
     results = []
 
-    print(f"{'Method':<20} | Processing...")
+    num_seeds = 5
+    print(f"{'Method':<20} | Processing {num_seeds} seeds...")
 
     for config in configs:
-        args = Args(**config["args"])
-        print(f"Running {config['name']}...")
+        method_name = config["name"]
+        print(f"Running {method_name}...")
 
-        try:
-            # Run instance 0
-            res = test_fedCDH(0, args)
+        seed_results = []
+        for seed in range(num_seeds):
+            args = Args(**config["args"])
+            try:
+                # Run instance 'seed'
+                # print(f"  Seed {seed}...", end="\r")
+                res = test_fedCDH(seed, args)
+                seed_results.append(res)
+            except Exception as e:
+                print(f"  Failed Seed {seed}: {e}")
 
-            row = {"Method": config["name"]}
-            for m in metrics_order:
-                val = res.get(m, 0.0)
-                # Handle None or non-float types safely
-                try:
-                    row[m] = float(val) if val is not None else 0.0
-                except (ValueError, TypeError):
-                    row[m] = 0.0
+        if not seed_results:
+            continue
 
-            results.append(row)
-        except Exception as e:
-            print(f"Failed {config['name']}: {e}")
+        # Aggregate results
+        agg_row = {"Method": method_name}
+        for m in metrics_order:
+            values = [float(r.get(m, 0.0)) for r in seed_results]
+            agg_row[m] = np.mean(values)
+            agg_row[f"{m}_std"] = np.std(values)
+
+        results.append(agg_row)
 
     if not results:
         print("No results collected.")
@@ -112,36 +123,42 @@ def run_benchmarks():
     df = pd.DataFrame(results)
 
     # Print Table
-    print("\n\n" + "=" * 120)
-    print("FINAL BENCHMARK RESULTS")
-    print("=" * 120)
+    print("\n\n" + "=" * 140)
+    print("FINAL BENCHMARK RESULTS (Mean ± Std over 5 seeds)")
+    print("=" * 140)
 
     header = (
-        f"| {'Method':<20} | " + " | ".join([f"{m:<18}" for m in metrics_order]) + " |"
+        f"| {'Method':<20} | " + " | ".join([f"{m:<22}" for m in metrics_order]) + " |"
     )
     print(header)
-    print("|" + "-" * 22 + "|" + "|".join(["-" * 20 for _ in metrics_order]) + "|")
+    print("|" + "-" * 22 + "|" + "|".join(["-" * 24 for _ in metrics_order]) + "|")
 
     for _, row in df.iterrows():
-        # Safely format each value, ensuring it's a float
         values = []
         for m in metrics_order:
-            val = row[m]
-            val_str = f"{float(val):<18.4f}" if val is not None else f"{0.0:<18.4f}"
-            values.append(val_str)
+            mean = row[m]
+            std = row[f"{m}_std"]
+            val_str = f"{mean:.2f} ± {std:.2f}"
+            values.append(f"{val_str:<22}")
         print(f"| {row['Method']:<20} | " + " | ".join(values) + " |")
 
-    print("=" * 120)
+    print("=" * 140)
 
     # Generate Plot
-    plot_results(df)
+    params = {
+        "n": Args().n,
+        "d": Args().d,
+        "K": Args().K,
+        "model_type": Args().model_type,
+        "seeds": num_seeds,
+    }
+    plot_results(df, params)
 
 
-def plot_results(df):
+def plot_results(df, params):
     metrics_f1 = ["f1_skeleton", "f1"]
     labels_f1 = ["Skel F1", "DAG F1"]
 
-    # Updated: Precision & Recall instead of SHD
     metrics_pr = ["precision_skeleton", "recall_skeleton", "precision", "recall"]
     labels_pr = ["Skel Prec", "Skel Rec", "DAG Prec", "DAG Rec"]
 
@@ -149,93 +166,163 @@ def plot_results(df):
     labels_cost = ["Comm Cost (KB)"]
 
     methods = df["Method"].tolist()
-    colors = ["#1f77b4", "#ff7f0e", "#2ca02c", "#d62728"]
+    # Professional color palette
+    palette = sns.color_palette("muted", len(methods))
     width = 0.2
 
     fig, (ax1, ax2, ax3) = plt.subplots(
         1,
         3,
-        figsize=(18, 6),
-        gridspec_kw={"width_ratios": [2, 3, 1]},  # Adjusted ratio for 4 bars
+        figsize=(20, 8),
+        gridspec_kw={"width_ratios": [2, 3, 1]},
+    )
+
+    # Add Suptitle with Parameters
+    param_str = f"n={params['n']}, d={params['d']}, K={params['K']}, Model={params['model_type']}, Seeds={params['seeds']}"
+    fig.suptitle(
+        f"Federated Causal Discovery Performance Analysis\n{param_str}",
+        fontsize=20,
+        fontweight="bold",
+        y=0.98,
     )
 
     # --- Plot 1: F1 Scores ---
     x_f1 = np.arange(len(metrics_f1))
     for i, method in enumerate(methods):
-        vals = [df[df["Method"] == method][m].values[0] for m in metrics_f1]
+        row = df[df["Method"] == method]
+        vals = [row[m].values[0] for m in metrics_f1]
+        errs = [row[f"{m}_std"].values[0] for m in metrics_f1]
+
         offset = (i - (len(methods) - 1) / 2) * width
-        rects = ax1.bar(x_f1 + offset, vals, width, label=method, color=colors[i])
-        for rect in rects:
+        rects = ax1.bar(
+            x_f1 + offset,
+            vals,
+            width,
+            yerr=errs,
+            capsize=5,
+            label=method,
+            color=palette[i],
+            edgecolor="black",
+            alpha=0.8,
+            error_kw={"linestyle": "--"},
+        )
+
+        for rect, v in zip(rects, vals):
             h = rect.get_height()
             ax1.annotate(
-                f"{h:.2f}",
-                xy=(rect.get_x() + rect.get_width() / 2, h),
-                xytext=(0, 3),
+                f"{v:.2f}",
+                xy=(rect.get_x() + rect.get_width() / 2, h + (0.02 if h > 0 else 0)),
+                xytext=(0, 5),
                 textcoords="offset points",
                 ha="center",
                 va="bottom",
-                fontsize=8,
+                fontsize=10,
+                fontweight="bold",
             )
-    ax1.set_ylabel("Score")
-    ax1.set_title("Discovery Accuracy (F1)")
+
+    ax1.set_ylabel("F1 Score", fontsize=14, fontweight="bold")
+    ax1.set_title("Discovery Accuracy", fontsize=16, fontweight="bold")
     ax1.set_xticks(x_f1)
-    ax1.set_xticklabels(labels_f1)
-    ax1.grid(axis="y", linestyle="--", alpha=0.7)
-    ax1.legend(loc="lower center", bbox_to_anchor=(0.5, -0.2), ncol=2, fontsize="small")
+    ax1.set_xticklabels(labels_f1, fontsize=12)
+    ax1.set_ylim(0, 1.1)
 
     # --- Plot 2: Precision & Recall ---
     x_pr = np.arange(len(metrics_pr))
     for i, method in enumerate(methods):
-        vals = [df[df["Method"] == method][m].values[0] for m in metrics_pr]
+        row = df[df["Method"] == method]
+        vals = [row[m].values[0] for m in metrics_pr]
+        errs = [row[f"{m}_std"].values[0] for m in metrics_pr]
+
         offset = (i - (len(methods) - 1) / 2) * width
-        rects = ax2.bar(x_pr + offset, vals, width, label=method, color=colors[i])
-        for rect in rects:
+        rects = ax2.bar(
+            x_pr + offset,
+            vals,
+            width,
+            yerr=errs,
+            capsize=5,
+            label=method,
+            color=palette[i],
+            edgecolor="black",
+            alpha=0.8,
+            error_kw={"linestyle": "--"},
+        )
+
+        for rect, v in zip(rects, vals):
             h = rect.get_height()
             ax2.annotate(
-                f"{h:.2f}",
-                xy=(rect.get_x() + rect.get_width() / 2, h),
-                xytext=(0, 3),
+                f"{v:.2f}",
+                xy=(rect.get_x() + rect.get_width() / 2, h + 0.02),
+                xytext=(0, 5),
                 textcoords="offset points",
                 ha="center",
                 va="bottom",
-                fontsize=8,
+                fontsize=10,
+                fontweight="bold",
             )
-    ax2.set_ylabel("Score (0-1)")
-    ax2.set_title("Precision & Recall")
+
+    ax2.set_ylabel("Score", fontsize=14, fontweight="bold")
+    ax2.set_title("Precision & Recall", fontsize=16, fontweight="bold")
     ax2.set_xticks(x_pr)
-    ax2.set_xticklabels(labels_pr)
-    ax2.grid(axis="y", linestyle="--", alpha=0.7)
+    ax2.set_xticklabels(labels_pr, fontsize=12)
+    ax2.set_ylim(0, 1.1)
 
     # --- Plot 3: Communication Cost ---
     x_cost = np.arange(len(metrics_cost))
     for i, method in enumerate(methods):
-        vals = [df[df["Method"] == method][m].values[0] for m in metrics_cost]
+        row = df[df["Method"] == method]
+        vals = [row[m].values[0] for m in metrics_cost]
+        errs = [row[f"{m}_std"].values[0] for m in metrics_cost]
+
         offset = (i - (len(methods) - 1) / 2) * width
-        rects = ax3.bar(x_cost + offset, vals, width, label=method, color=colors[i])
-        for rect in rects:
+        rects = ax3.bar(
+            x_cost + offset,
+            vals,
+            width,
+            yerr=errs,
+            capsize=5,
+            label=method,
+            color=palette[i],
+            edgecolor="black",
+            alpha=0.8,
+            error_kw={"linestyle": "--"},
+        )
+
+        for rect, v in zip(rects, vals):
             h = rect.get_height()
             ax3.annotate(
-                f"{h:.1f}",
+                f"{v:.1f}",
                 xy=(rect.get_x() + rect.get_width() / 2, h),
-                xytext=(0, 3),
+                xytext=(0, 5),
                 textcoords="offset points",
                 ha="center",
                 va="bottom",
-                fontsize=8,
+                fontsize=10,
+                fontweight="bold",
             )
-    ax3.set_ylabel("KB")
-    ax3.set_title("Efficiency (Comm Cost)")
+
+    ax3.set_ylabel("Communication Cost (KB)", fontsize=14, fontweight="bold")
+    ax3.set_title("Efficiency", fontsize=16, fontweight="bold")
     ax3.set_xticks(x_cost)
-    ax3.set_xticklabels(labels_cost)
-    ax3.grid(axis="y", linestyle="--", alpha=0.7)
+    ax3.set_xticklabels(labels_cost, fontsize=12)
+
+    # --- Figure-Level Legend at Bottom ---
+    handles, labels = ax1.get_legend_handles_labels()
+    fig.legend(
+        handles,
+        labels,
+        loc="lower center",
+        ncol=len(methods),
+        fontsize=12,
+        bbox_to_anchor=(0.5, 0.02),
+    )
 
     output_dir = "tests/results"
     os.makedirs(output_dir, exist_ok=True)
     output_path = os.path.join(output_dir, "benchmark_plot.png")
-    plt.tight_layout()
-    plt.subplots_adjust(bottom=0.2)  # Make room for legend
-    plt.savefig(output_path)
-    print(f"\nPlot saved to {output_path}")
+
+    plt.tight_layout(rect=[0, 0.08, 1, 0.92])
+    plt.savefig(output_path, dpi=300)
+    print(f"\nBeautified plot saved to {output_path}")
 
 
 if __name__ == "__main__":
