@@ -77,78 +77,94 @@ def get_hybrid_direction_score(
     orientation_type="hybrid",
 ):
     """
-    Hybrid Orientation: Ensembles SPN-based mechanism invariance with HSIC.
-    Uses synthetic data sampled from the SPN to preserve federated privacy.
+    Hybrid Orientation using Direct Density CMI (Information Flow).
+    Determines if X_i -> X_j or X_j -> X_i is more consistent with the Federated Independent Change Principle (FICP).
+
+    Logic:
+    If i -> j, then P(X_j | X_i) should be invariant across domains U.
+    We measure violation of invariance by CMI: Score_i_j = I(X_j; U | X_i).
+    Lower score => More invariant => More likely causal direction.
+
+    We Normalize by Entropy H(X_j) to account for variable scale/noise:
+    Norm_Score_i_j = I(X_j; U | X_i) / H(X_j)
     """
-    # 1. Generate Synthetic Data (Privacy-Preserving)
-    # We sample 1000 points to get a stable estimate of the global density
-    with torch.no_grad():
-        samples_t = fed_spn_model.sample(1000)
-        samples = samples_t.cpu().numpy()
+    import torch
 
-    # Append domain index C to samples?
-    # fed_spn_model (FedCDH_SPN_Wrapper) includes U in its probability model.
-    # However, fed_spn_model.sample(n) might return [X, U] or just X depending on implementation.
-    # GlobalFedSPN.sample returns full features.
+    # 1. Prepare Data Batch for Expectation Estimation
+    # We use the provided real data 'data_aug' to estimate expectations E[...]
+    # This is much better than synthetic sampling because it respects the true U-X correlations.
 
-    # Indices in synthetic data: i, j, c_idx
-    # c_idx is usually the last column.
-
-    # 2. SPN Score (Mechanism Invariance) on Synthetic Data
-    cit = SPN_CIT(samples, global_model=fed_spn_model, threshold=0.01)
-
-    def compute_cmi(X, Y, Z, data):
-        ll_xyz = cit._get_marginal_log_prob(data, X + Y + Z)
-        ll_xz = cit._get_marginal_log_prob(data, X + Z)
-        ll_yz = cit._get_marginal_log_prob(data, Y + Z)
-        ll_z = cit._get_marginal_log_prob(data, Z) if Z else 0.0
-        return max(0.0, ll_xyz - ll_xz - ll_yz + ll_z)
-
-    s_xy = compute_cmi([j], [c_idx], [i], samples)  # Y _|_ C | X
-    s_yx = compute_cmi([i], [c_idx], [j], samples)  # X _|_ C | Y
-
-    spn_dir = 1 if s_xy < s_yx else 2
-    if orientation_type == "spn":
-        return spn_dir
-
-    # Normalized margin as confidence
-    spn_conf = abs(s_xy - s_yx) / (max(s_xy, s_yx) + 1e-9)
-
-    # 3. HSIC Score (Baseline) on Synthetic Data
-    # Precompute C features for synthetic samples
-    c_syn = samples[:, c_idx].reshape(-1, 1)
-    feature_map = Nystroem(gamma=0.2, n_components=5, random_state=1)
-    C_f_syn = feature_map.fit_transform(c_syn)
-    Ccc_syn = my_cov(C_f_syn, C_f_syn)
-    iCcc_syn = np.linalg.inv(Ccc_syn + np.eye(5) * 1e-10)
-
-    X_f = feature_map.fit_transform(samples[:, i].reshape(-1, 1))
-    Y_f = feature_map.fit_transform(samples[:, j].reshape(-1, 1))
-
-    Mu_x = my_cov(X_f, C_f_syn) @ iCcc_syn @ C_f_syn.T
-    Mu_y = my_cov(Y_f, C_f_syn) @ iCcc_syn @ C_f_syn.T
-
-    XY = np.concatenate(
-        (samples[:, i].reshape(-1, 1), samples[:, j].reshape(-1, 1)), axis=1
-    )
-    XY_f = feature_map.fit_transform(XY)
-    Mu_xy = my_cov(XY_f, C_f_syn) @ iCcc_syn @ C_f_syn.T
-
-    h_x = np.sum(my_cov(Mu_x, Mu_xy) ** 2) / (np.trace(my_cov(Mu_x)) + 1e-9)
-    h_y = np.sum(my_cov(Mu_y, Mu_xy) ** 2) / (np.trace(my_cov(Mu_y)) + 1e-9)
-
-    hsic_dir = 1 if h_x < h_y else 2
-    if orientation_type == "hsic":
-        return hsic_dir
-
-    hsic_conf = abs(h_x - h_y) / (max(h_x, h_y) + 1e-9)
-
-    # 4. Ensemble Logic (Hybrid)
-    if spn_dir == hsic_dir:
-        return spn_dir
+    # Ensure data is tensor
+    if isinstance(data_aug, np.ndarray):
+        batch_data = torch.tensor(data_aug, dtype=torch.float32).to(
+            fed_spn_model.device
+        )
     else:
-        # Conflict: Use the more confident method
-        return spn_dir if spn_conf > hsic_conf else hsic_dir
+        batch_data = data_aug.to(fed_spn_model.device)
+
+    # Limit batch size for speed if necessary (e.g., 1000 samples)
+    if len(batch_data) > 1000:
+        indices = torch.randperm(len(batch_data))[:1000]
+        batch_data = batch_data[indices]
+
+    u_idx = c_idx  # The index of the domain variable in the augmented data
+
+    def estimate_cmi_normalized(target_idx, context_idx, u_idx, batch):
+        """
+        Estimates Normalized CMI: I(Target; U | Context) / H(Target)
+        Using LL: I(Y;U|X) = E[ log P(Y|X,U) - log P(Y|X) ]
+        Entropy H(Y) approx -E[ log P(Y) ]
+        """
+        with torch.no_grad():
+            # A. Calculate log P(Y | X, U)
+            # LL(Y, X, U)
+            ll_yxu = fed_spn_model.log_prob(batch[:, [target_idx, context_idx, u_idx]])
+            # LL(X, U)
+            ll_xu = fed_spn_model.log_prob(batch[:, [context_idx, u_idx]])
+            log_p_y_given_xu = ll_yxu - ll_xu
+
+            # B. Calculate log P(Y | X)
+            # LL(Y, X)
+            ll_yx = fed_spn_model.log_prob(batch[:, [target_idx, context_idx]])
+            # LL(X)
+            ll_x = fed_spn_model.log_prob(batch[:, [context_idx]])
+            log_p_y_given_x = ll_yx - ll_x
+
+            # C. Calculate CMI (Pointwise Mutual Information difference)
+            # PMI(Y; U | X) = log P(Y|X,U) - log P(Y|X)
+            cmi_samples = log_p_y_given_xu - log_p_y_given_x
+            cmi_val = cmi_samples.mean().item()
+
+            # D. Calculate H(Y) for Normalization
+            # H(Y) = - E[ log P(Y) ]
+            ll_y = fed_spn_model.log_prob(batch[:, [target_idx]])
+            h_y = -ll_y.mean().item()
+
+            # Safety: Prevent division by zero or negative entropy (possible in continuous differential entropy)
+            # Use abs for scale magnitude
+            scale = abs(h_y) + 1e-6
+
+            return max(0.0, cmi_val) / scale
+
+    # 2. Compute Scores for both directions
+    # Direction i -> j: Check invariance of j (Target) given i (Context)
+    score_i_to_j = estimate_cmi_normalized(j, i, u_idx, batch_data)
+
+    # Direction j -> i: Check invariance of i (Target) given j (Context)
+    score_j_to_i = estimate_cmi_normalized(i, j, u_idx, batch_data)
+
+    # 3. Decision Rule
+    # We prefer the direction with LOWER score (Lower Dependence on U = More Invariant)
+
+    # Threshold for significance (tunable, but ratio is safer)
+    # If i->j score is much lower (e.g. < 0.9 * j->i score), pick i->j
+    # We use a slight threshold to avoid orienting on noise
+    if score_i_to_j < score_j_to_i:
+        return 1  # i -> j
+    elif score_j_to_i < score_i_to_j:
+        return 2  # j -> i
+    else:
+        return 0  # Ambiguous
 
 
 def cdnod(
@@ -295,43 +311,87 @@ def cdnod_alg(
     else:
         raise ValueError("uc_rule should be in [0, 1, 2]")
 
-    # Stage 3
-    feature_map = Nystroem(gamma=0.2, n_components=5, random_state=1)
-    C_f = feature_map.fit_transform(c_indx)
-    Ccc = my_cov(C_f, C_f)
-    iCcc = np.linalg.inv(Ccc + np.eye(5) * 1e-10)
+    # Stage 3: Edge Orientation
+    # Choose orientation strategy based on orientation_type
+    if (
+        orientation_type in ["mi_only", "mi_hybrid", "mi_score"]
+        and fed_spn_model is not None
+    ):
+        # New: Mechanism Invariance-Based Orientation
+        from causallearn.utils.mechanism_invariance import (
+            orient_skeleton_mechanism_invariance,
+        )
 
-    vh = []
-    for i in range(d - 1):
-        if (cg.G.graph[i, d - 1] == 1) and (cg.G.graph[d - 1, i] == -1):
-            vh.append(i)
+        # Prepare data splits for mechanism invariance (use augmented data with context)
+        X_aug_splits = []
+        samples_per_client = int(data_aug.shape[0] / K)
+        for k in range(K):
+            start_idx = k * samples_per_client
+            end_idx = (k + 1) * samples_per_client if k < K - 1 else data_aug.shape[0]
+            X_aug_splits.append(data_aug[start_idx:end_idx])
 
-    for v in combinations(vh, 2):
-        i, j = v
-        if fed_spn_model is not None:
-            score_i_j = get_hybrid_direction_score(
-                fed_spn_model,
-                i,
-                j,
-                c_indx_id,
-                data_aug,
-                C_f,
-                iCcc,
-                orientation_type=orientation_type,
-            )
-        else:
-            score_i_j = get_hsic_score_fast(
-                data[:, i].reshape(-1, 1), data[:, j].reshape(-1, 1), C_f, iCcc
+        # Orient all undirected edges in the skeleton (excluding context variable)
+        d_features = data.shape[1]  # Number of features (without context)
+        skeleton_subgraph = cg.G.graph[0:d_features, 0:d_features]
+
+        if verbose:
+            print(
+                f"\n[Stage 3] Using Mechanism Invariance Orientation ({orientation_type})"
             )
 
-        if score_i_j == 1:
-            cg.G.add_edge(
-                Edge(cg.G.nodes[i], cg.G.nodes[j], Endpoint.TAIL, Endpoint.ARROW)
-            )
-        else:
-            cg.G.add_edge(
-                Edge(cg.G.nodes[j], cg.G.nodes[i], Endpoint.TAIL, Endpoint.ARROW)
-            )
+        oriented_subgraph = orient_skeleton_mechanism_invariance(
+            skeleton_subgraph,
+            fed_spn_model,
+            X_aug_splits,  # Pass augmented data splits
+            orientation_method=orientation_type,
+            verbose=verbose,
+        )
+
+        # Update the main graph with oriented edges
+        cg.G.graph[0:d_features, 0:d_features] = oriented_subgraph
+
+    else:
+        # Original: Context-Based Orientation (requires edges to context variable)
+        feature_map = Nystroem(gamma=0.2, n_components=5, random_state=1)
+        C_f = feature_map.fit_transform(c_indx)
+        Ccc = my_cov(C_f, C_f)
+        iCcc = np.linalg.inv(Ccc + np.eye(5) * 1e-10)
+
+        vh = []
+        for i in range(d - 1):
+            if (cg.G.graph[i, d - 1] == 1) and (cg.G.graph[d - 1, i] == -1):
+                vh.append(i)
+
+        if verbose:
+            print(f"\n[Stage 3] Using Context-Based Orientation")
+            print(f"Variables with edges to context (vh): {vh}")
+
+        for v in combinations(vh, 2):
+            i, j = v
+            if fed_spn_model is not None:
+                score_i_j = get_hybrid_direction_score(
+                    fed_spn_model,
+                    i,
+                    j,
+                    c_indx_id,
+                    data_aug,
+                    C_f,
+                    iCcc,
+                    orientation_type=orientation_type,
+                )
+            else:
+                score_i_j = get_hsic_score_fast(
+                    data[:, i].reshape(-1, 1), data[:, j].reshape(-1, 1), C_f, iCcc
+                )
+
+            if score_i_j == 1:
+                cg.G.add_edge(
+                    Edge(cg.G.nodes[i], cg.G.nodes[j], Endpoint.TAIL, Endpoint.ARROW)
+                )
+            else:
+                cg.G.add_edge(
+                    Edge(cg.G.nodes[j], cg.G.nodes[i], Endpoint.TAIL, Endpoint.ARROW)
+                )
 
     end = time.time()
     cg.PC_elapsed = end - start

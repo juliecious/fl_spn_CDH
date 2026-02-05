@@ -144,101 +144,71 @@ def test_fedCDH(i, args):
 
     if ci_method == "spn":
         start_train = time.time()
-        from causallearn.utils.FedPC import FederatedStructureLearner
+        from causallearn.utils.FedPC import FederatedStructureLearner, FederatedProduct
 
-        struct_learner = FederatedStructureLearner(num_features=d_features)
+        # Unified Federated Data Partitioning (Seng 2025)
+        # We treat all scenarios as learning a joint distribution P(X, U) via clustering.
+        routing_mode = False
+        X_aug_global = np.concatenate([X_global, c_indx], axis=1)
+        d_aug_total = X_aug_global.shape[1]
 
+        # 1. Define Feature Maps per scenario
         if scenario == "horizontal":
-            routing_mode = True
-            X_splits = np.array_split(X_global, K_clients)
-            feature_maps = {k: list(range(d_features)) for k in range(K_clients)}
-            if use_structure:
-                for x in X_splits:
-                    struct_learner.add_local_metadata(x)
-
-            causal_order = (
-                struct_learner.get_causal_order()
-                if use_structure
-                else np.arange(d_features)
-            )
-            local_models = []
+            feature_maps = {k: list(range(d_aug_total)) for k in range(K_clients)}
+            X_splits = np.array_split(X_aug_global, K_clients)
+        elif scenario == "vertical":
+            cols_per_client = np.array_split(range(d_features), K_clients)
+            feature_maps = {}
+            X_splits = []
             for k in range(K_clients):
-                leaf = LocalSPNWrapper(
-                    num_features=d_features,
-                    device=device,
-                    num_sums=20,
-                    num_leaves=20,
-                    depth=2,
-                    num_repetitions=5,
-                    seed=i * 100 + k,
-                    variable_order=causal_order,
-                )
-                leaf.train_local(X_splits[k], epochs=30, lr=0.01)
-                local_models.append(leaf)
-            global_spn = GlobalFedSPN(
-                local_models,
-                device=device,
-                feature_map=feature_maps,
-                strategy="mixture",
-            )
+                f_indices = cols_per_client[k].tolist()
+                if k == 0:
+                    f_indices.append(d_features)  # Client 0 gets U
+                feature_maps[k] = f_indices
+                X_splits.append(X_aug_global[:, f_indices])
+        else:  # hybrid
+            feature_maps = {k: list(range(d_aug_total)) for k in range(K_clients)}
+            X_splits = np.array_split(X_aug_global, K_clients)
 
-        elif scenario in ["vertical", "hybrid"]:
-            routing_mode = False
-            X_aug_global = np.concatenate([X_global, c_indx], axis=1)
-            d_aug_total = X_aug_global.shape[1]
+        # 2. Global Clustering (Proxy for Federated KMeans)
+        from sklearn.cluster import KMeans
 
-            if scenario == "vertical":
-                cols_per_client = np.array_split(range(d_features), K_clients)
-                X_splits = []
-                feature_maps = {}
-                for k in range(K_clients):
-                    f_indices = cols_per_client[k].tolist()
-                    if k == 0:
-                        f_indices.append(d_features)
-                    feature_maps[k] = f_indices
-                    X_splits.append(X_aug_global[:, f_indices])
-            else:  # hybrid
-                X_splits = np.array_split(X_aug_global, K_clients)
-                feature_maps = {k: list(range(d_aug_total)) for k in range(K_clients)}
-
-            from sklearn.cluster import KMeans
-
-            best_h = 2
-            min_bic = float("inf")
-            for h_candidate in range(2, 7):
-                km = KMeans(n_clusters=h_candidate, n_init=3, random_state=42).fit(
-                    X_aug_global
-                )
-                bic = km.inertia_ + h_candidate * np.log(total_samples) * d_aug_total
-                if bic < min_bic:
-                    min_bic = bic
-                    best_h = h_candidate
-
-            num_clusters = best_h
-            kmeans = KMeans(n_clusters=num_clusters, n_init=5, random_state=42).fit(
+        best_h = 2
+        min_bic = float("inf")
+        for h_candidate in range(2, 7):
+            km = KMeans(n_clusters=h_candidate, n_init=3, random_state=42).fit(
                 X_aug_global
             )
-            labels = kmeans.labels_
+            bic = km.inertia_ + h_candidate * np.log(total_samples) * d_aug_total
+            if bic < min_bic:
+                min_bic = bic
+                best_h = h_candidate
 
-            if scenario == "hybrid":
-                labels_splits = np.array_split(labels, K_clients)
+        num_clusters = best_h
+        kmeans = KMeans(n_clusters=num_clusters, n_init=5, random_state=42).fit(
+            X_aug_global
+        )
+        labels = kmeans.labels_
+        labels_splits = np.array_split(labels, K_clients)
+        weights = np.bincount(labels, minlength=num_clusters) / len(labels)
 
-            weights = np.bincount(labels, minlength=num_clusters) / len(labels)
+        # 3. Train Local Components
+        clients_clusters = [[] for _ in range(num_clusters)]
+        clients_counts = [[] for _ in range(num_clusters)]
 
-            clients_clusters = [[] for _ in range(num_clusters)]
-            for h in range(num_clusters):
-                cluster_mask_global = labels == h
-                if cluster_mask_global.sum() < 5:
-                    continue
-                for k in range(K_clients):
-                    if scenario == "hybrid":
-                        cluster_mask = labels_splits[k] == h
-                    else:
-                        cluster_mask = cluster_mask_global
+        for h in range(num_clusters):
+            cluster_mask_global = labels == h
+            if cluster_mask_global.sum() < 5:
+                continue
 
-                    local_data_h = X_splits[k][cluster_mask]
+            for k in range(K_clients):
+                if scenario == "vertical":
+                    local_data_h = X_splits[k][cluster_mask_global]
+                else:
+                    local_data_h = X_splits[k][labels_splits[k] == h]
+
+                if len(local_data_h) > 2:
                     local_d = local_data_h.shape[1]
-
                     leaf = LocalSPNWrapper(
                         num_features=local_d,
                         device=device,
@@ -248,30 +218,60 @@ def test_fedCDH(i, args):
                         num_repetitions=5,
                         seed=i * 100 + h * 10 + k,
                     )
-                    leaf.train_local(local_data_h, epochs=20, lr=0.01)
+                    leaf.train_local(local_data_h, epochs=2, lr=0.01)
                     clients_clusters[h].append(leaf)
+                    clients_counts[h].append(len(local_data_h))
 
-            from causallearn.utils.FedPC import FederatedProduct
+        # 4. Aggregation (The Remedy)
+        global_components = []
+        final_weights = []
 
-            products = []
-            final_weights = []
-            for h in range(num_clusters):
-                if len(clients_clusters[h]) == K_clients:
-                    prod = FederatedProduct(
-                        clients_clusters[h], feature_map=feature_maps, device=device
-                    )
-                    products.append(prod)
-                    final_weights.append(weights[h])
+        for h in range(num_clusters):
+            if not clients_clusters[h]:
+                continue
 
-            if len(final_weights) > 0:
-                final_weights = np.array(final_weights)
-                final_weights = final_weights / final_weights.sum()
+            # Check for feature overlap
+            is_disjoint = True
+            if len(feature_maps) > 1:
+                s0 = set(feature_maps[0])
+                s1 = set(feature_maps[1])
+                if not s0.isdisjoint(s1):
+                    is_disjoint = False
 
-            global_spn = GlobalFedSPN(products, weights=final_weights, device=device)
-            if use_em:
-                global_spn.train_weights_em(
-                    torch.tensor(X_aug_global, dtype=torch.float32).to(device)
+            if is_disjoint and len(clients_clusters[h]) == K_clients:
+                # Vertical -> Product (Independent across clients)
+                comp = FederatedProduct(
+                    clients_clusters[h], feature_map=feature_maps, device=device
                 )
+                global_components.append(comp)
+                final_weights.append(weights[h])
+            elif not is_disjoint:
+                # Horizontal/Hybrid -> Mixture (Ensemble over clients)
+                inner_ws = np.array(clients_counts[h])
+                inner_ws = inner_ws / inner_ws.sum()
+                comp = GlobalFedSPN(
+                    clients_clusters[h],
+                    weights=inner_ws,
+                    strategy="mixture",
+                    device=device,
+                )
+                global_components.append(comp)
+                final_weights.append(weights[h])
+
+        if not final_weights:
+            # Fallback if no components were successfully built
+            global_spn = GlobalFedSPN([], device=device)
+        else:
+            final_weights = np.array(final_weights)
+            final_weights /= final_weights.sum()
+            global_spn = GlobalFedSPN(
+                global_components, weights=final_weights, device=device
+            )
+
+        if use_em and len(global_components) > 0:
+            global_spn.train_weights_em(
+                torch.tensor(X_aug_global, dtype=torch.float32).to(device)
+            )
 
         fed_spn_model = FedCDH_SPN_Wrapper(
             global_spn, u_index=d_features, routing=routing_mode

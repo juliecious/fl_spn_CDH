@@ -23,9 +23,9 @@ class Args:
     # ... (Args implementation remains same)
     def __init__(self, **kwargs):
         self.N = 1
-        self.d = 5
+        self.d = 4
         self.K = 2
-        self.n = 200
+        self.n = 50
         self.model_type = "general"
         self.ci_method = "spn"
         self.scenario = "horizontal"
@@ -41,13 +41,28 @@ def run_benchmarks():
         },
         {
             "name": "FedSPN (Horizontal)",
-            "args": {"ci_method": "spn", "scenario": "horizontal"},
+            "args": {
+                "ci_method": "spn",
+                "scenario": "horizontal",
+                "ablation_orientation": "mi_only",
+            },
         },
         {
             "name": "FedSPN (Vertical)",
-            "args": {"ci_method": "spn", "scenario": "vertical"},
+            "args": {
+                "ci_method": "spn",
+                "scenario": "vertical",
+                "ablation_orientation": "mi_only",
+            },
         },
-        {"name": "FedSPN (Hybrid)", "args": {"ci_method": "spn", "scenario": "hybrid"}},
+        {
+            "name": "FedSPN (Hybrid)",
+            "args": {
+                "ci_method": "spn",
+                "scenario": "hybrid",
+                "ablation_orientation": "mi_only",
+            },
+        },
     ]
 
     metrics_order = [
@@ -125,8 +140,11 @@ def run_benchmarks():
 def plot_results(df):
     metrics_f1 = ["f1_skeleton", "f1"]
     labels_f1 = ["Skel F1", "DAG F1"]
-    metrics_shd = ["shd_skeleton", "shd"]
-    labels_shd = ["Skel SHD", "DAG SHD"]
+
+    # Updated: Precision & Recall instead of SHD
+    metrics_pr = ["precision_skeleton", "recall_skeleton", "precision", "recall"]
+    labels_pr = ["Skel Prec", "Skel Rec", "DAG Prec", "DAG Rec"]
+
     metrics_cost = ["comm_cost"]
     labels_cost = ["Comm Cost (KB)"]
 
@@ -135,7 +153,10 @@ def plot_results(df):
     width = 0.2
 
     fig, (ax1, ax2, ax3) = plt.subplots(
-        1, 3, figsize=(18, 6), gridspec_kw={"width_ratios": [2, 2, 1]}
+        1,
+        3,
+        figsize=(18, 6),
+        gridspec_kw={"width_ratios": [2, 3, 1]},  # Adjusted ratio for 4 bars
     )
 
     # --- Plot 1: F1 Scores ---
@@ -160,18 +181,18 @@ def plot_results(df):
     ax1.set_xticks(x_f1)
     ax1.set_xticklabels(labels_f1)
     ax1.grid(axis="y", linestyle="--", alpha=0.7)
-    ax1.legend(loc="upper left", fontsize="x-small")
+    ax1.legend(loc="lower center", bbox_to_anchor=(0.5, -0.2), ncol=2, fontsize="small")
 
-    # --- Plot 2: SHD ---
-    x_shd = np.arange(len(metrics_shd))
+    # --- Plot 2: Precision & Recall ---
+    x_pr = np.arange(len(metrics_pr))
     for i, method in enumerate(methods):
-        vals = [df[df["Method"] == method][m].values[0] for m in metrics_shd]
+        vals = [df[df["Method"] == method][m].values[0] for m in metrics_pr]
         offset = (i - (len(methods) - 1) / 2) * width
-        rects = ax2.bar(x_shd + offset, vals, width, label=method, color=colors[i])
+        rects = ax2.bar(x_pr + offset, vals, width, label=method, color=colors[i])
         for rect in rects:
             h = rect.get_height()
             ax2.annotate(
-                f"{int(h)}",
+                f"{h:.2f}",
                 xy=(rect.get_x() + rect.get_width() / 2, h),
                 xytext=(0, 3),
                 textcoords="offset points",
@@ -179,10 +200,10 @@ def plot_results(df):
                 va="bottom",
                 fontsize=8,
             )
-    ax2.set_ylabel("Distance (Lower is Better)")
-    ax2.set_title("Structural Hamming Distance")
-    ax2.set_xticks(x_shd)
-    ax2.set_xticklabels(labels_shd)
+    ax2.set_ylabel("Score (0-1)")
+    ax2.set_title("Precision & Recall")
+    ax2.set_xticks(x_pr)
+    ax2.set_xticklabels(labels_pr)
     ax2.grid(axis="y", linestyle="--", alpha=0.7)
 
     # --- Plot 3: Communication Cost ---
@@ -212,6 +233,7 @@ def plot_results(df):
     os.makedirs(output_dir, exist_ok=True)
     output_path = os.path.join(output_dir, "benchmark_plot.png")
     plt.tight_layout()
+    plt.subplots_adjust(bottom=0.2)  # Make room for legend
     plt.savefig(output_path)
     print(f"\nPlot saved to {output_path}")
 
