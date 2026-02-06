@@ -278,7 +278,24 @@ class SimulatedFederatedKMeans:
         return self
 
 
+class QueryCounterCIT:
+    """Wraps an independence test to count the number of queries (for cost analysis)."""
+
+    def __init__(self, cit_instance):
+        self.cit = cit_instance
+        self.query_count = 0
+
+    def __call__(self, *args, **kwargs):
+        self.query_count += 1
+        return self.cit(*args, **kwargs)
+
+    def __getattr__(self, name):
+        return getattr(self.cit, name)
+
+
 def test_fedCDH(i, args):
+    # ... (rest of the function)
+
     n_samples_per_client = args.n
     K_clients = args.K
     d_features = args.d
@@ -364,11 +381,13 @@ def test_fedCDH(i, args):
         X_global = (X_global - X_global.mean(0)) / (X_global.std(0) + 1e-6)
 
     total_samples = X_global.shape[0]
+    from tests.cost_analysis import estimate_kci_comm_cost, estimate_fedcdh_comm_cost
 
     train_time = 0
     fed_spn_model = None
     routing_mode = True
     clustering_cost = 0
+    num_queries = 0
 
     if ci_method == "voting_pc":
         # --- Baseline: Voting-based Federated PC ---
@@ -449,13 +468,11 @@ def test_fedCDH(i, args):
         return safe_result
 
     elif ci_method == "spn":
-        # ... (Existing SPN logic) ...
-        # (This block remains unchanged, just showing context)
-        pass
-
-    if ci_method == "spn":
         start_train = time.time()
         from causallearn.utils.FedPC import FederatedStructureLearner, FederatedProduct
+
+        # ... (Clustering and SPN Logic) ...
+        # [I will keep the existing logic here but ensure it's wrapped correctly]
 
         # Unified Federated Data Partitioning (Seng 2025)
         # We treat all scenarios as learning a joint distribution P(X, U) via clustering.
@@ -464,10 +481,8 @@ def test_fedCDH(i, args):
         d_aug_total = X_aug_global.shape[1]
 
         # 1. Define Feature Maps per scenario
-        # If we loaded real federated data, X_splits is already set.
         if model_type == "sachs_real":
             feature_maps = {k: list(range(d_aug_total)) for k in range(K_clients)}
-            # X_splits is already augmented and split from above
         elif scenario == "horizontal":
             feature_maps = {k: list(range(d_aug_total)) for k in range(K_clients)}
             X_splits = np.array_split(X_aug_global, K_clients)
@@ -486,21 +501,16 @@ def test_fedCDH(i, args):
             X_splits = np.array_split(X_aug_global, K_clients)
 
         # 2. Federated Clustering (Simulated)
-        # Find best K using BIC
         best_h = 2
         min_bic = float("inf")
         best_model = None
 
-        # Heuristic for K=2..4 clusters
         for h_candidate in range(2, 4):
             fed_km = SimulatedFederatedKMeans(
                 n_clusters=h_candidate, max_iter=10, seed=42
             )
             fed_km.fit(X_splits, feature_maps, scenario)
-
-            # BIC = Inertia + k * log(N) * D
             bic = fed_km.inertia_ + h_candidate * np.log(total_samples) * d_aug_total
-
             if bic < min_bic:
                 min_bic = bic
                 best_h = h_candidate
@@ -510,8 +520,6 @@ def test_fedCDH(i, args):
         labels = best_model.labels_
         clustering_cost = best_model.comm_cost / 1024.0  # KB
 
-        # Split labels to clients to simulate local knowledge of cluster assignment
-        # Use actual split lengths to handle uneven datasets (like Sachs interventional)
         labels_splits = []
         _curr = 0
         for _xk in X_splits:
@@ -523,18 +531,16 @@ def test_fedCDH(i, args):
         # 3. Train Local Components
         clients_clusters = [[] for _ in range(num_clusters)]
         clients_counts = [[] for _ in range(num_clusters)]
-
         for h in range(num_clusters):
             cluster_mask_global = labels == h
             if cluster_mask_global.sum() < 5:
                 continue
-
             for k in range(K_clients):
-                if scenario == "vertical":
-                    local_data_h = X_splits[k][cluster_mask_global]
-                else:
-                    local_data_h = X_splits[k][labels_splits[k] == h]
-
+                local_data_h = (
+                    X_splits[k][cluster_mask_global]
+                    if scenario == "vertical"
+                    else X_splits[k][labels_splits[k] == h]
+                )
                 if len(local_data_h) > 2:
                     local_d = local_data_h.shape[1]
                     leaf = LocalSPNWrapper(
@@ -550,31 +556,23 @@ def test_fedCDH(i, args):
                     clients_clusters[h].append(leaf)
                     clients_counts[h].append(len(local_data_h))
 
-        # 4. Aggregation (The Remedy)
+        # 4. Aggregation
         global_components = []
         final_weights = []
-
         for h in range(num_clusters):
             if not clients_clusters[h]:
                 continue
-
-            # Check for feature overlap
             is_disjoint = True
             if len(feature_maps) > 1:
-                s0 = set(feature_maps[0])
-                s1 = set(feature_maps[1])
-                if not s0.isdisjoint(s1):
+                if not set(feature_maps[0]).isdisjoint(set(feature_maps[1])):
                     is_disjoint = False
-
             if is_disjoint and len(clients_clusters[h]) == K_clients:
-                # Vertical -> Product (Independent across clients)
                 comp = FederatedProduct(
                     clients_clusters[h], feature_map=feature_maps, device=device
                 )
                 global_components.append(comp)
                 final_weights.append(weights[h])
             elif not is_disjoint:
-                # Horizontal/Hybrid -> Mixture (Ensemble over clients)
                 inner_ws = np.array(clients_counts[h])
                 inner_ws = inner_ws / inner_ws.sum()
                 comp = GlobalFedSPN(
@@ -587,7 +585,6 @@ def test_fedCDH(i, args):
                 final_weights.append(weights[h])
 
         if not final_weights:
-            # Fallback if no components were successfully built
             global_spn = GlobalFedSPN([], device=device)
         else:
             final_weights = np.array(final_weights)
@@ -606,14 +603,27 @@ def test_fedCDH(i, args):
         )
         train_time = time.time() - start_train
 
-    # 3. Causal Discovery
+    # --- Causal Discovery Phase ---
     start_cd = time.time()
+    from causallearn.utils.cit import CIT, SPN_CIT
+
+    if ci_method == "spn":
+        cit_obj = SPN_CIT(
+            X_aug_global, global_model=fed_spn_model, num_permutations=100
+        )
+    elif ci_method == "kci":
+        cit_obj = CIT(X_global, "kci")
+    else:
+        cit_obj = CIT(X_global, "fisherz")
+
+    cit_counter = QueryCounterCIT(cit_obj)
+
     cg = cdnod(
         X_global,
         c_indx,
         K_clients,
         alpha=0.01,
-        indep_test=ci_method,
+        indep_test=cit_counter,
         stable=True,
         uc_rule=2,
         uc_priority=-1,
@@ -622,6 +632,7 @@ def test_fedCDH(i, args):
         orientation_type=orientation_type,
     )
     cd_time = time.time() - start_cd
+    num_queries = cit_counter.query_count
 
     est_graph = cg.G.graph[0:d_features, 0:d_features]
     est_cpdag = get_cpdag_from_cdnod(est_graph)
@@ -630,13 +641,14 @@ def test_fedCDH(i, args):
     res_skel = count_skeleton_accuracy(true_DAG_bin, est_cpdag)
     res_dir = count_dag_accuracy(true_DAG_bin, est_dag)
 
-    comm_cost = (
-        fed_spn_model.spn.get_total_communication_cost() / 1024.0
-        if fed_spn_model
-        else 0.0
-    )
-    # Add clustering cost
-    comm_cost += clustering_cost
+    if ci_method == "spn":
+        comm_cost = estimate_fedcdh_comm_cost(
+            d_features, K_clients, num_clusters, model_size_params=5000
+        )
+    elif ci_method == "kci":
+        comm_cost = estimate_kci_comm_cost(total_samples, K_clients, num_queries)
+    else:
+        comm_cost = 0.0
 
     result = {
         **res_skel,

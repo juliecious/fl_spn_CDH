@@ -345,6 +345,8 @@ def cdnod_alg(
             X_aug_splits,  # Pass augmented data splits
             orientation_method=orientation_type,
             verbose=verbose,
+            data_aug=data_aug,
+            c_idx=c_indx_id,
         )
 
         # Update the main graph with oriented edges

@@ -780,8 +780,21 @@ class SPN_CIT(CIT_Base):
         )
 
         if self.num_permutations <= 0:
-            effective_threshold = self.threshold * (1 + 0.5 * len(Z))
-            return 1.0 if score_obs < effective_threshold else 0.0
+            # G-test approximation for Conditional Mutual Information
+            # 2 * N * I(X;Y|Z) ~ Chi2(df)
+            # We assume df=1 for a conservative pairwise independence test
+            statistic = 2.0 * n_samples * score_obs
+            # Ensure statistic is non-negative
+            statistic = max(0.0, statistic)
+
+            # Degrees of freedom:
+            # Strictly, df depends on variable cardinality/dimensionality.
+            # For 1D continuous variables X, Y, Z=empty, df=1 is standard.
+            # If Z is present, df might be higher, but we stick to 1 for robustness.
+            df = 1
+
+            p_value = chi2.sf(statistic, df)
+            return p_value
 
         # 2. Adaptive Permutation Loop
         null_dist = []

@@ -146,23 +146,31 @@ def orient_edge_mechanism_invariance(
     fed_spn_model,
     X_splits: List[np.ndarray],
     method: str = "variance",
+    data_aug: Optional[np.ndarray] = None,
+    c_idx: int = -1,
 ) -> int:
     """
     Orient edge i -- j using mechanism invariance principle.
 
-    Tests both directions and returns the one with more invariant mechanism.
-
     Args:
-        i: Index of first variable
-        j: Index of second variable
+        i, j: Variable indices
         fed_spn_model: FedCDH_SPN_Wrapper
-        X_splits: List of client data matrices [X_0, X_1, ..., X_K]
-        method: "variance" or "score" (how to measure invariance)
+        X_splits: List of client data matrices
+        method: "mi_only", "mi_hybrid", "mi_score"
+        data_aug: Full augmented data (required for mi_hybrid)
+        c_idx: Index of context variable (required for mi_hybrid)
 
     Returns:
-        1 if i → j (i is parent of j)
-        2 if j → i (j is parent of i)
+        1 if i → j, 2 if j → i
     """
+    if method == "mi_hybrid":
+        if data_aug is None:
+            raise ValueError("mi_hybrid requires data_aug")
+        return compute_hybrid_orientation_score(
+            i, j, fed_spn_model, X_splits, data_aug, c_idx
+        )
+
+    # Default: "mi_only" or "variance"
     # Test direction i → j: variance of P(j | i) across clients
     var_i_to_j = compute_mechanism_variance(
         fed_spn_model, X_splits, target_idx=j, parent_indices=[i]
@@ -186,21 +194,11 @@ def orient_skeleton_mechanism_invariance(
     X_splits: List[np.ndarray],
     orientation_method: str = "mi_only",
     verbose: bool = False,
+    data_aug: Optional[np.ndarray] = None,
+    c_idx: int = -1,
 ) -> np.ndarray:
     """
     Orient all undirected edges in skeleton using mechanism invariance.
-
-    Args:
-        skeleton_graph: [d, d] adjacency matrix (CPDAG format)
-                       -1 = endpoint, 1 = tail
-                       Undirected edge: graph[i,j] = graph[j,i] = -1
-        fed_spn_model: FedCDH_SPN_Wrapper
-        X_splits: List of client data matrices
-        orientation_method: "mi_only", "mi_hybrid", "mi_score"
-        verbose: Print orientation decisions
-
-    Returns:
-        Oriented graph (PDAG format)
     """
     d = skeleton_graph.shape[0]
     oriented_graph = skeleton_graph.copy()
@@ -221,7 +219,13 @@ def orient_skeleton_mechanism_invariance(
     oriented_count = 0
     for i, j in undirected_edges:
         direction = orient_edge_mechanism_invariance(
-            i, j, fed_spn_model, X_splits, method=orientation_method
+            i,
+            j,
+            fed_spn_model,
+            X_splits,
+            method=orientation_method,
+            data_aug=data_aug,
+            c_idx=c_idx,
         )
 
         if direction == 1:  # i → j
