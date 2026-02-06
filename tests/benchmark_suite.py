@@ -39,55 +39,63 @@ class Args:
 def run_benchmarks():
     # ... (run_benchmarks setup remains same)
     configs = [
+        # --- Synthetic Benchmarks (Controlled Heterogeneity) ---
         {
-            "name": "KCI (Real Sachs)",
+            "name": "KCI (Synthetic Sachs)",
             "args": {
                 "ci_method": "kci",
                 "scenario": "horizontal",
-                "model_type": "sachs_real",
+                "model_type": "sachs",
+                "n": 500,
+                "d": 11,
+                "K": 3,
             },
         },
         {
-            "name": "Voting-FedPC (Real Sachs)",
+            "name": "Voting-FedPC (Synthetic Sachs)",
             "args": {
                 "ci_method": "voting_pc",
                 "scenario": "horizontal",
-                "model_type": "sachs_real",
-                "n": 853,
+                "model_type": "sachs",
+                "n": 500,
                 "d": 11,
+                "K": 3,
             },
         },
         {
-            "name": "FedSPN (Real Sachs - Horizontal)",
+            "name": "FedSPN (Synthetic - Horizontal)",
             "args": {
                 "ci_method": "spn",
                 "scenario": "horizontal",
-                "model_type": "sachs_real",
+                "model_type": "sachs",
                 "ablation_orientation": "mi_only",
-                "n": 853,
+                "n": 500,
                 "d": 11,
+                "K": 3,
             },
         },
         {
-            "name": "FedSPN (Real Sachs - Vertical)",
+            "name": "FedSPN (Synthetic - Vertical)",
             "args": {
                 "ci_method": "spn",
                 "scenario": "vertical",
-                "model_type": "sachs_real",
+                "model_type": "sachs",
                 "ablation_orientation": "mi_only",
-                "n": 853,
+                "n": 500,
                 "d": 11,
+                "K": 3,
             },
         },
         {
-            "name": "FedSPN (Real Sachs - Hybrid)",
+            "name": "FedSPN (Synthetic - Hybrid)",
             "args": {
                 "ci_method": "spn",
                 "scenario": "hybrid",
-                "model_type": "sachs_real",
+                "model_type": "sachs",
                 "ablation_orientation": "mi_only",
-                "n": 853,
+                "n": 500,
                 "d": 11,
+                "K": 3,
             },
         },
     ]

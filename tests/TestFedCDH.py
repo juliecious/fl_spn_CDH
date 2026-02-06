@@ -305,7 +305,7 @@ def test_fedCDH(i, args):
         from tests.utils.sachs_loader import load_sachs_federated
 
         X_splits, true_DAG_bin, c_indx = load_sachs_federated(
-            K_clients, n_samples_limit=n_samples_per_client * K_clients
+            K_clients, n_samples_limit=None
         )
 
         # Reconstruct Global for KCI (Centralized Baseline)
@@ -453,91 +453,6 @@ def test_fedCDH(i, args):
         # (This block remains unchanged, just showing context)
         pass
 
-    elif ci_method == "voting_pc":
-        # --- Baseline: Voting-based Federated PC ---
-        # Clients run PC locally, Server aggregates by Majority Vote
-        start_cd = time.time()
-
-        local_graphs = []
-        # Pre-compute correlation matrices for speed if needed, but PC is fast
-
-        for k in range(K_clients):
-            # Local PC
-            # We use standard fisherz for local independence test
-            # Note: We pass c_indx slice just to satisfy cdnod signature,
-            # but standard PC ignores it or we can use standard PC.
-            # Using cdnod locally to be fair (handling heterogeneity if local data has it)
-
-            # Slice local data
-            local_X = X_splits[k]
-            # Create dummy local context (all 0s since we are inside one client)
-            # Or use actual if available. For 'sachs_real', X_splits might be augmented already?
-            # Let's check dimensions.
-            if local_X.shape[1] > d_features:
-                local_data = local_X[:, :d_features]
-                local_c = local_X[:, d_features].reshape(-1, 1)
-            else:
-                local_data = local_X
-                local_c = np.zeros((len(local_X), 1))
-
-            # Run Local Discovery
-            # We use a simple PC-stable for robustness
-            cg_local = cdnod(
-                local_data,
-                local_c,
-                1,  # K=1 locally
-                alpha=0.01,
-                indep_test="fisherz",
-                stable=True,
-                uc_rule=2,
-                uc_priority=-1,
-            )
-            local_graphs.append(cg_local.G.graph[0:d_features, 0:d_features])
-
-        # Aggregation: Majority Vote
-        # Edges are {1, -1}. We check for presence (non-zero).
-        # We aggregate skeletons first.
-        global_skeleton = np.zeros((d_features, d_features))
-
-        for g in local_graphs:
-            # Binarize skeleton: 1 if edge exists (1 or -1), 0 otherwise
-            skel = (g != 0).astype(int)
-            # Symmetrize to be safe
-            skel = ((skel + skel.T) > 0).astype(int)
-            global_skeleton += skel
-
-        # Threshold: > K/2 votes
-        consensus_skeleton = (global_skeleton > (K_clients / 2)).astype(int)
-
-        # Construct Result Graph (CPDAG format for evaluation)
-        # We only output the skeleton for this baseline as orientation voting is complex
-        # and usually performed by local orientation rules which might conflict.
-        # We return an undirected graph where edges exist.
-        est_cpdag = np.zeros((d_features, d_features))
-        # Set symmetric -1 for edges
-        rows, cols = np.where(consensus_skeleton == 1)
-        for r, c in zip(rows, cols):
-            est_cpdag[r, c] = -1
-
-        cd_time = time.time() - start_cd
-
-        # Evaluation
-        # Voting PC produces a Skeleton. Orientation is not aggregated here (F1 Dir will be low).
-        # This is a fair "Structure-Only" baseline.
-        est_dag = np.zeros_like(est_cpdag)  # Dummy DAG
-
-        res_skel = count_skeleton_accuracy(true_DAG_bin, est_cpdag)
-        res_dir = count_dag_accuracy(true_DAG_bin, est_dag)  # Will be 0
-
-        # Communication Cost: K clients * Adj Matrix size (d*d bits/bytes)
-        # 4 bytes per entry for float adjacency
-        comm_cost = (K_clients * d_features * d_features * 4) / 1024.0
-
-        train_time = 0.0
-
-        # Skip the main SPN block logic
-        fed_spn_model = None
-
     if ci_method == "spn":
         start_train = time.time()
         from causallearn.utils.FedPC import FederatedStructureLearner, FederatedProduct
@@ -631,7 +546,7 @@ def test_fedCDH(i, args):
                         num_repetitions=5,
                         seed=i * 100 + h * 10 + k,
                     )
-                    leaf.train_local(local_data_h, epochs=1, lr=0.01)
+                    leaf.train_local(local_data_h, epochs=10, lr=0.01)
                     clients_clusters[h].append(leaf)
                     clients_counts[h].append(len(local_data_h))
 
@@ -703,7 +618,7 @@ def test_fedCDH(i, args):
         uc_rule=2,
         uc_priority=-1,
         fed_spn_model=fed_spn_model,
-        num_permutations=20,
+        num_permutations=100,
         orientation_type=orientation_type,
     )
     cd_time = time.time() - start_cd
