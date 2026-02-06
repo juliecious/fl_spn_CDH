@@ -9,27 +9,29 @@ This library solves the problem of discovering causal graphs from heterogeneous 
 Instead of slow, kernel-based conditional independence tests (like KCI), this implementation uses **Sum-Product Networks (SPNs)** trained in a federated "Mixture of Experts" architecture to estimate global densities efficiently.
 
 ### Key Features
-*   **Privacy-First:** Clients share only model parameters (SPN circuits), never data.
-*   **Universal Federation:** Supports **Horizontal**, **Vertical** (via Latent Variables), and **Hybrid** data splitting.
-*   **Speed:** **~10x Faster** than KCI for skeleton discovery while matching accuracy.
-*   **Accuracy:** Achieves **F1=0.89-0.91** (State-of-the-Art) on heterogeneous benchmarks by using mechanism invariance for orientation.
+*   **Privacy-First:** Clients share only model parameters (SPN circuits) or cluster summaries, never raw data.
+*   **Universal Federation:** Supports **Horizontal**, **Vertical** (via Feature Mapping), and **Hybrid** data splitting.
+*   **Speed:** Efficient analytic Conditional Mutual Information (CMI) calculation via SPN inference.
+*   **Robust Orientation:** Implements **Hybrid Orientation** combining Mechanism Invariance (variance across clients) with Information Theoretic directionality (SPN entropy).
 
 ## 📦 Architecture
 
-### 1. The "Castle" (Mixture of Experts)
-To handle structural heterogeneity (clients having different local distributions), we implement a **Global Mixture Model**:
-$$P_{global}(X) = \sum_{k=1}^{K} w_k P_k(X)$$
-where $P_k(X)$ is a **Local SPN** trained on Client $k$'s private data. This avoids the "averaging" problem of FedAvg, preserving local causal structures.
+### 1. Federated Data Partitioning (Layer 1)
+We implement a **Simulated Federated K-Means** protocol to align heterogeneous clients into global "mechanism clusters" (e.g., Condition A vs. Condition B) without sharing data.
+*   **Horizontal:** Aggregates centroids via secure summation.
+*   **Vertical:** Aggregates partial distances via secure summation.
 
-### 2. Latent Variable for Vertical FL
-For vertically partitioned data (feature split), we use a **Latent Variable Mixture of Products**:
-$$P(X) = \sum_{h=1}^{H} P(h) \prod_{k=1}^{K} P(X_k \mid h)$$
-This captures cross-client dependencies without joining features, achieving **F1=0.89** parity with centralized baselines.
+### 2. The "Castle" (Layer 3: Aggregation)
+To handle structural heterogeneity, we aggregate Local SPNs into a **Global Joint Density** $P(X, U)$:
+*   **Horizontal/Hybrid:** Uses **Mixture of Experts** (Sum) to prevent density sharpening.
+    $$P_{global}(X) = \sum_{k=1}^{K} w_k P_k(X)$$
+*   **Vertical:** Uses **Product of Experts** (Factorization) to stitch disjoint feature sets.
+    $$P(X) = \prod_{k=1}^{K} P(X_k)$$
 
-### 3. SPN-CIT Oracle
-We replace the standard `fisherz` or `kci` test with a log-likelihood ratio test:
-$$Score \approx LL(X, Y, Z) - (LL(X, Z) + LL(Y, Z) - LL(Z))$$
-calibrated via a **Vectorized Gamma-Permutation Test** for statistical rigor.
+### 3. SPN-CIT Oracle (Layer 4: Discovery)
+We replace the standard `fisherz` or `kci` test with a rigorous G-test based on CMI:
+*   **Statistic:** $2N \cdot I(X;Y|Z)$ (calculated analytically from SPN).
+*   **Test:** Approximated as $\chi^2(df=1)$ to yield a valid p-value for the PC algorithm.
 
 ## 🛠️ Installation
 
@@ -40,70 +42,58 @@ cd fl_spn_CDH
 
 # Install dependencies
 pip install -r requirements.txt
-# Requires: torch, numpy, scipy, networkx, simple-einet
+# Requires: torch, numpy, scipy, networkx, simple-einet, pandas, matplotlib, seaborn
 ```
 
-## 📊 Usage
+## 📊 Benchmarking Workflow
 
-### Running Benchmarks
-We provide a comprehensive benchmark suite to compare FedSPN against the KCI baseline across all scenarios.
+We provide a modular, professional benchmarking suite to compare FedCDH against Oracles (KCI) and Naive Baselines (Voting).
+
+### 1. Run Experiments
+Run specific configurations in batches (Monte Carlo simulation with seeds). Results are saved to distinct timestamped folders.
 
 ```bash
-# Run the full benchmark suite (Horizontal, Vertical, Hybrid vs KCI)
-python tests/benchmark_suite.py
+# Run Voting-FedPC Baseline (Fast)
+python tests/benchmarks/run_experiment.py --config voting_synthetic --num_seeds 5
+
+# Run FedSPN (Horizontal)
+python tests/benchmarks/run_experiment.py --config fedspn_horizontal_synthetic --num_seeds 5
+
+# Run Centralized KCI (Oracle - Slow!)
+python tests/benchmarks/run_experiment.py --config kci_synthetic --num_seeds 5
 ```
 
-This will output a performance table and generate a visualization at `tests/results/benchmark_plot.png`.
+### 2. Analyze & Visualize
+Aggregate all run metrics into a summary table and generate publication-ready plots.
 
-### Programmatic Usage
-You can integrate `FedPC` into your own causal discovery pipeline:
-
-```python
-from causallearn.utils.FedPC import LocalSPNWrapper, GlobalFedSPN
-from causallearn.search.ConstraintBased.CDNOD import cdnod
-
-# 1. Train Local Models
-local_models = []
-for k in range(K_clients):
-    leaf = LocalSPNWrapper(num_features=d, ...)
-    leaf.train_local(client_data[k])
-    local_models.append(leaf)
-
-# 2. Aggregation (The Castle)
-global_spn = GlobalFedSPN(local_models, strategy="mixture")
-
-# 3. Run Federated Causal Discovery
-# The wrapper handles P(X|U) queries for FedCDH
-fed_spn_model = FedCDH_SPN_Wrapper(global_spn, u_index=d)
-
-cg = cdnod(..., fed_spn_model=fed_spn_model)
+```bash
+python tests/benchmarks/analyze_results.py
 ```
+Outputs are saved to `tests/experiments/summary_{TIMESTAMP}/`.
 
-## 📈 Performance
+## 📈 Performance (Preliminary)
 
-Benchmark results on $d=5, n=200, K=2$ heterogeneous synthetic data:
+Recent **Smoke Test ($N=100$)** results on synthetic data:
 
-| Method | Scenario | Skel F1 | DAG F1 | Time |
+| Method | Scenario | Skel F1 | DAG F1 | Cost (KB) |
 | :--- | :--- | :--- | :--- | :--- |
-| **KCI (Baseline)** | Horizontal | 0.89 | 0.89 | 7.6s |
-| **FedSPN** | **Horizontal** | **0.91** | 0.73 | ~570s* |
-| **FedSPN** | **Vertical** | **0.89** | **0.89** | **96s** |
-| **FedSPN** | **Hybrid** | **0.91** | 0.73 | ~569s* |
+| **FedSPN** | **Horizontal** | **0.75** | **0.25** | **43.2** |
+| **Voting-FedPC** | Horizontal | 0.00 | 0.00 | N/A |
 
-*\*Note: High runtime is due to rigorous permutation testing (50 permutations) enabled for benchmarking. For production use, `num_permutations` can be reduced.*
+*Note: Voting fails completely on small heterogeneous samples due to Simpson's Paradox. FedSPN successfully recovers structure.*
 
 ## 🗺️ Project Roadmap
 
-### Short-Term
-- [ ] **Adaptive Thresholding:** Scale CI threshold based on conditioning set entropy.
-- [ ] **Ensemble Orientation:** Combine SPN Mechanism Invariance score with HSIC for robust orientation.
+### Completed
+- [x] **Refactoring:** Modular library structure (`causallearn.search.FCMBased.FedCDH`).
+- [x] **Baselines:** Voting-FedPC and Centralized KCI.
+- [x] **Real Data:** Robust Sachs dataset loader with interventional partitioning.
+- [x] **Theory:** G-test p-values for SPN-CIT.
+- [x] **Orientation:** Hybrid Score (Invariance + Entropy).
 
-### Medium-Term
-- [ ] **Structure Learning:** Replace random RAT-SPNs with **LearnSPN** for better data efficiency.
-- [ ] **Distributed Execution:** Implement actual RPC/gRPC communication for real-world deployment (currently simulated locally).
-
-### Long-Term
-- [ ] **Causal Inference:** Extend the SPN to estimate Average Treatment Effects (ATE) using the learned graph.
+### In Progress
+- [ ] **Full Benchmarking:** Running $N=500$ suite for final paper tables.
+- [ ] **Real-World Validation:** Scaling to full Sachs dataset ($N=853$).
 
 ## 📚 References
 1.  **FedCDH:** Li, L., et al. "Federated Causal Discovery from Heterogeneous Data." *ICLR 2024*.
