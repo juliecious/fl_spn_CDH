@@ -758,31 +758,44 @@ class SPN_CIT(CIT_Base):
         data = data_matrix if data_matrix is not None else self.data
         n_samples, n_features = data.shape
 
-        def get_ll(input_data, subset_indices):
-            if not subset_indices:
-                return np.zeros(input_data.shape[0])
-            masked_batch = np.full_like(input_data, np.nan)
-            masked_batch[:, subset_indices] = input_data[:, subset_indices]
-            batch_t = torch.tensor(masked_batch, dtype=torch.float32).to(
-                self.model.device
-            )
-            with torch.no_grad():
-                ll = self.model.log_prob(batch_t)
-            return ll.cpu().numpy().flatten()
+        # --- OPTIMIZED VECTORIZED MARGINALIZATION ---
+        # Instead of 4 forward passes, we do 1 pass with a stacked batch.
+        # This significantly reduces overhead on CPU.
+
+        # Define the indices for our 4 marginals
+        idx_xyz = X + Y + Z
+        idx_xz = X + Z
+        idx_yz = Y + Z
+        idx_z = Z
+
+        configs = [idx_xyz, idx_xz, idx_yz, idx_z]
+
+        # Prepare stacked batch: [4 * N, D]
+        stacked_data = np.full((4 * n_samples, n_features), np.nan)
+
+        for i, idx in enumerate(configs):
+            if idx:  # if indices not empty
+                start, end = i * n_samples, (i + 1) * n_samples
+                stacked_data[start:end, idx] = data[:, idx]
+
+        # Single forward pass
+        data_t = torch.tensor(stacked_data, dtype=torch.float32).to(self.model.device)
+        with torch.no_grad():
+            stacked_ll = self.model.log_prob(data_t).cpu().numpy().flatten()
+
+        # Extract individual log-likelihoods
+        ll_xyz = stacked_ll[0:n_samples]
+        ll_xz = stacked_ll[n_samples : 2 * n_samples]
+        ll_yz = stacked_ll[2 * n_samples : 3 * n_samples]
+        ll_z = stacked_ll[3 * n_samples : 4 * n_samples] if idx_z else 0.0
 
         # 1. Compute Observed Score
-        ll_xyz_obs = get_ll(data, X + Y + Z)
-        ll_xz_obs = get_ll(data, X + Z)
-        ll_yz_obs = get_ll(data, Y + Z)
-        ll_z_obs = get_ll(data, Z) if Z else 0.0
-        score_obs = np.mean(
-            np.maximum(0.0, ll_xyz_obs - (ll_xz_obs + ll_yz_obs - ll_z_obs))
-        )
+        # I(X;Y|Z) = E[ log P(X,Y,Z) - log P(X,Z) - log P(Y,Z) + log P(Z) ]
+        score_obs = np.mean(np.maximum(0.0, ll_xyz - (ll_xz + ll_yz - ll_z)))
 
         if self.num_permutations <= 0:
             # G-test approximation for Conditional Mutual Information
             # 2 * N * I(X;Y|Z) ~ Chi2(df)
-            # We assume df=1 for a conservative pairwise independence test
             statistic = 2.0 * n_samples * score_obs
             # Ensure statistic is non-negative
             statistic = max(0.0, statistic)

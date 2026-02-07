@@ -140,46 +140,111 @@ def run_single_experiment(config_name, seed, custom_args=None):
     result["config"] = config_name
     result["seed"] = seed
     result["timestamp"] = datetime.now().isoformat()
+    result["n"] = args.n
+    result["d"] = args.d
+    result["K"] = args.K
+
+    # Add args for context
+    for k, v in cfg_dict.items():
+        result[f"arg_{k}"] = v
 
     return result
 
 
 def plot_batch_results(df, output_dir, config_name):
-    """Generates a summary plot for the batch."""
+    """Generates a detailed 3-panel summary plot for the batch."""
     sns.set_theme(style="whitegrid")
 
-    metrics = ["f1_skeleton", "f1", "precision", "recall"]
-    existing_metrics = [m for m in metrics if m in df.columns]
+    # metrics groups
+    structure_metrics = [
+        "f1_skeleton",
+        "precision_skeleton",
+        "recall_skeleton",
+        "f1",
+        "precision",
+        "recall",
+    ]
+    shd_metrics = ["shd_skeleton", "shd"]
+    efficiency_metrics = ["time_train", "time_cd", "comm_cost"]
 
-    if not existing_metrics:
-        return
+    fig, axes = plt.subplots(1, 3, figsize=(20, 6))
 
-    # Melt for Seaborn
-    plot_df = df.melt(
-        id_vars=["config"],
-        value_vars=existing_metrics,
-        var_name="Metric",
-        value_name="Score",
+    # Helper to plot group
+    def plot_group(metrics, ax, title, ylabel):
+        valid = [m for m in metrics if m in df.columns]
+        if not valid:
+            return
+        plot_df = df.melt(
+            id_vars=["config"], value_vars=valid, var_name="Metric", value_name="Score"
+        )
+
+        sns.barplot(
+            data=plot_df,
+            x="Metric",
+            y="Score",
+            hue="Metric",
+            errorbar="sd",
+            capsize=0.1,
+            ax=ax,
+            palette="muted",
+            legend=False,
+        )
+        ax.set_title(title, fontsize=14, fontweight="bold")
+        ax.set_ylabel(ylabel)
+        ax.set_xlabel("")
+        ax.tick_params(axis="x", rotation=45)
+
+    # Plot 1: Structure Quality
+    plot_group(structure_metrics, axes[0], "Structure Quality", "Score (0-1)")
+    axes[0].set_ylim(0, 1.05)
+
+    # Plot 2: SHD (Error)
+    plot_group(
+        shd_metrics,
+        axes[1],
+        "Structural Hamming Distance (Lower is Better)",
+        "Error Count",
     )
 
-    plt.figure(figsize=(10, 6))
-    sns.barplot(
-        data=plot_df, x="Metric", y="Score", errorbar="sd", capsize=0.1, palette="muted"
+    # Plot 3: Efficiency
+    plot_group(efficiency_metrics, axes[2], "Efficiency & Cost", "Value")
+    axes[2].set_yscale("log")
+    axes[2].set_ylabel("Log Scale")
+
+    # Global Title
+    # Extract params from first row (use direct columns if available)
+    try:
+        n_val = df.iloc[0]["n"]
+        d_val = df.iloc[0]["d"]
+        k_val = df.iloc[0]["K"]
+        dataset_name = df.iloc[0].get(
+            "arg_model_type", df.iloc[0].get("model_type", "unknown")
+        )
+    except KeyError:
+        # Fallback to arg_ columns
+        n_val = df.iloc[0].get("arg_n", "?")
+        d_val = df.iloc[0].get("arg_d", "?")
+        k_val = df.iloc[0].get("arg_K", "?")
+        dataset_name = df.iloc[0].get("arg_model_type", "?")
+
+    plt.suptitle(
+        f"Experiment Results: {config_name} (Dataset: {dataset_name})\n(N={n_val} samples/client, D={d_val} nodes, K={k_val} clients)",
+        fontsize=16,
+        y=1.02,
     )
-    plt.title(f"Performance Distribution: {config_name}\n(N={len(df)} seeds)")
-    plt.ylim(0, 1.05)
+
     plt.tight_layout()
-
     plot_path = os.path.join(output_dir, "performance_plot.png")
-    plt.savefig(plot_path)
+    plt.savefig(plot_path, bbox_inches="tight", dpi=300)
     logging.info(f"Plot saved to {plot_path}")
 
 
 if __name__ == "__main__":
     parser = argparse.ArgumentParser(description="Run a batch of FedCDH experiments.")
     parser.add_argument("--config", type=str, help="Name of the configuration to run")
+    parser.add_argument("--seed", type=int, default=0, help="Starting random seed")
     parser.add_argument(
-        "--num_seeds", type=int, default=5, help="Number of seeds to run (Monte Carlo)"
+        "--num_seeds", type=int, default=1, help="Number of seeds to run (Monte Carlo)"
     )
     parser.add_argument(
         "--base_dir",
@@ -195,9 +260,17 @@ if __name__ == "__main__":
     parser.add_argument("--n", type=int)
     parser.add_argument("--K", type=int)
     parser.add_argument("--d", type=int)
+    parser.add_argument("--epochs", type=int, help="Training epochs for SPN")
+    parser.add_argument("--alpha", type=float, help="Significance level for CI tests")
+    parser.add_argument(
+        "--num_sums", type=int, help="Number of sum nodes per scope in SPN"
+    )
+    parser.add_argument(
+        "--num_leaves", type=int, help="Number of leaf nodes per feature in SPN"
+    )
+    parser.add_argument("--num_repetitions", type=int, help="Number of SPN repetitions")
 
     args = parser.parse_args()
-
     config_name = args.config if args.config else "custom"
 
     # 1. Setup Batch Directory
@@ -213,7 +286,7 @@ if __name__ == "__main__":
 
     # 3. Run Loop
     all_results = []
-    seeds = list(range(args.num_seeds))
+    seeds = list(range(args.seed, args.seed + args.num_seeds))
 
     logging.info(f"Starting Batch execution for {len(seeds)} seeds...")
 
@@ -249,7 +322,7 @@ if __name__ == "__main__":
     logging.info("=" * 50)
     logging.info(f"\n{summary.transpose()}")
 
-    # 5. Plot
+    # 5. Plot (Local)
     plot_batch_results(df, exp_dir, config_name)
 
     logging.info(f"Experiment Batch Complete. Results in {exp_dir}")

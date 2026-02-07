@@ -20,24 +20,15 @@ from itertools import combinations
 
 
 def compute_conditional_log_likelihood(
-    spn_model,
+    model,
     data: np.ndarray,
     target_idx: int,
     parent_indices: List[int],
     num_samples: int = 200,
 ) -> float:
     """
-    Compute average log P(target | parents) using SPN.
-
-    Args:
-        spn_model: LocalSPNWrapper or similar SPN model
-        data: [n, d] data matrix (may include context column at the end)
-        target_idx: Index of target variable (in feature space, 0 to d-1)
-        parent_indices: List of parent variable indices (in feature space)
-        num_samples: Number of samples to use for estimation
-
-    Returns:
-        Average log conditional likelihood
+    Compute average log P(target | parents) using the model (SPN Wrapper).
+    Data should include the context variable U if the model expects it.
     """
     if len(data) == 0:
         return 0.0
@@ -51,38 +42,49 @@ def compute_conditional_log_likelihood(
 
     # Create masked data for marginalization
     n = len(data_subset)
-    d = data.shape[1]  # Full dimensionality (including context if present)
+    d = data.shape[1]
 
-    # Compute P(target, parents) via marginalization
+    # Compute P(target, parents, [U]) via marginalization
+    # Note: If U is present in data, we keep it to condition on the domain.
+    # In CDNOD, data is augmented [X, U].
     joint_indices = [target_idx] + parent_indices
+    # If the last column is U, we always keep it
+    if d > max(joint_indices):
+        u_idx = d - 1
+        if u_idx not in joint_indices:
+            joint_indices.append(u_idx)
+
     masked_joint = np.full((n, d), np.nan)
     masked_joint[:, joint_indices] = data_subset[:, joint_indices]
 
     with torch.no_grad():
         masked_joint_t = torch.from_numpy(masked_joint).float()
-        if hasattr(spn_model, "device"):
-            masked_joint_t = masked_joint_t.to(spn_model.device)
-        log_prob_joint = spn_model.log_prob(masked_joint_t)
+        if hasattr(model, "device"):
+            masked_joint_t = masked_joint_t.to(model.device)
+        log_prob_joint = model.log_prob(masked_joint_t)
         ll_joint = log_prob_joint.cpu().numpy().flatten()
 
-    # Compute P(parents) via marginalization
-    if len(parent_indices) > 0:
-        masked_parents = np.full((n, d), np.nan)
-        masked_parents[:, parent_indices] = data_subset[:, parent_indices]
+    # Compute P(parents, [U]) via marginalization
+    parent_u_indices = parent_indices.copy()
+    if d > max(parent_u_indices if parent_u_indices else [0]):
+        u_idx = d - 1
+        if u_idx not in parent_u_indices:
+            parent_u_indices.append(u_idx)
 
-        with torch.no_grad():
-            masked_parents_t = torch.from_numpy(masked_parents).float()
-            if hasattr(spn_model, "device"):
-                masked_parents_t = masked_parents_t.to(spn_model.device)
-            log_prob_parents = spn_model.log_prob(masked_parents_t)
-            ll_parents = log_prob_parents.cpu().numpy().flatten()
-    else:
-        ll_parents = 0.0
+    masked_parents = np.full((n, d), np.nan)
+    masked_parents[:, parent_u_indices] = data_subset[:, parent_u_indices]
 
-    # P(target | parents) = P(target, parents) / P(parents)
+    with torch.no_grad():
+        masked_parents_t = torch.from_numpy(masked_parents).float()
+        if hasattr(model, "device"):
+            masked_parents_t = masked_parents_t.to(model.device)
+        log_prob_parents = model.log_prob(masked_parents_t)
+        ll_parents = log_prob_parents.cpu().numpy().flatten()
+
+    # P(target | parents, U) = P(target, parents, U) / P(parents, U)
     log_cond = ll_joint - ll_parents
 
-    # Return mean, handling any infinities/NaNs
+    # Return mean
     log_cond = log_cond[np.isfinite(log_cond)]
     if len(log_cond) == 0:
         return 0.0
@@ -92,51 +94,28 @@ def compute_conditional_log_likelihood(
 
 def compute_mechanism_variance(
     fed_spn_model,
-    X_splits: List[np.ndarray],
+    X_aug_splits: List[np.ndarray],
     target_idx: int,
     parent_indices: List[int],
-    use_local_models: bool = True,
 ) -> float:
     """
-    Compute variance of mechanism P(target | parents) across clients.
-
-    Lower variance indicates more invariant mechanism (likely correct direction).
-
-    Args:
-        fed_spn_model: FedCDH_SPN_Wrapper containing GlobalFedSPN
-        X_splits: List of client data matrices (without context column)
-        target_idx: Index of target variable
-        parent_indices: List of parent variable indices
-        use_local_models: If True, use client-specific local SPNs
-
-    Returns:
-        Variance of mechanism scores across clients
+    Compute variance of mechanism P(target | parents, U=k) across splits k.
     """
-    K = len(X_splits)
     mechanism_scores = []
 
-    for k in range(K):
-        if len(X_splits[k]) == 0:
+    for k in range(len(X_aug_splits)):
+        if len(X_aug_splits[k]) == 0:
             continue
 
-        # Get the appropriate SPN model for this client
-        if use_local_models and hasattr(fed_spn_model.spn, "components"):
-            # Use client-specific local SPN
-            local_spn = fed_spn_model.spn.components[k]
-        else:
-            # Use global SPN
-            local_spn = fed_spn_model.spn
-
-        # Compute log P(target | parents) on client k's data
+        # Evaluate the conditional LL for this domain k using the Global Wrapper
         score = compute_conditional_log_likelihood(
-            local_spn, X_splits[k], target_idx, parent_indices, num_samples=200
+            fed_spn_model, X_aug_splits[k], target_idx, parent_indices, num_samples=200
         )
         mechanism_scores.append(score)
 
     if len(mechanism_scores) < 2:
-        return float("inf")  # Not enough data to compute variance
+        return 0.0  # No variance if only one domain
 
-    # Return variance of mechanism scores
     return np.var(mechanism_scores)
 
 
@@ -144,44 +123,32 @@ def orient_edge_mechanism_invariance(
     i: int,
     j: int,
     fed_spn_model,
-    X_splits: List[np.ndarray],
-    method: str = "variance",
+    X_aug_splits: List[np.ndarray],
+    method: str = "mi_only",
     data_aug: Optional[np.ndarray] = None,
     c_idx: int = -1,
 ) -> int:
     """
     Orient edge i -- j using mechanism invariance principle.
-
-    Args:
-        i, j: Variable indices
-        fed_spn_model: FedCDH_SPN_Wrapper
-        X_splits: List of client data matrices
-        method: "mi_only", "mi_hybrid", "mi_score"
-        data_aug: Full augmented data (required for mi_hybrid)
-        c_idx: Index of context variable (required for mi_hybrid)
-
-    Returns:
-        1 if i → j, 2 if j → i
     """
     if method == "mi_hybrid":
         if data_aug is None:
             raise ValueError("mi_hybrid requires data_aug")
         return compute_hybrid_orientation_score(
-            i, j, fed_spn_model, X_splits, data_aug, c_idx
+            i, j, fed_spn_model, X_aug_splits, data_aug, c_idx
         )
 
     # Default: "mi_only" or "variance"
-    # Test direction i → j: variance of P(j | i) across clients
+    # Test direction i → j: variance of P(j | i, U) across splits
     var_i_to_j = compute_mechanism_variance(
-        fed_spn_model, X_splits, target_idx=j, parent_indices=[i]
+        fed_spn_model, X_aug_splits, target_idx=j, parent_indices=[i]
     )
 
-    # Test direction j → i: variance of P(i | j) across clients
+    # Test direction j → i: variance of P(i | j, U) across splits
     var_j_to_i = compute_mechanism_variance(
-        fed_spn_model, X_splits, target_idx=i, parent_indices=[j]
+        fed_spn_model, X_aug_splits, target_idx=i, parent_indices=[j]
     )
 
-    # Orient toward more invariant (lower variance) direction
     if var_i_to_j < var_j_to_i:
         return 1  # i → j is more invariant
     else:
@@ -191,7 +158,7 @@ def orient_edge_mechanism_invariance(
 def orient_skeleton_mechanism_invariance(
     skeleton_graph: np.ndarray,
     fed_spn_model,
-    X_splits: List[np.ndarray],
+    X_aug_splits: List[np.ndarray],
     orientation_method: str = "mi_only",
     verbose: bool = False,
     data_aug: Optional[np.ndarray] = None,
@@ -207,7 +174,6 @@ def orient_skeleton_mechanism_invariance(
     undirected_edges = []
     for i in range(d):
         for j in range(i + 1, d):
-            # Undirected edge: both endpoints are circles (-1, -1)
             if skeleton_graph[i, j] == -1 and skeleton_graph[j, i] == -1:
                 undirected_edges.append((i, j))
 
@@ -222,7 +188,7 @@ def orient_skeleton_mechanism_invariance(
             i,
             j,
             fed_spn_model,
-            X_splits,
+            X_aug_splits,
             method=orientation_method,
             data_aug=data_aug,
             c_idx=c_idx,
@@ -251,31 +217,20 @@ def compute_hybrid_orientation_score(
     i: int,
     j: int,
     fed_spn_model,
-    X_splits: List[np.ndarray],
+    X_aug_splits: List[np.ndarray],
     data_aug: np.ndarray,
     c_idx: int,
     alpha: float = 0.5,
 ) -> int:
     """
     Hybrid orientation combining mechanism invariance (SPN) and HSIC.
-
-    Args:
-        i, j: Variable indices
-        fed_spn_model: FedCDH_SPN_Wrapper
-        X_splits: List of client data matrices
-        data_aug: Full augmented data (with context)
-        c_idx: Index of context variable
-        alpha: Weight for SPN score (1-alpha for HSIC)
-
-    Returns:
-        1 if i → j, 2 if j → i
     """
     # 1. SPN-based mechanism invariance score
     var_i_to_j = compute_mechanism_variance(
-        fed_spn_model, X_splits, target_idx=j, parent_indices=[i]
+        fed_spn_model, X_aug_splits, target_idx=j, parent_indices=[i]
     )
     var_j_to_i = compute_mechanism_variance(
-        fed_spn_model, X_splits, target_idx=i, parent_indices=[j]
+        fed_spn_model, X_aug_splits, target_idx=i, parent_indices=[j]
     )
 
     # Normalize to [0, 1] range
