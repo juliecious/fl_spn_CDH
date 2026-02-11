@@ -129,10 +129,11 @@ class LocalSPNWrapper(nn.Module):
             return x[self.inv_variable_order]
         return x[:, self.inv_variable_order]
 
-    def train_local(self, data, weights=None, epochs=50, lr=0.005):
+    def train_local(self, data, weights=None, epochs=50, lr=0.005, l1_weight=1e-4):
         """
-        Train this specific leaf on its data slice.
+        Train this specific leaf on its data slice with L1 Sparsity Penalty.
         weights: Optional [N] array of sample weights (for EM).
+        l1_weight: Weight for the L1 sparsity penalty on sum weights.
         """
         if len(data) < 5:
             return 0.0
@@ -162,13 +163,23 @@ class LocalSPNWrapper(nn.Module):
             ll = self.model(data_t)
 
             if weights is not None:
-                loss = -(ll * weights_t.unsqueeze(1)).sum() / (weights_t.sum() + 1e-9)
+                nll_loss = -(ll * weights_t.unsqueeze(1)).sum() / (
+                    weights_t.sum() + 1e-9
+                )
             else:
-                loss = -ll.mean()
+                nll_loss = -ll.mean()
+
+            # L1 Sparsity Penalty on Sum Weights
+            l1_penalty = 0.0
+            for name, param in self.model.named_parameters():
+                if "sum" in name and "weight" in name:
+                    l1_penalty += torch.norm(param, p=1)
+
+            loss = nll_loss + l1_weight * l1_penalty
 
             loss.backward()
             optimizer.step()
-            final_ll = -loss.item()
+            final_ll = -nll_loss.item()
         return final_ll
 
     def sample(self, n):

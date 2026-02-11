@@ -35,17 +35,27 @@ class ExperimentArgs:
         self.__dict__.update(kwargs)
 
 
-def setup_batch_dir(config_name, base_dir="tests/experiments"):
-    """Creates a unique directory for the batch experiment and sets up logging."""
+def setup_descriptive_dir(
+    cfg, config_name, num_seeds, start_seed, base_dir="tests/experiments"
+):
+    """Creates a directory named according to the user's requested template."""
+    dataset = cfg.get("model_type", "unknown")
+    n = cfg.get("n", "?")
+    d = cfg.get("d", "?")
+    k = cfg.get("K", "?")
+
+    # Suffix: SeedsN if Monte Carlo, else SeedN
+    suffix = f"Seeds{num_seeds}" if num_seeds > 1 else f"Seed{start_seed}"
+
+    # Build folder name: dataset_NN_Dd_KK_suffix
     timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
-    exp_id = f"{config_name}_batch_{timestamp}"
-    exp_dir = os.path.join(base_dir, exp_id)
+    folder_name = f"{config_name}_{dataset}_N{n}_D{d}_K{k}_{suffix}_{timestamp}"
+
+    exp_dir = os.path.join(base_dir, folder_name)
     os.makedirs(exp_dir, exist_ok=True)
 
     # Setup Logging
     log_file = os.path.join(exp_dir, "batch.log")
-
-    # Clear any existing handlers
     root = logging.getLogger()
     if root.handlers:
         for handler in root.handlers:
@@ -56,7 +66,7 @@ def setup_batch_dir(config_name, base_dir="tests/experiments"):
         format="%(asctime)s [%(levelname)s] %(message)s",
         handlers=[logging.FileHandler(log_file), logging.StreamHandler(sys.stdout)],
     )
-    logging.info(f"Batch Experiment Directory Created: {exp_dir}")
+    logging.info(f"Descriptive Experiment Directory Created: {exp_dir}")
     return exp_dir
 
 
@@ -104,12 +114,12 @@ def run_single_experiment(config_name, seed, custom_args=None):
 
     # 1. Resolve Configuration
     if config_name == "smoke":
-        cfg_dict = SMOKE_CONFIG
+        cfg_dict = SMOKE_CONFIG.copy()
     elif config_name in PRODUCTION_CONFIGS:
-        cfg_dict = PRODUCTION_CONFIGS[config_name]
+        cfg_dict = PRODUCTION_CONFIGS[config_name].copy()
     else:
         if custom_args:
-            cfg_dict = vars(custom_args)
+            cfg_dict = vars(custom_args).copy()
         else:
             raise ValueError(f"Unknown config: {config_name}")
 
@@ -273,22 +283,77 @@ if __name__ == "__main__":
     args = parser.parse_args()
     config_name = args.config if args.config else "custom"
 
-    # 1. Setup Batch Directory
-    exp_dir = setup_batch_dir(config_name, args.base_dir)
+    # 1. Resolve Configuration parameters for naming
+    if config_name == "smoke":
+        cfg = SMOKE_CONFIG.copy()
+    elif config_name in PRODUCTION_CONFIGS:
+        cfg = PRODUCTION_CONFIGS[config_name].copy()
+    else:
+        cfg = {}
 
-    # 2. Filter overrides
+    # Apply overrides
+    for k in ["model_type", "n", "d", "K"]:
+        val = getattr(args, k, None)
+        if val is not None:
+            cfg[k] = val
+
+    # 2. Setup Batch Directory with descriptive name
+    exp_dir = setup_descriptive_dir(
+        cfg, config_name, args.num_seeds, args.seed, args.base_dir
+    )
+
+    # 3. Filter overrides for the execution engine
     overrides = {
         k: v
         for k, v in vars(args).items()
-        if v is not None and k not in ["config", "num_seeds", "base_dir"]
+        if v is not None and k not in ["config", "num_seeds", "base_dir", "seed"]
     }
     override_args = ExperimentArgs(**overrides) if overrides else None
 
-    # 3. Run Loop
+    # 4. Run Loop
     all_results = []
     seeds = list(range(args.seed, args.seed + args.num_seeds))
 
     logging.info(f"Starting Batch execution for {len(seeds)} seeds...")
+
+    for seed in seeds:
+        res = run_single_experiment(config_name, seed, override_args)
+        if res:
+            all_results.append(res)
+            logging.info(
+                f"Seed {seed} Complete: Skel F1={res.get('f1_skeleton'):.2f}, Dir F1={res.get('f1'):.2f}"
+            )
+        else:
+            logging.warning(f"Seed {seed} Failed.")
+
+    if not all_results:
+        logging.error("All seeds failed.")
+        sys.exit(1)
+
+    # 5. Aggregate & Save
+    df = pd.DataFrame(all_results)
+
+    # Save Raw
+    raw_path = os.path.join(exp_dir, "raw_metrics.csv")
+    df.to_csv(raw_path, index=False)
+
+    # Save Summary
+    numeric_cols = df.select_dtypes(include=[np.number]).columns
+    summary = df[numeric_cols].agg(["mean", "std"])
+    summary_path = os.path.join(exp_dir, "summary_metrics.csv")
+    summary.to_csv(summary_path)
+
+    logging.info("\n" + "=" * 50)
+    logging.info("BATCH SUMMARY")
+    logging.info("=" * 50)
+    logging.info(f"\n{summary.transpose()}")
+
+    # 6. Plot (Local)
+    plot_batch_results(df, exp_dir, config_name)
+
+    logging.info(
+        f"Experiment Batch Complete. Results in {exp_dir}"
+    )  # ... [rest of file] ...
 
     for seed in seeds:
         res = run_single_experiment(config_name, seed, override_args)

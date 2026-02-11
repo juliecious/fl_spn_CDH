@@ -11,7 +11,7 @@ class BenchmarkConfig:
 
 # Default Production Configurations (CPU-Optimized)
 PRODUCTION_CONFIGS = {
-    "kci_synthetic": {
+    "kci_oracle": {
         "ci_method": "kci",
         "scenario": "horizontal",
         "model_type": "sachs",
@@ -19,7 +19,7 @@ PRODUCTION_CONFIGS = {
         "d": 11,
         "K": 3,
     },
-    "voting_synthetic": {
+    "voting_baseline": {
         "ci_method": "voting_pc",
         "scenario": "horizontal",
         "model_type": "sachs",
@@ -27,7 +27,7 @@ PRODUCTION_CONFIGS = {
         "d": 11,
         "K": 3,
     },
-    "fedspn_horizontal_synthetic": {
+    "fedspn_horizontal": {
         "ci_method": "spn",
         "scenario": "horizontal",
         "model_type": "sachs",
@@ -36,7 +36,7 @@ PRODUCTION_CONFIGS = {
         "d": 11,
         "K": 3,
     },
-    "fedspn_vertical_synthetic": {
+    "fedspn_vertical": {
         "ci_method": "spn",
         "scenario": "vertical",
         "model_type": "sachs",
@@ -45,7 +45,7 @@ PRODUCTION_CONFIGS = {
         "d": 11,
         "K": 3,
     },
-    "fedspn_hybrid_synthetic": {
+    "fedspn_hybrid": {
         "ci_method": "spn",
         "scenario": "hybrid",
         "model_type": "sachs",

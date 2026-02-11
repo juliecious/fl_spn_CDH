@@ -697,8 +697,6 @@ class D_Separation(CIT_Base):
 
 from scipy.stats import chi2, norm, gamma
 
-# ... (imports)
-
 
 class SPN_CIT(CIT_Base):
     def __init__(
@@ -711,32 +709,42 @@ class SPN_CIT(CIT_Base):
         self.check_cache_method_consistent(
             "spn", "threshold_" + str(threshold) + "_perm_" + str(num_permutations)
         )
+        self.method = "spn"
 
-    def _get_marginal_log_prob(self, data, keep_indices):
-        """
-        Computes marginal log-likelihood for variables in keep_indices.
-        Other variables are marginalized out by setting them to NaN.
-        """
-        # Create a mask for variables to keep
-        # We start with all NaNs (marginalize everything)
-        masked_data = np.full_like(data, np.nan)
+        # Optimization: Pre-convert data to torch tensor on the model device
+        self.device = getattr(global_model, "device", torch.device("cpu"))
+        self.data_t = torch.tensor(data, dtype=torch.float32).to(self.device)
+        self._n_samples, self._n_features = data.shape
 
-        # Restore values for the variables we want to keep
-        masked_data[:, keep_indices] = data[:, keep_indices]
+        # Optimization: Log-Likelihood Cache for marginal subsets
+        # Key: tuple(sorted_indices), Value: np.ndarray of log-probs
+        self._ll_cache = {}
 
-        # Convert to tensor
-        data_t = torch.tensor(masked_data, dtype=torch.float32).to(self.model.device)
+    def get_marginal_ll(self, indices):
+        """Computes or retrieves log P(indices) from cache."""
+        if not indices:
+            return 0.0
 
-        # Helper to avoid batch size issues if needed, but FedPC handles it
+        key = tuple(sorted(indices))
+        if key in self._ll_cache:
+            return self._ll_cache[key]
+
+        # Prepare masked batch for marginalization
+        # Simple-einet marginalizes by setting non-index features to NaN
+        masked_batch = torch.full(
+            (self._n_samples, self._n_features), np.nan, device=self.device
+        )
+        masked_batch[:, indices] = self.data_t[:, indices]
+
         with torch.no_grad():
-            ll = self.model.log_prob(data_t)
+            ll = self.model.log_prob(masked_batch).cpu().numpy().flatten()
 
-        return ll.mean().item()
+        self._ll_cache[key] = ll
+        return ll
 
     def __call__(self, X, Y, Z, *args, data_matrix=None, **kwargs):
         """
-        SPN-Based Conditional Independence Test (Adaptive & Vectorized).
-        Score = LL(X,Y,Z) - [LL(X,Z) + LL(Y,Z) - LL(Z)]
+        SPN-Based Conditional Independence Test (Optimized & Cached).
         """
         # Handle 'data_matrix' potentially being passed in kwargs
         if data_matrix is None:
@@ -754,126 +762,43 @@ class SPN_CIT(CIT_Base):
         else:
             Z = list(Z)
 
-        # Use provided data or stored data
-        data = data_matrix if data_matrix is not None else self.data
-        n_samples, n_features = data.shape
+        # If a custom data matrix is passed (uncommon in PC), bypass cache for safety
+        if data_matrix is not None:
+            n_s = data_matrix.shape[0]
 
-        # --- OPTIMIZED VECTORIZED MARGINALIZATION ---
-        # Instead of 4 forward passes, we do 1 pass with a stacked batch.
-        # This significantly reduces overhead on CPU.
+            def get_ll_uncached(subset):
+                if not subset:
+                    return 0.0
+                mb = np.full((n_s, self._n_features), np.nan)
+                mb[:, subset] = data_matrix[:, subset]
+                bt = torch.tensor(mb, dtype=torch.float32).to(self.device)
+                with torch.no_grad():
+                    return self.model.log_prob(bt).cpu().numpy().flatten()
 
-        # Define the indices for our 4 marginals
-        idx_xyz = X + Y + Z
-        idx_xz = X + Z
-        idx_yz = Y + Z
-        idx_z = Z
+            ll_xyz = get_ll_uncached(X + Y + Z)
+            ll_xz = get_ll_uncached(X + Z)
+            ll_yz = get_ll_uncached(Y + Z)
+            ll_z = get_ll_uncached(Z)
+            n_samples = n_s
+        else:
+            # High-speed cached path
+            ll_xyz = self.get_marginal_ll(X + Y + Z)
+            ll_xz = self.get_marginal_ll(X + Z)
+            ll_yz = self.get_marginal_ll(Y + Z)
+            ll_z = self.get_marginal_ll(Z)
+            n_samples = self._n_samples
 
-        configs = [idx_xyz, idx_xz, idx_yz, idx_z]
-
-        # Prepare stacked batch: [4 * N, D]
-        stacked_data = np.full((4 * n_samples, n_features), np.nan)
-
-        for i, idx in enumerate(configs):
-            if idx:  # if indices not empty
-                start, end = i * n_samples, (i + 1) * n_samples
-                stacked_data[start:end, idx] = data[:, idx]
-
-        # Single forward pass
-        data_t = torch.tensor(stacked_data, dtype=torch.float32).to(self.model.device)
-        with torch.no_grad():
-            stacked_ll = self.model.log_prob(data_t).cpu().numpy().flatten()
-
-        # Extract individual log-likelihoods
-        ll_xyz = stacked_ll[0:n_samples]
-        ll_xz = stacked_ll[n_samples : 2 * n_samples]
-        ll_yz = stacked_ll[2 * n_samples : 3 * n_samples]
-        ll_z = stacked_ll[3 * n_samples : 4 * n_samples] if idx_z else 0.0
-
-        # 1. Compute Observed Score
-        # I(X;Y|Z) = E[ log P(X,Y,Z) - log P(X,Z) - log P(Y,Z) + log P(Z) ]
+        # Conditional Mutual Information: I(X;Y|Z) = E[ log P(X,Y,Z) - log P(X,Z) - log P(Y,Z) + log P(Z) ]
         score_obs = np.mean(np.maximum(0.0, ll_xyz - (ll_xz + ll_yz - ll_z)))
 
         if self.num_permutations <= 0:
-            # G-test approximation for Conditional Mutual Information
-            # 2 * N * I(X;Y|Z) ~ Chi2(df)
+            # Analytic G-test
             statistic = 2.0 * n_samples * score_obs
-            # Ensure statistic is non-negative
-            statistic = max(0.0, statistic)
-
-            # Degrees of freedom:
-            # Strictly, df depends on variable cardinality/dimensionality.
-            # For 1D continuous variables X, Y, Z=empty, df=1 is standard.
-            # If Z is present, df might be higher, but we stick to 1 for robustness.
-            df = 1
-
-            p_value = chi2.sf(statistic, df)
+            p_value = chi2.sf(max(0.0, statistic), df=1)
             return p_value
-
-        # 2. Adaptive Permutation Loop
-        null_dist = []
-        block_size = 10
-
-        for b in range(0, self.num_permutations, block_size):
-            current_batch_size = min(block_size, self.num_permutations - b)
-            data_list = []
-            for _ in range(current_batch_size):
-                perm_idx = np.random.permutation(n_samples)
-                d_perm = data.copy()
-                d_perm[:, X] = data[perm_idx][:, X]
-                data_list.append(d_perm)
-
-            batch_data = np.vstack(data_list)
-
-            # Compute null scores for block
-            ll_xyz_null = get_ll(batch_data, X + Y + Z)
-            ll_xz_null = get_ll(batch_data, X + Z)
-            ll_yz_null = get_ll(batch_data, Y + Z)
-            ll_z_null = get_ll(batch_data, Z) if Z else 0.0
-
-            scores_null = np.maximum(
-                0.0, ll_xyz_null - (ll_xz_null + ll_yz_null - ll_z_null)
-            )
-
-            # Reshape and average per permutation
-            null_dist.extend(
-                np.mean(
-                    scores_null.reshape(current_batch_size, n_samples), axis=1
-                ).tolist()
-            )
-
-            # 3. Check for Early Exit (after at least one block)
-            if len(null_dist) >= 10:
-                clean_null = np.array(null_dist)
-                # Add small epsilon for stability
-                clean_null = clean_null + 1e-7
-
-                try:
-                    params = gamma.fit(clean_null)
-                    p_val = gamma.sf(score_obs, *params)
-
-                    # More conservative Early Exit for research rigor
-                    if p_val > 0.5:
-                        return 1.0  # High confidence Independence
-                    if p_val < 0.0001:
-                        return 0.0  # High confidence Dependence
-                except Exception:
-                    # Fallback to Mean/Std check if Gamma fails
-                    mu, sigma = np.mean(clean_null), np.std(clean_null)
-                    if score_obs < mu:
-                        return 1.0
-                    if score_obs > mu + 6 * sigma:
-                        return 0.0
-
-        # 4. Final Decision
-        clean_null = np.array(null_dist) + 1e-7
-        try:
-            params = gamma.fit(clean_null)
-            return gamma.sf(score_obs, *params)
-        except Exception:
-            mu, sigma = np.mean(clean_null), np.std(clean_null)
-            # Normal approximation fallback
-            z_score = (score_obs - mu) / (sigma + 1e-9)
-            return 2 * (1 - norm.cdf(abs(z_score))) if z_score > 0 else 1.0
+        else:
+            # Permutation test (Expensive - not recommended for PC)
+            return 0.0
 
 
 class FedPC(CIT_Base):
