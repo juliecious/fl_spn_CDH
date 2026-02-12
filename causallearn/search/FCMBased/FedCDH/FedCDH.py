@@ -216,7 +216,10 @@ class FedCDH:
 
     def fit(self, X_splits, c_indx, true_DAG_bin):
         # Get training epochs and alpha from args
-        train_epochs = self.args.epochs if hasattr(self.args, "epochs") else 10
+        if hasattr(self.args, "epochs"):
+            train_epochs = self.args.epochs
+        else:
+            train_epochs = 50 if self.device.type in ["cuda", "gpu"] else 10
         alpha = self.args.alpha if hasattr(self.args, "alpha") else 0.05
 
         # Reconstruct Global for KCI/Oracle baselines
@@ -265,7 +268,7 @@ class FedCDH:
             best_h = 2
             min_bic = float("inf")
             best_model = None
-            for h_candidate in range(2, 4):
+            for h_candidate in range(2, 6):
                 fed_km = SimulatedFederatedKMeans(
                     n_clusters=h_candidate, max_iter=10, seed=42
                 )
@@ -289,7 +292,10 @@ class FedCDH:
             clients_clusters = [[] for _ in range(num_clusters)]
             clients_counts = [[] for _ in range(num_clusters)]
             # Get training epochs and alpha from args
-            train_epochs = self.args.epochs if hasattr(self.args, "epochs") else 10
+            if hasattr(self.args, "epochs"):
+                train_epochs = self.args.epochs
+            else:
+                train_epochs = 50 if self.device.type in ["cuda", "gpu"] else 10
             alpha = self.args.alpha if hasattr(self.args, "alpha") else 0.05
             num_sums = getattr(self.args, "num_sums", 5)
             num_leaves = getattr(self.args, "num_leaves", 5)

@@ -11,6 +11,7 @@ from simple_einet.layers.distributions.normal import Normal
 
 from scipy.cluster.hierarchy import linkage, leaves_list
 from scipy.spatial.distance import squareform
+from scipy.stats import spearmanr
 
 
 class FederatedStructureLearner:
@@ -26,8 +27,13 @@ class FederatedStructureLearner:
 
     def add_local_metadata(self, data: np.ndarray):
         """Clients call this to share their local correlation matrix."""
-        # Use absolute correlation as proxy for dependence magnitude
-        corr = np.abs(np.corrcoef(data, rowvar=False))
+        # Use Spearman Rank Correlation to capture non-linear (monotonic) dependencies
+        # This is more robust for SPN structure learning than Pearson correlation
+        corr, _ = spearmanr(data, axis=0)
+
+        # Take absolute value as we only care about dependency strength
+        corr = np.abs(corr)
+
         # Handle NaNs (e.g. constant features)
         corr = np.nan_to_num(corr, nan=0.0)
         self.local_correlations.append(corr)

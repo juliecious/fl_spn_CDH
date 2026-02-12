@@ -88,7 +88,7 @@ def test_fedFCI(i, args):
     # We pass data_matrix because SPN_CIT wrapper expects it for dimensionality checks,
     # though it queries the model.
     oracle = SPN_CIT(
-        X_global, global_model=global_spn, threshold=0.01, num_permutations=50
+        X_global, global_model=global_spn, threshold=0.01, num_permutations=100
     )
 
     # Run FCI

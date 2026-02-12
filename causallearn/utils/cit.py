@@ -720,36 +720,95 @@ class SPN_CIT(CIT_Base):
         # Key: tuple(sorted_indices), Value: np.ndarray of log-probs
         self._ll_cache = {}
 
-    def get_marginal_ll(self, indices):
-        """Computes or retrieves log P(indices) from cache."""
+    def get_marginal_ll(self, indices, perm_indices=None, perm_target_vars=None):
+        """
+        Computes log P(indices) from cache or model.
+        If perm_indices and perm_target_vars are provided, it permutes the columns
+        specified in perm_target_vars using perm_indices.
+        """
+        # Note: We skip caching if permutation is active to avoid cache pollution/complexity
         if not indices:
             return 0.0
 
         key = tuple(sorted(indices))
-        if key in self._ll_cache:
+        if perm_indices is None and key in self._ll_cache:
             return self._ll_cache[key]
 
-        # Prepare masked batch for marginalization
-        # Simple-einet marginalizes by setting non-index features to NaN
+        # Prepare masked batch
         masked_batch = torch.full(
             (self._n_samples, self._n_features), np.nan, device=self.device
         )
-        masked_batch[:, indices] = self.data_t[:, indices]
+
+        # Fill data
+        # If permutation is requested for specific variables (X), shuffle them
+        if perm_indices is not None and perm_target_vars is not None:
+            # 1. Fill non-permuted variables normally
+            normal_vars = list(set(indices) - set(perm_target_vars))
+            if normal_vars:
+                masked_batch[:, normal_vars] = self.data_t[:, normal_vars]
+
+            # 2. Fill permuted variables using the permutation indices
+            perm_vars = list(set(indices).intersection(set(perm_target_vars)))
+            if perm_vars:
+                # Get the original data for these vars
+                original_data = self.data_t[:, perm_vars]
+                # Shuffle rows according to perm_indices
+                shuffled_data = original_data[perm_indices]
+                masked_batch[:, perm_vars] = shuffled_data
+        else:
+            # Standard case
+            masked_batch[:, indices] = self.data_t[:, indices]
 
         with torch.no_grad():
             ll = self.model.log_prob(masked_batch).cpu().numpy().flatten()
 
-        self._ll_cache[key] = ll
+        if perm_indices is None:
+            self._ll_cache[key] = ll
+
         return ll
+
+    def get_conditional_permutation_indices(self, Z_indices):
+        """
+        Generates permutation indices that respect the local structure of Z.
+        Uses a simple binning or nearest neighbor strategy.
+        For efficiency, we use a coarse binning strategy here.
+        """
+        n = self._n_samples
+        if not Z_indices:
+            return torch.randperm(n, device=self.device)
+
+        # Get Z data (CPU for sorting)
+        Z_data = self.data_t[:, Z_indices].cpu().numpy()
+
+        # Simple approach: Sort by Z[0] (dominant feature) and permute within local blocks
+        # For rigorous CIT, one should use K-Nearest Neighbors, but that's slow.
+        # "Local Permutation" via sorting:
+        # 1. Sort indices by Z
+        # 2. Split into small buckets (size ~10-20)
+        # 3. Shuffle within buckets
+
+        # Sort by the first dimension of Z for simplicity (extensible to KD-Tree)
+        sort_idx = np.argsort(Z_data[:, 0])
+        inverse_idx = np.argsort(sort_idx)
+
+        bucket_size = 20
+        perm_sort_idx = sort_idx.copy()
+
+        for i in range(0, n, bucket_size):
+            end = min(i + bucket_size, n)
+            # Shuffle this bucket
+            bucket_indices = perm_sort_idx[i:end]
+            np.random.shuffle(bucket_indices)
+            perm_sort_idx[i:end] = bucket_indices
+
+        final_perm = torch.from_numpy(perm_sort_idx[inverse_idx]).to(self.device)
+        return final_perm
 
     def __call__(self, X, Y, Z, *args, data_matrix=None, **kwargs):
         """
-        SPN-Based Conditional Independence Test (Optimized & Cached).
+        SPN-Based Conditional Independence Test with Permutation.
+        H0: X _|_ Y | Z
         """
-        # Handle 'data_matrix' potentially being passed in kwargs
-        if data_matrix is None:
-            data_matrix = kwargs.get("data_matrix", None)
-
         # Format indices
         if isinstance(X, (int, np.integer)):
             X = [int(X)]
@@ -762,43 +821,60 @@ class SPN_CIT(CIT_Base):
         else:
             Z = list(Z)
 
-        # If a custom data matrix is passed (uncommon in PC), bypass cache for safety
-        if data_matrix is not None:
-            n_s = data_matrix.shape[0]
+        # 1. Calculate Observed Statistic (CMI)
+        # I(X;Y|Z) approx. LL(X,Y,Z) - (LL(X,Z) + LL(Y,Z) - LL(Z))
+        ll_xyz = self.get_marginal_ll(X + Y + Z)
+        ll_xz = self.get_marginal_ll(X + Z)
+        ll_yz = self.get_marginal_ll(Y + Z)
+        ll_z = self.get_marginal_ll(Z)
 
-            def get_ll_uncached(subset):
-                if not subset:
-                    return 0.0
-                mb = np.full((n_s, self._n_features), np.nan)
-                mb[:, subset] = data_matrix[:, subset]
-                bt = torch.tensor(mb, dtype=torch.float32).to(self.device)
-                with torch.no_grad():
-                    return self.model.log_prob(bt).cpu().numpy().flatten()
-
-            ll_xyz = get_ll_uncached(X + Y + Z)
-            ll_xz = get_ll_uncached(X + Z)
-            ll_yz = get_ll_uncached(Y + Z)
-            ll_z = get_ll_uncached(Z)
-            n_samples = n_s
-        else:
-            # High-speed cached path
-            ll_xyz = self.get_marginal_ll(X + Y + Z)
-            ll_xz = self.get_marginal_ll(X + Z)
-            ll_yz = self.get_marginal_ll(Y + Z)
-            ll_z = self.get_marginal_ll(Z)
-            n_samples = self._n_samples
-
-        # Conditional Mutual Information: I(X;Y|Z) = E[ log P(X,Y,Z) - log P(X,Z) - log P(Y,Z) + log P(Z) ]
+        # CMI estimate (G-score proxy)
         score_obs = np.mean(np.maximum(0.0, ll_xyz - (ll_xz + ll_yz - ll_z)))
+        stat_obs = 2.0 * self._n_samples * score_obs
 
-        if self.num_permutations <= 0:
-            # Analytic G-test
-            statistic = 2.0 * n_samples * score_obs
-            p_value = chi2.sf(max(0.0, statistic), df=1)
+        # 2. Permutation Test (Correct way to calculate p-value for SPN)
+        if self.num_permutations > 0:
+            null_stats = []
+            for _ in range(self.num_permutations):
+                # Use Conditional Permutation if Z is present
+                if len(Z) > 0:
+                    perm_indices = self.get_conditional_permutation_indices(Z)
+                else:
+                    perm_indices = torch.randperm(self._n_samples, device=self.device)
+
+                # Recompute joint LL(X*, Y, Z) where X is permuted (broken dependency with Y and Z)
+                # Note: This is a "Marginal Permutation" approximation.
+                # For strict Conditional Permutation, one should permute within Z-bins,
+                # but Marginal Permutation is the standard baseline in KCI/RCIT implementations.
+
+                # We only need to recompute terms involving X, as terms involving only Y, Z stay same
+                # But for simplicity in the formula, we recompute LL_XYZ_null and LL_XZ_null
+
+                ll_xyz_null = self.get_marginal_ll(
+                    X + Y + Z, perm_indices, perm_target_vars=X
+                )
+                ll_xz_null = self.get_marginal_ll(
+                    X + Z, perm_indices, perm_target_vars=X
+                )
+                # ll_yz and ll_z remain unchanged as they don't involve X
+
+                score_null = np.mean(
+                    np.maximum(0.0, ll_xyz_null - (ll_xz_null + ll_yz - ll_z))
+                )
+                null_stats.append(2.0 * self._n_samples * score_null)
+
+            # P-value = (Count(Null >= Obs) + 1) / (Permutations + 1)
+            null_stats = np.array(null_stats)
+            p_value = (np.sum(null_stats >= stat_obs) + 1.0) / (
+                self.num_permutations + 1.0
+            )
             return p_value
+
         else:
-            # Permutation test (Expensive - not recommended for PC)
-            return 0.0
+            # Fallback to analytic Chi2 (Only if user explicitly sets perms=0)
+            # Warning: df=1 is often incorrect for continuous/mixed SPNs
+            p_value = chi2.sf(max(0.0, stat_obs), df=1)
+            return p_value
 
 
 class FedPC(CIT_Base):
