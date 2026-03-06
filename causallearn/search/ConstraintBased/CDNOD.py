@@ -244,10 +244,21 @@ def cdnod_alg(
         indep_test_all = CIT(data_aug, indep_test, **kwargs)
 
     s_a, d = data_aug.shape
-    fed_data = data_aug.reshape(K, int(s_a / K), d)
     cg_list = []
     for i in range(K):
-        fed_dt = fed_data[i]
+        # Use the domain index to extract samples for each client/domain
+        # This handles unequal sample sizes across domains
+        mask = c_indx.flatten() == i
+        if np.any(mask):
+            fed_dt = data_aug[mask]
+        else:
+            # Fallback for cases where K does not match c_indx values
+            # or data is already perfectly partitioned
+            try:
+                fed_dt = data_aug.reshape(K, int(s_a / K), d)[i]
+            except ValueError:
+                fed_dt = data_aug  # Last resort fallback
+
         fed_cg = CausalGraph(no_of_var=data_aug.shape[1], node_names=None)
         if fed_spn_model is not None:
             fed_indep_test = indep_test_all

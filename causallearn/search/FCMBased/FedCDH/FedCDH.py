@@ -238,15 +238,17 @@ class FedCDH:
 
         if self.ci_method == "spn":
             start_train = time.time()
-            if self.model_type == "sachs_real":
+            if self.scenario == "horizontal":
                 feature_maps = {
                     k: list(range(d_aug_total)) for k in range(self.K_clients)
                 }
-            elif self.scenario == "horizontal":
-                feature_maps = {
-                    k: list(range(d_aug_total)) for k in range(self.K_clients)
-                }
-                X_splits = np.array_split(X_aug_global, self.K_clients)
+                # Keep existing splits (e.g. from sachs_real) but ensure they include the context column U
+                new_splits = []
+                _curr = 0
+                for xk in X_splits:
+                    new_splits.append(X_aug_global[_curr : _curr + len(xk)])
+                    _curr += len(xk)
+                X_splits = new_splits
             elif self.scenario == "vertical":
                 cols_per_client = np.array_split(range(self.d_features), self.K_clients)
                 feature_maps = {}
