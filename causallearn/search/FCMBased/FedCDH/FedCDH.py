@@ -224,7 +224,12 @@ class FedCDH:
 
         # Reconstruct Global for KCI/Oracle baselines
         if isinstance(X_splits, list):
-            X_global = np.concatenate(X_splits, axis=0)
+            # Vertical: concatenate features (axis=1)
+            # Horizontal/Hybrid: concatenate samples (axis=0)
+            if self.scenario == "vertical":
+                X_global = np.concatenate(X_splits, axis=1)
+            else:
+                X_global = np.concatenate(X_splits, axis=0)
         else:
             X_global = X_splits
         total_samples = X_global.shape[0]
