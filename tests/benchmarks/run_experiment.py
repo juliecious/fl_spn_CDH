@@ -27,7 +27,7 @@ from tests.utils.benchmark_loaders import (
     simulate_heterogeneous_data,
 )
 from tests.utils.sachs_loader import load_sachs_federated
-from tests.benchmarks.configs import PRODUCTION_CONFIGS, SMOKE_CONFIG
+from tests.benchmarks.configs import PRODUCTION_CONFIGS, SMOKE_CONFIG, BENCHMARK_SUITES
 
 
 class ExperimentArgs:
@@ -76,7 +76,7 @@ def load_data(args):
 
     if args.model_type == "sachs_real":
         X_splits, true_DAG_bin, c_indx = load_sachs_federated(
-            args.K, n_samples_limit=None
+            args.K, n_samples_limit=args.n
         )
         if not isinstance(X_splits, list):
             X_splits = np.array_split(X_splits, args.K)
@@ -117,6 +117,8 @@ def run_single_experiment(config_name, seed, custom_args=None):
         cfg_dict = SMOKE_CONFIG.copy()
     elif config_name in PRODUCTION_CONFIGS:
         cfg_dict = PRODUCTION_CONFIGS[config_name].copy()
+    elif config_name == "custom":
+        cfg_dict = {}  # Start with empty, will be filled by custom_args
     else:
         if custom_args:
             cfg_dict = vars(custom_args).copy()
@@ -137,6 +139,15 @@ def run_single_experiment(config_name, seed, custom_args=None):
 
     # 2. Load Data
     X_splits, c_indx, true_DAG_bin = load_data(args)
+
+    # Update args with actual dimensions if they were unknown
+    if not hasattr(args, "d") or args.d is None:
+        args.d = true_DAG_bin.shape[0]
+    if not hasattr(args, "n") or args.n is None:
+        if isinstance(X_splits, list):
+            args.n = len(X_splits[0])
+        else:
+            args.n = X_splits.shape[0] // args.K
 
     # 3. Run Pipeline
     runner = FedCDH(args)
@@ -185,19 +196,25 @@ def plot_batch_results(df, output_dir, config_name):
         if not valid:
             return
         plot_df = df.melt(
-            id_vars=["config"], value_vars=valid, var_name="Metric", value_name="Score"
+            id_vars=[
+                "config" if "suite_component" not in df.columns else "suite_component"
+            ],
+            value_vars=valid,
+            var_name="Metric",
+            value_name="Score",
         )
+        x_var = "Metric"
+        hue_var = "config" if "suite_component" not in df.columns else "suite_component"
 
         sns.barplot(
             data=plot_df,
-            x="Metric",
+            x=x_var,
             y="Score",
-            hue="Metric",
+            hue=hue_var,
             errorbar="sd",
             capsize=0.1,
             ax=ax,
             palette="muted",
-            legend=False,
         )
         ax.set_title(title, fontsize=14, fontweight="bold")
         ax.set_ylabel(ylabel)
@@ -283,6 +300,59 @@ if __name__ == "__main__":
     args = parser.parse_args()
     config_name = args.config if args.config else "custom"
 
+    # --- Suite Handling ---
+    if config_name in BENCHMARK_SUITES:
+        suite_configs = BENCHMARK_SUITES[config_name]
+        timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
+        suite_dir = os.path.join(args.base_dir, config_name, f"Suite_{timestamp}")
+        os.makedirs(suite_dir, exist_ok=True)
+
+        # Setup Suite Logging
+        log_file = os.path.join(suite_dir, "suite.log")
+        logging.basicConfig(
+            level=logging.INFO,
+            format="%(asctime)s [%(levelname)s] %(message)s",
+            handlers=[logging.FileHandler(log_file), logging.StreamHandler(sys.stdout)],
+            force=True,
+        )
+        logging.info(f"Starting Benchmark Suite: {config_name}")
+
+        suite_results = []
+        for cfg_item in suite_configs:
+            logging.info(f"\n>>> Running Component: {cfg_item}")
+            # Run the component using the existing loop logic
+            component_seeds = list(range(args.seed, args.seed + args.num_seeds))
+            for s in component_seeds:
+                res = run_single_experiment(cfg_item, s, args)
+                if res:
+                    res["suite_component"] = cfg_item
+                    suite_results.append(res)
+
+        if not suite_results:
+            logging.error("Suite failed to produce any results.")
+            sys.exit(1)
+
+        # Aggregate Suite Results
+        suite_df = pd.DataFrame(suite_results)
+        suite_df.to_csv(os.path.join(suite_dir, "raw_metrics.csv"), index=False)
+
+        # Final Summary (Mean/Std per component)
+        numeric_suite_df = suite_df.select_dtypes(include=[np.number]).copy()
+        numeric_suite_df["suite_component"] = suite_df["suite_component"]
+        summary = numeric_suite_df.groupby("suite_component").agg(["mean", "std"])
+        summary.to_csv(os.path.join(suite_dir, "final_summary.csv"))
+
+        logging.info("\n" + "=" * 50)
+        logging.info("FINAL SUITE SUMMARY")
+        logging.info("=" * 50)
+        logging.info(f"\n{summary}")
+
+        # Plot Suite Results
+        plot_batch_results(suite_df, suite_dir, config_name)
+        logging.info(f"Suite Complete. Results in: {suite_dir}")
+        sys.exit(0)
+
+    # --- Single Config Handling (Original Logic) ---
     # 1. Resolve Configuration parameters for naming
     if config_name == "smoke":
         cfg = SMOKE_CONFIG.copy()
