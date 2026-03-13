@@ -202,8 +202,13 @@ class QueryCounterCIT:
 class FedCDH:
     def __init__(self, args: Dict[str, Any]):
         self.args = args
-        # Reverting to CPU: MPS fails on 5D tensor reductions in simple-einet
-        self.device = torch.device("cpu")
+
+        # Device selection: CUDA > CPU (skip MPS due to simple-einet incompatibility)
+        if torch.cuda.is_available():
+            self.device = torch.device("cuda")
+        else:
+            self.device = torch.device("cpu")
+            # Note: MPS (Apple Silicon) disabled - simple-einet has issues with 5D tensor reductions
 
         logging.info(f"FedCDH Initialized on device: {self.device}")
         self.K_clients = args.K

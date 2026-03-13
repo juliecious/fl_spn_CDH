@@ -8,7 +8,7 @@ PRODUCTION_CONFIGS = {
         "ci_method": "fisherz",
         "scenario": "horizontal",
         "model_type": "sachs",
-        "n": 500,
+        "n": None,  # Use full Sachs dataset (856 rows)
         "d": 11,
         "K": 3,
         "alpha": 0.05,
@@ -17,7 +17,7 @@ PRODUCTION_CONFIGS = {
         "ci_method": "kci",
         "scenario": "horizontal",
         "model_type": "sachs",
-        "n": 500,
+        "n": None,  # Use full Sachs dataset (856 rows)
         "d": 11,
         "K": 3,
         "alpha": 0.05,
@@ -27,7 +27,7 @@ PRODUCTION_CONFIGS = {
         "scenario": "horizontal",
         "model_type": "sachs",
         "ablation_orientation": "mi_hybrid",
-        "n": 500,
+        "n": None,  # Use full Sachs dataset (856 rows)
         "d": 11,
         "K": 3,
         "epochs": 50,
@@ -40,7 +40,7 @@ PRODUCTION_CONFIGS = {
         "scenario": "vertical",
         "model_type": "sachs",
         "ablation_orientation": "mi_hybrid",
-        "n": 500,
+        "n": None,  # Use full Sachs dataset (856 rows)
         "d": 11,
         "K": 3,
         "epochs": 50,
@@ -53,7 +53,7 @@ PRODUCTION_CONFIGS = {
         "scenario": "hybrid",
         "model_type": "sachs",
         "ablation_orientation": "mi_hybrid",
-        "n": 1000,
+        "n": None,  # Use full Sachs dataset (856 rows) - FIXED from 1000
         "d": 11,
         "K": 3,
         "epochs": 50,
