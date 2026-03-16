@@ -277,6 +277,32 @@ class FedCDH:
                 # Always use X_aug_global to ensure context U is included in training data
                 X_splits = np.array_split(X_aug_global, self.K_clients)
 
+            # Data partition validation
+            logging.info(f"Data partition check: scenario={self.scenario}")
+            total_samples_split = 0
+            for k, xk in enumerate(X_splits):
+                logging.info(f"  Client {k}: shape={xk.shape}")
+                if self.scenario == "vertical":
+                    # Vertical: all clients must have same number of samples
+                    assert xk.shape[0] == X_aug_global.shape[0], (
+                        f"Vertical scenario: Client {k} has {xk.shape[0]} samples, "
+                        f"expected {X_aug_global.shape[0]} (all clients must see all samples)"
+                    )
+                else:
+                    # Horizontal/Hybrid: samples are partitioned
+                    total_samples_split += xk.shape[0]
+
+            # Verify total samples match for horizontal/hybrid
+            if self.scenario in ["horizontal", "hybrid"]:
+                assert total_samples_split == X_aug_global.shape[0], (
+                    f"{self.scenario.capitalize()} scenario: Total samples across clients "
+                    f"({total_samples_split}) != global samples ({X_aug_global.shape[0]})"
+                )
+
+            logging.info(
+                f"✓ Data partition validation passed for {self.scenario} scenario"
+            )
+
             best_h = 2
             min_bic = float("inf")
             best_model = None

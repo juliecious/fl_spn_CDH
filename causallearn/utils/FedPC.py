@@ -82,6 +82,7 @@ class LocalSPNWrapper(nn.Module):
         self.device = device
         self.mean = None
         self.std = None
+        self.seed = seed
 
         # Dependency-Aware Ordering
         if variable_order is not None:
@@ -163,8 +164,14 @@ class LocalSPNWrapper(nn.Module):
         self.model.train()
         optimizer = torch.optim.Adam(self.model.parameters(), lr=lr)
 
+        # Extract cluster and client indices from seed (seed = h * 10 + k)
+        cluster_id = self.seed // 10 if self.seed is not None else -1
+        client_id = self.seed % 10 if self.seed is not None else -1
+
         final_ll = 0.0
-        for _ in range(epochs):
+        loss_history = []
+
+        for epoch in range(epochs):
             optimizer.zero_grad()
             ll = self.model(data_t)
 
@@ -186,6 +193,32 @@ class LocalSPNWrapper(nn.Module):
             loss.backward()
             optimizer.step()
             final_ll = -nll_loss.item()
+            loss_history.append(loss.item())
+
+            # Log every 10 epochs
+            if (epoch + 1) % 10 == 0:
+                logging.debug(
+                    f"Cluster {cluster_id}, Client {client_id}, Epoch {epoch + 1}/{epochs}: "
+                    f"Loss={loss.item():.4f}"
+                )
+
+        # Log final training loss
+        logging.info(
+            f"Cluster {cluster_id}, Client {client_id}: Final Loss={loss_history[-1]:.4f} "
+            f"after {epochs} epochs"
+        )
+
+        # Check if loss decreased in last 20 epochs
+        if len(loss_history) >= 20:
+            last_20_losses = loss_history[-20:]
+            if (
+                min(last_20_losses) >= loss_history[-20]
+            ):  # No improvement in last 20 epochs
+                logging.warning(
+                    f"Cluster {cluster_id}, Client {client_id}: Loss did not decrease "
+                    f"in last 20 epochs (started at {loss_history[-20]:.4f}, ended at {loss_history[-1]:.4f})"
+                )
+
         return final_ll
 
     def sample(self, n):
@@ -226,6 +259,7 @@ class UnivariateSPNWrapper(nn.Module):
         super().__init__()
         self.device = device
         self.K = num_leaves  # Number of components
+        self.seed = seed
 
         if seed is not None:
             torch.manual_seed(seed)
@@ -266,8 +300,14 @@ class UnivariateSPNWrapper(nn.Module):
         optimizer = torch.optim.Adam(self.parameters(), lr=lr)
         self.train()
 
+        # Extract cluster and client indices from seed (seed = h * 10 + k)
+        cluster_id = self.seed // 10 if self.seed is not None else -1
+        client_id = self.seed % 10 if self.seed is not None else -1
+
         final_ll = 0.0
-        for _ in range(epochs):
+        loss_history = []
+
+        for epoch in range(epochs):
             optimizer.zero_grad()
 
             # log P(x|k)
@@ -299,6 +339,32 @@ class UnivariateSPNWrapper(nn.Module):
             loss.backward()
             optimizer.step()
             final_ll = -loss.item()
+            loss_history.append(loss.item())
+
+            # Log every 10 epochs
+            if (epoch + 1) % 10 == 0:
+                logging.debug(
+                    f"Cluster {cluster_id}, Client {client_id}, Epoch {epoch + 1}/{epochs}: "
+                    f"Loss={loss.item():.4f} (Univariate GMM)"
+                )
+
+        # Log final training loss
+        logging.info(
+            f"Cluster {cluster_id}, Client {client_id}: Final Loss={loss_history[-1]:.4f} "
+            f"after {epochs} epochs (Univariate GMM)"
+        )
+
+        # Check if loss decreased in last 20 epochs
+        if len(loss_history) >= 20:
+            last_20_losses = loss_history[-20:]
+            if (
+                min(last_20_losses) >= loss_history[-20]
+            ):  # No improvement in last 20 epochs
+                logging.warning(
+                    f"Cluster {cluster_id}, Client {client_id}: Loss did not decrease "
+                    f"in last 20 epochs (started at {loss_history[-20]:.4f}, ended at {loss_history[-1]:.4f}) "
+                    f"(Univariate GMM)"
+                )
 
         return final_ll
 

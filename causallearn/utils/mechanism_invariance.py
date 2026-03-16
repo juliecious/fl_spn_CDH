@@ -130,6 +130,42 @@ def orient_edge_mechanism_invariance(
 ) -> int:
     """
     Orient edge i -- j using mechanism invariance principle.
+
+    Theoretical Foundation:
+        Based on Invariant Causal Prediction (Peters et al., 2016). For the correct
+        causal direction X → Y, the conditional mechanism P(Y|X) should remain invariant
+        across heterogeneous environments, while P(X|Y) may vary.
+
+    Key Assumptions:
+        1. Structural Causal Model: Y = f(X, ε_Y) where ε_Y ⊥ X (noise is independent)
+        2. Invariance Principle: P(ε_Y|U=k) invariant across domains k ⟺ X → Y is correct
+        3. Sufficient Heterogeneity: Domains exhibit enough distributional shift to detect
+           mechanism variance differences between causal directions
+
+    Failure Modes:
+        - Weak instruments: Low signal-to-noise ratio makes variance differences undetectable
+        - Context-dependent confounders: Hidden variables H that affect both X and Y differently
+          across domains, violating the independence assumption
+        - Adaptive mechanisms: When causal mechanisms themselves change across domains
+          (non-stationary environments), violating the invariance principle
+
+    Args:
+        i: Index of first variable
+        j: Index of second variable
+        fed_spn_model: Trained federated SPN model for density estimation
+        X_aug_splits: List of domain-specific data splits [X, U]
+        method: 'mi_only' (variance-based) or 'mi_hybrid' (variance + HSIC)
+        data_aug: Global augmented data [X, U] (required for mi_hybrid)
+        c_idx: Context variable index in data (default: -1)
+
+    Returns:
+        int: 1 if i → j is more invariant, 2 if j → i is more invariant
+
+    References:
+        - Peters, J., Bühlmann, P., & Meinshausen, N. (2016). Causal inference using
+          invariant prediction: identification and confidence intervals. JRSS-B.
+        - Arjovsky, M., et al. (2019). Invariant Risk Minimization. arXiv:1907.02893.
+        - Li, B., et al. (2024). Federated Causal Discovery from Heterogeneous Data. ICLR.
     """
     if method == "mi_hybrid":
         if data_aug is None:
