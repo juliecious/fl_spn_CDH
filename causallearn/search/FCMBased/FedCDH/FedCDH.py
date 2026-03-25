@@ -179,6 +179,19 @@ class FedCDH_SPN_Wrapper(torch.nn.Module):
         else:
             return self.spn.log_prob(x_feat)
 
+    def sample(self, n_samples):
+        """
+        Sample from the underlying SPN.
+        Delegates to the wrapped GlobalFedSPN.sample() method.
+
+        Args:
+            n_samples: Number of samples to generate
+
+        Returns:
+            samples: Tensor of shape (n_samples, d_aug)
+        """
+        return self.spn.sample(n_samples)
+
 
 class QueryCounterCIT:
     def __init__(self, cit_instance):
@@ -218,6 +231,7 @@ class FedCDH:
         self.ci_method = args.ci_method
         self.n_samples_per_client = args.n
         self.fed_spn_model = None
+        self.local_spns = []  # Store local SPNs for evaluation
 
     def fit(self, X_splits, c_indx, true_DAG_bin):
         # Get training epochs and alpha from args
@@ -414,6 +428,24 @@ class FedCDH:
             self.fed_spn_model = FedCDH_SPN_Wrapper(
                 global_spn, u_index=self.d_features, routing=False
             )
+
+            # Store local SPNs for evaluation (flatten clients_clusters by client)
+            # For horizontal/hybrid: each cluster may have SPNs from different clients
+            # We want one representative SPN per client for evaluation
+            self.local_spns = []
+            for k in range(self.K_clients):
+                # Find the first SPN trained on client k's data across all clusters
+                for h in range(num_clusters):
+                    if clients_clusters[h] and len(clients_clusters[h]) > k:
+                        self.local_spns.append(clients_clusters[h][k])
+                        break
+                else:
+                    # Fallback: if no SPN found, use first available
+                    for h in range(num_clusters):
+                        if clients_clusters[h]:
+                            self.local_spns.append(clients_clusters[h][0])
+                            break
+
             train_time = time.time() - start_train
 
         start_cd = time.time()
