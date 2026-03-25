@@ -464,7 +464,7 @@ class FedCDH:
         else:
             if self.ci_method == "spn":
                 cit_obj = SPN_CIT(
-                    X_aug_global, global_model=self.fed_spn_model, num_permutations=0
+                    X_aug_global, global_model=self.fed_spn_model, num_permutations=50
                 )
             elif self.ci_method == "kci":
                 cit_obj = CIT(X_aug_global, "kci")

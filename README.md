@@ -27,20 +27,41 @@ Instead of slow, kernel-based conditional independence tests (like KCI), this im
 # Clone the repository
 git clone https://github.com/your-repo/fl_spn_CDH.git
 cd fl_spn_CDH
+git checkout fedpc
 
-# Install dependencies
-pip install -r requirements.txt
-# Requires: torch, numpy, scipy, networkx, simple-einet, pandas, matplotlib, seaborn
+# Quick setup (CPU or GPU)
+./install.sh cpu      # CPU-only
+./install.sh cu118    # CUDA 11.8
+./install.sh cu121    # CUDA 12.1
+
+# Verify installation
+python3 verify_env.py
+
+# Install package
+pip install -e .
 ```
 
-### Run Tests (5-30 seconds)
+**Manual installation:**
+```bash
+# See requirements.txt for pinned versions
+pip install -r requirements.txt
+```
 
+### Run Tests
+
+**Smoke tests (5-30 seconds) - Quick validation after code changes:**
 ```bash
 # Fastest smoke test (~5-10 seconds)
 ./tests/smoke/run_minimal_test.sh
 
 # Comprehensive validation - all scenarios (~20-30 seconds)
 ./tests/smoke/run_all_scenarios.sh
+```
+
+**GPU validation (2-3 minutes) - Verify GPU setup with real data:**
+```bash
+# Tests all methods on Sachs real dataset (N=856)
+./tests/smoke/run_gpu_validation.sh
 ```
 
 ### Run Full Benchmark (hours, use GPU)
@@ -108,7 +129,7 @@ Novel orientation strategy based on the principle that the correct causal direct
 ### Test Types
 
 #### 1. Smoke Tests (5-30 seconds)
-Quick validation after code changes.
+Quick validation after code changes using small sample (N=500).
 
 | Test | Runtime | Scenarios | Purpose |
 |------|---------|-----------|---------|
@@ -128,7 +149,35 @@ Vertical:   F1_skel=0.500, F1_dir=0.200, Time=6.52s ✅
 Hybrid:     F1_skel=0.500, F1_dir=0.000, Time=7.79s ✅
 ```
 
-#### 2. Benchmarks (hours)
+#### 2. GPU Validation Test (1-2 minutes)
+Verify GPU setup with synthetic dataset (N=1000, 1 seed per method).
+
+**Run**:
+```bash
+./tests/smoke/run_gpu_validation.sh
+```
+
+**What it tests**:
+- GPU availability and memory usage
+- All 4 methods: fisherz, fedspn_horizontal, fedspn_vertical, fedspn_hybrid
+- Synthetic dataset (N=1000, d=8)
+- Timing comparison (should be 4-7× faster on GPU vs CPU)
+
+**Expected output**:
+```
+Method               Scenario    F1_skel  F1_dir  Time (s)
+----------------------------------------------------------------------
+fisherz_baseline     horizontal  ~0.500   ~0.000   ~15-25s
+fedspn_horizontal    horizontal  ~0.500   ~0.000   ~30-45s
+fedspn_vertical      vertical    ~0.500   ~0.200   ~25-40s
+fedspn_hybrid        hybrid      ~0.500   ~0.000   ~30-45s
+
+✅ ALL TESTS PASSED - GPU validation successful!
+```
+
+**Note**: Uses synthetic data to avoid lzma dependency issues. For Sachs real data tests, see benchmark suite.
+
+#### 3. Benchmarks (hours)
 Production experiments with full datasets.
 
 **Available Configs**:

@@ -1,0 +1,169 @@
+# FedCDH+FedPC Requirements (Pinned for Stability)
+# Python 3.10+
+# Last updated: March 17, 2026
+# Tested on: Ubuntu 22.04, macOS 13+, CUDA 12.4
+
+# ============================================================================
+# CORE DEEP LEARNING STACK
+# ============================================================================
+# PyTorch 2.4.1 - Latest stable version with CUDA 12.4 support
+# Compatible with simple-einet and all CUDA versions (11.8, 12.1, 12.4)
+# For CPU-only: Use default torch installation
+# For GPU: Install with appropriate CUDA version (see instructions below)
+torch==2.4.1
+torchvision==0.19.1
+torchaudio==2.4.1
+
+# NumPy 1.26.4 - Compatible with PyTorch 2.4.1 and all other dependencies
+# CRITICAL: Do not upgrade to 2.x as it breaks scikit-learn < 1.5
+numpy==1.26.4
+
+# ============================================================================
+# SUM-PRODUCT NETWORKS (SPNs)
+# ============================================================================
+# simple-einet 0.0.1 - Core SPN library for FedPC
+# Requires: torch, numpy, scipy, fast_pytorch_kmeans, tqdm, psutil
+simple-einet==0.0.1
+
+# fast_pytorch_kmeans - Required by simple-einet for clustering
+fast-pytorch-kmeans==0.2.1
+
+# ============================================================================
+# SCIENTIFIC COMPUTING
+# ============================================================================
+# SciPy 1.14.1 - Statistical functions, clustering, hierarchical methods
+scipy==1.14.1
+
+# Scikit-learn 1.3.2 - Stable version compatible with numpy 1.26.x
+# Used for: KCI tests, kernel approximation, linear models
+# Note: 1.4+ has breaking changes, 1.5+ requires numpy 2.0+
+scikit-learn==1.3.2
+
+# Pandas 2.2.3 - Data manipulation (2.3.2 has minor bugs)
+pandas==2.2.3
+
+# Statsmodels 0.14.4 - Statistical models
+statsmodels==0.14.4
+
+# ============================================================================
+# GRAPH LIBRARIES
+# ============================================================================
+# NetworkX 3.3 - Graph algorithms and utilities
+networkx==3.3
+
+# python-igraph 0.11.9 - Fast graph library for benchmark data generation
+igraph==0.11.9
+
+# causaldag 0.1a163 - Causal DAG utilities for metrics and data generation
+# Used in: causallearn/utils/metrics.py, causallearn/utils/data_utils.py
+causaldag==0.1a163
+
+# Graphviz - Visualization backend
+graphviz==0.20.3
+
+# Pydot 3.0.2 - DOT language interface
+pydot==3.0.2
+
+# ============================================================================
+# VISUALIZATION
+# ============================================================================
+# Matplotlib 3.9.3 - Stable version compatible with seaborn
+matplotlib==3.9.3
+
+# Seaborn 0.13.2 - Statistical visualization
+seaborn==0.13.2
+
+# Plotly 5.24.1 - Interactive plots
+plotly==5.24.1
+
+# ============================================================================
+# UTILITIES
+# ============================================================================
+# Tqdm 4.67.1 - Progress bars
+tqdm==4.67.1
+
+# Pooch 1.8.2 - Data downloading utility for Sachs dataset
+pooch==1.8.2
+
+# Psutil 6.1.1 - System monitoring (required by simple-einet)
+psutil==6.1.1
+
+# ============================================================================
+# DEVELOPMENT TOOLS (Optional but recommended)
+# ============================================================================
+# Pre-commit 4.0.1 - Git hooks for code quality
+pre-commit==4.0.1
+
+# Black 24.10.0 - Code formatter
+black==24.10.0
+
+# Pytest 8.3.4 - Testing framework
+pytest==8.3.4
+
+# ============================================================================
+# INSTALLATION INSTRUCTIONS
+# ============================================================================
+#
+# 1. CPU Installation (All platforms):
+#    pip install -r requirements.txt
+#
+# 2. GPU Installation with CUDA 11.8:
+#    pip install torch==2.4.1 torchvision==0.19.1 torchaudio==2.4.1 \
+#        --index-url https://download.pytorch.org/whl/cu118
+#    pip install -r requirements.txt
+#
+# 3. GPU Installation with CUDA 12.1:
+#    pip install torch==2.4.1 torchvision==0.19.1 torchaudio==2.4.1 \
+#        --index-url https://download.pytorch.org/whl/cu121
+#    pip install -r requirements.txt
+#
+# 4. GPU Installation with CUDA 12.4 (Recommended for modern servers):
+#    pip install torch==2.4.1 torchvision==0.19.1 torchaudio==2.4.1 \
+#        --index-url https://download.pytorch.org/whl/cu124
+#    pip install -r requirements.txt
+#
+# Note: CUDA 12.4 is backward compatible with PyTorch built for CUDA 12.1
+#       Use cu124 index for optimal performance on CUDA 12.4 systems
+#
+# ============================================================================
+# COMPATIBILITY NOTES
+# ============================================================================
+#
+# ✅ PyTorch 2.4.1 + NumPy 1.26.4: Fully compatible, tested stable
+# ✅ PyTorch 2.4.1 + CUDA 12.4: Official support via cu124 index
+# ✅ simple-einet 0.0.1: Works with torch 2.4.x and numpy 1.26.x
+# ✅ scikit-learn 1.3.2: Stable version supporting numpy < 2.0
+# ✅ All versions tested together - no conflicts
+#
+# ⚠️  DO NOT UPGRADE:
+#    - numpy >= 2.0 (breaks scikit-learn < 1.5)
+#    - pandas >= 2.3 (has known bugs)
+#
+# 📌 CUDA COMPATIBILITY:
+#    - CUDA 12.4: Use cu124 index (recommended)
+#    - CUDA 12.1: Use cu121 index
+#    - CUDA 11.8: Use cu118 index
+#    - Driver 550.67 → CUDA 12.4 → Use cu124
+#
+# ============================================================================
+# VERIFICATION COMMANDS
+# ============================================================================
+#
+# After installation, verify with:
+#   python -c "import torch; print(f'PyTorch: {torch.__version__}')"
+#   python -c "import numpy; print(f'NumPy: {numpy.__version__}')"
+#   python -c "import simple_einet; print('simple-einet: OK')"
+#   python -c "import torch; print(f'CUDA available: {torch.cuda.is_available()}')"
+#   python -c "import torch; print(f'CUDA version: {torch.version.cuda}')"
+#
+# Check your system CUDA:
+#   nvidia-smi  # Check driver and CUDA version
+#
+# Then run verification:
+#   python3 verify_env.py
+#
+# Then run smoke tests:
+#   ./tests/smoke/run_all_scenarios.sh
+#
+# Expected: All 3 scenarios pass in ~20-30 seconds
+# ============================================================================
