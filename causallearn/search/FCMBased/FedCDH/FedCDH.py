@@ -164,6 +164,7 @@ class FedCDH_SPN_Wrapper(torch.nn.Module):
             u_col = x[:, self.u_index]
         u_is_observed = not torch.isnan(u_col[0]).item()
         if u_is_observed:
+            # When U is observed, we condition on it: p(x|U=k), NOT w_k * p(x|U=k)
             client_indices = u_col.long()
             unique_clients = torch.unique(client_indices)
             final_ll = torch.zeros(x.shape[0], 1, device=self.device)
@@ -171,10 +172,10 @@ class FedCDH_SPN_Wrapper(torch.nn.Module):
                 k_idx = k.item()
                 mask = client_indices == k
                 x_sub = x_feat[mask]
+                # Route to component k and return its log probability
+                # No weight multiplication - we're conditioning, not marginalizing
                 ll_sub = self.spn.log_prob_conditional_u(x_sub, k_idx)
-                weight = self.spn.weights[k_idx]
-                ll_total = ll_sub + torch.log(weight + 1e-9)
-                final_ll[mask] = ll_total
+                final_ll[mask] = ll_sub
             return final_ll
         else:
             return self.spn.log_prob(x_feat)

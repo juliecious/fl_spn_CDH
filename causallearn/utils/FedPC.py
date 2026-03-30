@@ -639,13 +639,28 @@ class GlobalFedSPN(nn.Module):
     def log_prob_conditional_u(self, x, u_idx):
         """
         Routing for Horizontal scenario where components ARE clients.
+
+        Args:
+            x: Feature data without context column, shape (batch_size, d)
+            u_idx: Client index to condition on
+
+        Returns:
+            Log probability from the specified client's local SPN
+
+        Note: Local SPNs were trained with context column appended.
+        We reconstruct the augmented data [x, u_idx] before evaluation.
         """
         if 0 <= u_idx < len(self.components):
+            # Local SPNs expect augmented data [features, context]
+            # Reconstruct by appending the context value
+            u_col = torch.full((x.shape[0], 1), u_idx, dtype=x.dtype, device=x.device)
+            x_aug = torch.cat([x, u_col], dim=1)
+
             if self.feature_map is not None:
                 idx = self.feature_map[u_idx]
-                x_c = x[:, idx]
+                x_c = x_aug[:, idx]
             else:
-                x_c = x
+                x_c = x_aug
             return self.components[u_idx].log_prob(x_c)
         else:
             raise ValueError(f"Index {u_idx} out of bounds")

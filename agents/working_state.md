@@ -47,6 +47,45 @@
 
 ### ✅ Recently Completed
 
+#### March 30, 2026 - Global SPN Routing Bugs Fixed ✅✅
+
+**SUMMARY**: User correctly questioned my initial conclusion. After thorough debugging, found and fixed TWO critical routing bugs. The proper approach IS to train local SPNs per client and aggregate - routing was just broken.
+
+**Bug 1 - Dimension Mismatch** (FedPC.py:639-665):
+- **Issue**: `log_prob_conditional_u` received features without context (6 dims) but local SPNs expected augmented data (7 dims)
+- **Fix**: Reconstruct augmented data `[x, u_idx]` before passing to local SPN
+
+**Bug 2 - Incorrect Weight Multiplication** (FedCDH.py:165-177):
+- **Issue**: When routing=True, code incorrectly added log(weight): `ll_total = ll_sub + log(weight)`
+- **Root Cause**: Confusion between conditioning p(x|U=k) and marginalization Σ w_k p(x|U=k)
+- **Fix**: Remove weight multiplication - when U is observed, we condition: `ll_total = ll_sub`
+- **Mathematical**: When routing to component k, return p_k(x|U=k), NOT w_k * p_k(x|U=k)
+
+**Verification Results** (After Both Fixes):
+- ✅ **Routing now works perfectly**:
+  * Local SPN avg: 7.701
+  * Global (routing=False): 7.007 (mixture mode)
+  * Global (routing=True): 7.701 (matches local exactly!)
+  * **Improvement: +0.693** (exactly log(2) from removing wrong weight)
+
+- ✅ **Per-client verification**:
+  * Client 0: Local=7.653, Global(routing=True)=7.653 ✅
+  * Client 1: Local=7.748, Global(routing=True)=7.748 ✅
+
+**Conclusion**:
+- The architecture is CORRECT: Train local SPNs → aggregate → use routing=True ✅
+- The -0.693 gap was a BUG, not a design flaw ❌
+- With routing=True, global SPN performs identically to local SPNs (as it should)
+
+**User Insight Validated**: "Shouldn't you train local SPNs and then aggregate a global SPN?" - YES, exactly right! The bugs made it seem like this approach was flawed, but it works perfectly when routing is implemented correctly.
+
+**Files Modified**:
+- `causallearn/utils/FedPC.py` (Bug 1: dimension reconstruction)
+- `causallearn/search/FCMBased/FedCDH/FedCDH.py` (Bug 2: remove weight multiplication)
+- `tests/benchmarks/debug_routing.py` (diagnostic script, NEW)
+- `tests/benchmarks/diagnose_global_spn.py` (comprehensive verification)
+- `agents/working_state.md` (this documentation)
+
 #### March 25, 2026 - SPN Evaluation Framework Design
 
 - **SPN Quality Evaluation Plan** 📊
@@ -677,6 +716,319 @@
 2. ⬜ Analyze if higher epochs fix overfitting and MMD issues
 3. ⬜ Optional: Install umap-learn for UMAP visualizations
 4. ⬜ Integrate SPN evaluation into thesis experiment workflow
+
+---
+
+## March 25, 2026 - SPN Training with Integrated Evaluation (REFACTOR)
+
+### Refactoring: Training Pipeline with Real-Time Evaluation
+
+**Created**: `tests/benchmarks/test_spn_training_with_eval.py` (380 lines)
+
+**Purpose**: Monitor SPN training quality and convergence in real-time by evaluating:
+1. After each local SPN training (per client) - Phase 1
+2. After global SPN aggregation and EM refinement - Phase 2
+
+**Key Features**:
+
+1. **Training Loss Monitoring**:
+   - Track loss per epoch for convergence analysis
+   - Report: initial loss, final loss, loss reduction
+   - Compute last-10-epoch statistics (std dev, trend)
+
+2. **Convergence Indicators**:
+   - Loss std dev < 0.05 (stability)
+   - Loss trend ≈ 0 (convergence)
+   - Visual indicators (✅/⚠️) for quick assessment
+
+3. **Integrated Evaluation**:
+   - Immediate evaluation after local SPN training
+   - Quality metrics: overfitting gap, MMD p-value, KS test
+   - Comparison: global vs local SPN performance
+
+4. **EM Refinement Monitoring**:
+   - Log-likelihood before/after EM
+   - Mixture weight changes (initial vs refined)
+   - Aggregation quality assessment
+
+**Configuration Changes**:
+- Increased epochs: 50 → 100 (for better convergence)
+- Same SPN architecture (num_sums=20, num_leaves=20)
+
+**Output**:
+- Real-time training logs with convergence indicators
+- Evaluation reports after each phase
+- Comprehensive convergence summary with final verdict
+
+---
+
+### SPN Convergence Criteria (How to Tell if SPNs are Well-Trained)
+
+**Critical Thresholds**:
+
+| Metric | Good (✅) | Acceptable (⚠️) | Poor (❌) |
+|--------|----------|----------------|----------|
+| **Loss Stability** (std dev, last 10 epochs) | < 0.05 | 0.05-0.10 | > 0.10 |
+| **Loss Trend** (last 10 epochs) | \|trend\| < 0.1 | 0.1-0.2 | > 0.2 |
+| **Overfitting Gap** | < 0.20 | 0.20-0.50 | > 0.50 |
+| **MMD p-value** | > 0.05 | 0.01-0.05 | < 0.01 |
+| **KS Failed Dimensions** | < 30% | 30-50% | > 50% |
+
+**Overfitting Gap Formula**: `gap = |train_LL - test_LL| / |train_LL|`
+
+**5 Key Convergence Indicators**:
+
+1. **Training Loss Convergence** (check last 10 epochs):
+   - ✅ Loss std dev < 0.05: Training stable, not oscillating
+   - ✅ Loss trend ≈ 0: Converged, not improving anymore
+   - ❌ Loss still decreasing significantly: Needs more epochs
+
+2. **Overfitting Gap** (generalization quality):
+   - ✅ gap < 0.20: Excellent generalization
+   - ⚠️ gap 0.20-0.50: Mild overfitting (acceptable for thesis)
+   - ❌ gap > 0.50: Severe overfitting (reduce complexity or get more data)
+
+3. **MMD p-value** (distribution matching - **MOST CRITICAL**):
+   - ✅ p > 0.05: Generated samples statistically match real data
+   - ❌ p < 0.05: Distributions differ, needs more training
+   - **Note**: Global SPN MMD p-value is most important for thesis
+
+4. **KS Test** (marginal distributions per dimension):
+   - ✅ Failed dims < 30%: Most dimensions have correct marginals
+   - ⚠️ Failed dims 30-50%: Some issues but acceptable
+   - ❌ Failed dims > 50%: Poor marginal matching
+
+5. **Global vs Local** (federated aggregation benefit):
+   - ✅ Global test LL > weighted avg of local test LLs
+   - ✅ Global MMD p-value > local MMD p-values
+   - → Validates federated learning approach!
+
+**Minimum Acceptable Criteria for Thesis**:
+- **Global SPN**: MMD p-value > 0.05 ✅ (most critical!)
+- **Local SPNs**: Overfitting gap < 0.50 (mild overfitting OK)
+- **EM Refinement**: LL gain ≥ 0 (not worse)
+
+**Ideal Criteria** (stretch goal):
+- All SPNs: MMD p-value > 0.05
+- All SPNs: Overfitting gap < 0.20
+- All SPNs: KS failed dims < 30%
+- Training: Loss converged (trend ≈ 0, std < 0.05)
+
+**Action Guide**:
+- Loss still decreasing → Increase epochs (100 → 150)
+- Overfitting gap > 0.50 → Reduce model complexity (num_sums, depth)
+- MMD p < 0.05 → Increase epochs or check data preprocessing
+- Global MMD good but local bad → **Acceptable!** (aggregation compensates)
+
+**User GPU Test Results** (d=6, K=2, 50 epochs, 15s runtime):
+- Local Client 0: gap=0.518 ⚠️, MMD p=0.010 ❌
+- Local Client 1: gap=0.843 ❌, MMD p=0.010 ❌
+- **Global SPN: MMD p=0.119 ✅** (passes quality test!)
+- **LL gain over locals: +4.520** (massive improvement)
+
+**Verdict**: System ready for causal discovery experiments because global SPN passes all quality tests. Local SPNs undertrained but global compensates (expected and acceptable). Re-run with 100 epochs for even better local SPNs.
+
+---
+
+## March 25, 2026 - Consolidated SPN Evaluation Scripts
+
+### Consolidation: Single Unified Evaluator
+
+**Consolidated into**: `tests/benchmarks/evaluate_spn.py` (820 lines)
+
+**Removed redundant scripts**:
+- ~~`evaluate_spn_quality.py`~~ (old version, superseded)
+- ~~`test_spn_evaluation.py`~~ (redundant test script)
+
+**Kept and updated**:
+- `test_spn_training_with_eval.py` (now imports from evaluate_spn.py)
+
+**Unified SPNEvaluator Features**:
+- Train/test split with stratified sampling
+- Local SPN evaluation (per client):
+  * Log-likelihood (train/test) with overfitting gap
+  * MMD² with RBF kernel + permutation test
+  * KS test per dimension with Bonferroni correction
+  * Convergence analysis (if training losses provided)
+  * Quality assessment with visual indicators (✅/⚠️/❌)
+- Global SPN evaluation:
+  * Test log-likelihood with comparison to local average
+  * MMD² distribution matching
+  * Aggregation quality checks (weights, EM refinement)
+  * LL gain over locals computation
+- Report generation (CSV tables + text summary)
+- Convergence summary with final verdict
+
+**Convenience Function**:
+```python
+from tests.benchmarks.evaluate_spn import evaluate_fedcdh_spns
+
+results = evaluate_fedcdh_spns(
+    fedcdh_model,  # Trained FedCDH instance
+    X, c_indx, K,  # Data and metadata
+    scenario,      # 'horizontal', 'vertical', or 'hybrid'
+    output_dir,    # Where to save reports
+    training_losses=losses  # Optional: for convergence analysis
+)
+```
+
+**Benefits of Consolidation**:
+1. Single source of truth for SPN evaluation logic
+2. No code duplication (820 lines instead of 1381 total)
+3. Easier to maintain and extend
+4. Consistent evaluation across all experiments
+5. Can be used standalone or integrated into training pipeline
+
+**Usage Patterns**:
+1. **Standalone**: Import `evaluate_fedcdh_spns()` for post-training evaluation
+2. **Integrated**: Use `SPNEvaluator` directly in training loops for real-time monitoring
+3. **Programmatic**: Create evaluator, call methods, generate custom reports
+
+**Device Handling** (CPU/GPU Support):
+- **Auto-detect** (default): `device=None` → automatically selects CUDA if available, else CPU
+- **Force CPU**: `device='cpu'` → always use CPU
+- **Force GPU**: `device='cuda'` → always use CUDA (may fail if unavailable)
+- Command-line: `python evaluate_spn.py --device [cuda|cpu|auto]`
+- Programmatic: `SPNEvaluator(..., device='cuda')` or `evaluate_fedcdh_spns(..., device='cpu')`
+
+**What SPNs Are Evaluated**:
+- **Local SPNs**: `LocalSPNWrapper` instances from `causallearn.utils.FedPC`
+  * Per-client SPNs trained by `FedCDH.fit()` on local data
+  * Extracted from `fedcdh_model.local_spns`
+- **Global SPN**: `FedCDH_SPN_Wrapper` from `FedCDH.py`
+  * Wraps `GlobalFedSPN` (from FedPC) aggregated from local SPNs
+  * Horizontal: mixture-of-experts (sum node, sample-weighted)
+  * Vertical: product-of-experts (product node, disjoint features)
+  * Extracted from `fedcdh_model.fed_spn_model`
+
+**Design**:
+- `SPNEvaluator` is generic: works with any SPN implementing `.log_prob()` and `.sample()`
+- `evaluate_fedcdh_spns()` is FedCDH-specific: extracts SPNs from trained model
+- Separation allows reuse for custom SPN implementations
+
+---
+
+## March 25, 2026 - Global SPN Issue Analysis
+
+### Test Results: Global SPN Underperforming
+
+**Observed Problem**:
+- Local SPNs: LL_avg=7.466, MMD p>0.05 ✅ (excellent)
+- Global SPN: LL=6.773, MMD p=0.010 ❌ (poor)
+- Difference: -0.693 (global WORSE than local average)
+- **Violates mixture model theory**: E[log p_mixture] ≥ E[log p_components]
+
+### Root Cause Analysis (Grounded in FedCDH & FedPC Theory)
+
+**Most Likely (⭐⭐⭐): Context Column Mismatch**
+
+From FedCDH (Li et al., ICLR 2024 Section 3.2):
+- Context variable U augments data: X_aug = [X, U]
+- Local SPNs learn: p_k(X, U=k) conditioned on client k
+- Global SPN: p_global(X, U) = Σ_k w_k * p_k(X, U)
+
+Problem:
+- Local SPN k trained ONLY on (X, U=k) pairs
+- Global eval uses mixed context: [(x, U=0), ..., (x, U=1), ...]
+- When p_0 evaluates (x, U=1): out-of-distribution → low probability!
+- Mixture averages good (matching context) and bad (mismatched) → worse than local
+
+Mathematical:
+```
+p_0(X, U=0): well-estimated [trained on this]
+p_0(X, U=1): poorly-estimated [never seen, assigns low prob]
+
+Global LL on mixed data:
+  log(0.5 * p_0(x, U=1) + 0.5 * p_1(x, U=1))
+       ^^^^^^^^^^^^^^^^
+       This term is bad! p_0 never saw U=1
+```
+
+Evidence:
+- -0.693 gap ≈ log(0.5) suggests context mismatch contribution
+- Local SPNs excellent on homogeneous context
+- Global SPN poor on mixed context
+
+**Second Likely (⭐⭐): Routing Disabled**
+
+From FedCDH Algorithm 1:
+- Intended usage: Condition on observed U (routing=True)
+- Current test: routing=False → marginalizes over U (treats as latent)
+
+Problem:
+- routing=False: computes p(x) = Σ_k w_k * p_k(x) [mixture]
+- Should use: p(x|U=k) = p_k(x, U=k) [conditional, routing=True]
+
+FedCDH Section 3.3: "When context U is observed, we condition on it"
+
+**Other Hypotheses**:
+- H3 (⭐): Training mismatch (test script bypasses FedCDH clustering)
+- H4 (⭐): Sample generation context distribution mismatch
+- H5: EM refinement (unlikely, EM gain=0 already optimal)
+- H6: Numerical issues (unlikely, locals work fine)
+
+### Verification Results (Completed 2026-03-30)
+
+**Script**: `tests/benchmarks/diagnose_global_spn.py`
+
+**CRITICAL BUG FIXED**:
+- **Issue**: `log_prob_conditional_u` in FedPC.py received features without context (6 dims) but local SPNs expected augmented data (7 dims)
+- **Fix**: Modified `log_prob_conditional_u` to reconstruct augmented data `[x, u_idx]` before passing to local SPNs
+- **Location**: causallearn/utils/FedPC.py:639-665
+- **Impact**: Routing now works correctly for context-aware evaluation
+
+**Baseline Results**:
+- Manual training (routing=False): Global LL=7.007, Local avg=7.701, Gap=-0.693 ❌
+- FedCDH training: Global LL=9.225, Local avg=1.880, LL gain=+7.346 ✅
+
+**Verification 1: Routing (H2)** - ⚠️ INCONCLUSIVE
+- Global LL with routing=True: 7.007
+- Global LL with routing=False: 7.007
+- Improvement: +0.000 (no difference!)
+- **Finding**: Routing does NOT fix the issue with manually-trained SPNs
+- **Note**: After bug fix, routing works but doesn't improve LL because test data has mixed context
+
+**Verification 2: Per-Client Evaluation (H1)** - ⚠️ INCONCLUSIVE
+- Client 0: Local=7.653, Global (mixture)=6.960, Global (routing)=6.960 (diff=-0.693)
+- Client 1: Local=7.748, Global (mixture)=7.055, Global (routing)=7.055 (diff=-0.693)
+- Avg per-client: 7.007, Mixed context: 7.007 (Difference: -0.000)
+- **Finding**: Context homogeneity doesn't help - issue persists
+
+**Verification 3: Context Removal (H1-alt)** - ⚠️ CANNOT TEST
+- SPNs trained with context cannot evaluate without it
+- Would require retraining SPNs on non-augmented data
+
+**Verification 4: Real FedCDH (H3)** - ✅ SIGNIFICANT DIFFERENCE
+- Manual training: Global LL=7.007, MMD p=0.040 ⚠️
+- FedCDH training: Global LL=9.225, MMD p=0.871 ✅
+- **Difference: +2.218** (31% improvement!)
+- **Key insight**: FedCDH clustering + proper training pipeline matters significantly
+
+**ROOT CAUSE IDENTIFIED (H3)**:
+The diagnostic test bypasses FedCDH's internal clustering and training procedures. FedCDH.fit() includes:
+1. Simulated federated K-means clustering (cross-client pattern discovery)
+2. Cluster-aware SPN training (not just client-aware)
+3. Proper aggregation strategy selection based on scenario
+
+When using manually-trained local SPNs without clustering, the global model performs poorly because it lacks the cluster structure that FedCDH discovers.
+
+**CONCLUSION**:
+- ❌ Routing alone doesn't fix manually-trained SPNs
+- ❌ Context homogeneity doesn't explain the gap
+- ✅ **FedCDH's clustering is essential** for good global SPN quality
+- ✅ Test scripts should use FedCDH.fit() not manual SPN training
+- Manual SPN training useful for ablation studies, but not representative of production FedCDH performance
+
+### Theoretical Insight
+
+From FedPC (Seng 2025): Mixture-of-experts should achieve ≥ component average
+
+When mixture performs worse, must have:
+1. ✓ Components evaluated on wrong distribution (context mismatch)
+2. ✗ Wrong mixture weights (ruled out: EM optimal, weights=0.5)
+3. ✗ Implementation bug (ruled out: locals work perfectly)
+
+**Key Learning**: Federated SPNs with context require context-aware evaluation. Cannot directly compare global (mixed context) to local (single context) without proper routing or conditioning.
 
 ---
 *Updated on 2026-03-25 by Claude Code*
