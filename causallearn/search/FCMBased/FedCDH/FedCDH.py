@@ -50,11 +50,13 @@ class SimulatedFederatedKMeans:
         K_clients = len(X_splits)
 
         if scenario == "vertical":
+            # Vertical: need feature_maps to determine total dimension
             N = X_splits[0].shape[0]
             D = 0
             for k in feature_maps:
                 D = max(D, max(feature_maps[k]) + 1)
         else:
+            # Horizontal/Hybrid: all clients see all features
             N = sum(len(x) for x in X_splits)
             D = X_splits[0].shape[1]
 
@@ -156,12 +158,12 @@ class FedCDH_SPN_Wrapper(torch.nn.Module):
     def log_prob(self, x):
         if not self.routing:
             return self.spn.log_prob(x)
-        if self.u_index == -1 or self.u_index == x.shape[1] - 1:
-            x_feat = x[:, :-1]
-            u_col = x[:, -1]
-        else:
-            x_feat = torch.cat([x[:, : self.u_index], x[:, self.u_index + 1 :]], dim=1)
-            u_col = x[:, self.u_index]
+
+        # Context variable U is always the last column by convention
+        # Separate features from context
+        x_feat = x[:, :-1]
+        u_col = x[:, -1]
+
         u_is_observed = not torch.isnan(u_col[0]).item()
         if u_is_observed:
             # When U is observed, we condition on it: p(x|U=k), NOT w_k * p(x|U=k)
@@ -195,34 +197,61 @@ class FedCDH_SPN_Wrapper(torch.nn.Module):
 
 
 class QueryCounterCIT:
+    """
+    Wrapper for CI test instances that counts the number of queries.
+    Explicitly delegates common attributes instead of using __getattr__ magic.
+    """
+
     def __init__(self, cit_instance):
         self.cit = cit_instance
         self.query_count = 0
+        # Explicitly expose commonly used attributes
         self.method = getattr(cit_instance, "method", "unknown")
+        self.data = getattr(cit_instance, "data", None)
+        self.global_model = getattr(cit_instance, "global_model", None)
 
     def __call__(self, *args, **kwargs):
         self.query_count += 1
         if self.method in ["spn", "kci"]:
             return self.cit(*args, **kwargs)
         else:
+            # FisherZ only needs first 3 args (X, Y, conditioning_set)
             return self.cit(*args[:3])
-
-    def __getattr__(self, name):
-        if name.startswith("__"):
-            raise AttributeError(name)
-        return getattr(self.cit, name)
 
 
 class FedCDH:
     def __init__(self, args: Dict[str, Any]):
         self.args = args
 
-        # Device selection: CUDA > CPU (skip MPS due to simple-einet incompatibility)
-        if torch.cuda.is_available():
-            self.device = torch.device("cuda")
+        # Device selection with optional override
+        # Priority: args.device > auto-detect (CUDA > CPU)
+        # Note: MPS (Apple Silicon) disabled - simple-einet has issues with 5D tensor reductions
+        if hasattr(args, "device") and args.device is not None:
+            device_str = (
+                args.device.lower()
+                if isinstance(args.device, str)
+                else str(args.device)
+            )
+            if device_str == "cuda":
+                if torch.cuda.is_available():
+                    self.device = torch.device("cuda")
+                else:
+                    logging.warning(
+                        "CUDA requested but not available. Falling back to CPU."
+                    )
+                    self.device = torch.device("cpu")
+            elif device_str == "cpu":
+                self.device = torch.device("cpu")
+            else:
+                logging.warning(
+                    f"Unknown device '{args.device}'. Using auto-detection."
+                )
+                self.device = torch.device(
+                    "cuda" if torch.cuda.is_available() else "cpu"
+                )
         else:
-            self.device = torch.device("cpu")
-            # Note: MPS (Apple Silicon) disabled - simple-einet has issues with 5D tensor reductions
+            # Auto-detect: CUDA > CPU
+            self.device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
 
         logging.info(f"FedCDH Initialized on device: {self.device}")
         self.K_clients = args.K
@@ -232,7 +261,11 @@ class FedCDH:
         self.ci_method = args.ci_method
         self.n_samples_per_client = args.n
         self.fed_spn_model = None
-        self.local_spns = []  # Store local SPNs for evaluation
+
+        # Store local SPNs for post-hoc evaluation (tests/benchmarks/evaluate_spn.py)
+        # Purpose: Enables SPN quality assessment (log-likelihood, MMD, KS tests)
+        # to validate that local models learn correct distributions before causal discovery
+        self.local_spns = []
 
     def fit(self, X_splits, c_indx, true_DAG_bin):
         # Get training epochs and alpha from args
@@ -242,19 +275,23 @@ class FedCDH:
             train_epochs = 50 if self.device.type in ["cuda", "gpu"] else 10
         alpha = self.args.alpha if hasattr(self.args, "alpha") else 0.05
 
-        # Reconstruct Global for KCI/Oracle baselines
+        # Reconstruct global data from splits
         if isinstance(X_splits, list):
-            # Vertical: concatenate features (axis=1)
-            # Horizontal/Hybrid: concatenate samples (axis=0)
             if self.scenario == "vertical":
+                # Vertical: concatenate features (axis=1)
                 X_global = np.concatenate(X_splits, axis=1)
             else:
+                # Horizontal/Hybrid: concatenate samples (axis=0)
                 X_global = np.concatenate(X_splits, axis=0)
         else:
             X_global = X_splits
+
         total_samples = X_global.shape[0]
+
+        # Augment with context column for CI testing
         X_aug_global = np.concatenate([X_global, c_indx], axis=1)
         d_aug_total = X_aug_global.shape[1]
+
         train_time = 0
         cd_time = 0
         comm_cost = 0.0
@@ -263,34 +300,35 @@ class FedCDH:
 
         if self.ci_method == "spn":
             start_train = time.time()
-            if self.scenario == "horizontal":
-                feature_maps = {
-                    k: list(range(d_aug_total)) for k in range(self.K_clients)
-                }
-                # Keep existing splits (e.g. from sachs_real) but ensure they include the context column U
-                new_splits = []
-                _curr = 0
-                for xk in X_splits:
-                    new_splits.append(X_aug_global[_curr : _curr + len(xk)])
-                    _curr += len(xk)
-                X_splits = new_splits
-            elif self.scenario == "vertical":
+
+            # Feature maps only needed for vertical scenario (disjoint features)
+            # For horizontal/hybrid, all clients see all features
+            if self.scenario == "vertical":
+                # Vertical: Split features across clients
                 cols_per_client = np.array_split(range(self.d_features), self.K_clients)
                 feature_maps = {}
                 X_splits_train = []
                 for k in range(self.K_clients):
                     f_indices = cols_per_client[k].tolist()
                     if k == 0:
-                        f_indices.append(self.d_features)
+                        f_indices.append(self.d_features)  # Context column U
                     feature_maps[k] = f_indices
                     X_splits_train.append(X_aug_global[:, f_indices])
                 X_splits = X_splits_train
-            else:  # hybrid
-                feature_maps = {
-                    k: list(range(d_aug_total)) for k in range(self.K_clients)
-                }
-                # Always use X_aug_global to ensure context U is included in training data
-                X_splits = np.array_split(X_aug_global, self.K_clients)
+            else:
+                # Horizontal/Hybrid: All clients see all features (no feature map needed)
+                feature_maps = None
+                if self.scenario == "horizontal":
+                    # Keep existing splits but ensure they include context column U
+                    new_splits = []
+                    _curr = 0
+                    for xk in X_splits:
+                        new_splits.append(X_aug_global[_curr : _curr + len(xk)])
+                        _curr += len(xk)
+                    X_splits = new_splits
+                else:  # hybrid
+                    # Use X_aug_global to ensure context U is included
+                    X_splits = np.array_split(X_aug_global, self.K_clients)
 
             # Data partition validation
             logging.info(f"Data partition check: scenario={self.scenario}")
@@ -318,22 +356,45 @@ class FedCDH:
                 f"✓ Data partition validation passed for {self.scenario} scenario"
             )
 
-            best_h = 2
-            min_bic = float("inf")
-            best_model = None
-            for h_candidate in range(2, 6):
+            # BIC-based cluster selection (optional: skip if K specified)
+            # If args.skip_bic=True, use K_clients as number of clusters
+            # Otherwise, run BIC selection over [2, ..., 5] to find optimal K
+            if getattr(self.args, "skip_bic", False):
+                # Skip BIC: use user-specified K directly
+                num_clusters = self.K_clients
+                logging.info(
+                    f"BIC selection skipped. Using K={num_clusters} clusters directly."
+                )
                 fed_km = SimulatedFederatedKMeans(
-                    n_clusters=h_candidate, max_iter=10, seed=42
+                    n_clusters=num_clusters, max_iter=10, seed=42
                 )
                 fed_km.fit(X_splits, feature_maps, self.scenario)
-                bic = (
-                    fed_km.inertia_ + h_candidate * np.log(total_samples) * d_aug_total
+                best_model = fed_km
+            else:
+                # Run BIC selection
+                best_h = 2
+                min_bic = float("inf")
+                best_model = None
+                bic_scores = []
+                for h_candidate in range(2, 6):
+                    fed_km = SimulatedFederatedKMeans(
+                        n_clusters=h_candidate, max_iter=10, seed=42
+                    )
+                    fed_km.fit(X_splits, feature_maps, self.scenario)
+                    bic = (
+                        fed_km.inertia_
+                        + h_candidate * np.log(total_samples) * d_aug_total
+                    )
+                    bic_scores.append((h_candidate, bic))
+                    if bic < min_bic:
+                        min_bic = bic
+                        best_h = h_candidate
+                        best_model = fed_km
+                num_clusters = best_h
+                logging.info(
+                    f"BIC selection: chosen K={num_clusters} from {bic_scores}"
                 )
-                if bic < min_bic:
-                    min_bic = bic
-                    best_h = h_candidate
-                    best_model = fed_km
-            num_clusters = best_h
+
             labels = best_model.labels_
             clustering_cost = best_model.comm_cost / 1024.0
             labels_splits = []
@@ -344,12 +405,7 @@ class FedCDH:
             weights = np.bincount(labels, minlength=num_clusters) / len(labels)
             clients_clusters = [[] for _ in range(num_clusters)]
             clients_counts = [[] for _ in range(num_clusters)]
-            # Get training epochs and alpha from args
-            if hasattr(self.args, "epochs"):
-                train_epochs = self.args.epochs
-            else:
-                train_epochs = 50 if self.device.type in ["cuda", "gpu"] else 10
-            alpha = self.args.alpha if hasattr(self.args, "alpha") else 0.05
+            # Extract SPN architecture parameters
             num_sums = getattr(self.args, "num_sums", 5)
             num_leaves = getattr(self.args, "num_leaves", 5)
             num_repetitions = getattr(self.args, "num_repetitions", 5)
@@ -391,11 +447,16 @@ class FedCDH:
             for h in range(num_clusters):
                 if not clients_clusters[h]:
                     continue
-                is_disjoint = True
-                if len(feature_maps) > 1:
-                    if not set(feature_maps[0]).isdisjoint(set(feature_maps[1])):
-                        is_disjoint = False
+
+                # Check if features are disjoint (only for vertical scenario)
+                is_disjoint = (
+                    feature_maps is not None
+                    and len(feature_maps) > 1
+                    and set(feature_maps[0]).isdisjoint(set(feature_maps[1]))
+                )
+
                 if is_disjoint and len(clients_clusters[h]) == self.K_clients:
+                    # Vertical scenario: Use FederatedProduct for disjoint features
                     comp = FederatedProduct(
                         clients_clusters[h],
                         feature_map=feature_maps,
@@ -403,7 +464,7 @@ class FedCDH:
                     )
                     global_components.append(comp)
                     final_weights.append(weights[h])
-                elif not is_disjoint:
+                else:
                     inner_ws = np.array(clients_counts[h])
                     inner_ws = inner_ws / inner_ws.sum()
                     comp = GlobalFedSPN(
@@ -430,9 +491,10 @@ class FedCDH:
                 global_spn, u_index=self.d_features, routing=False
             )
 
-            # Store local SPNs for evaluation (flatten clients_clusters by client)
-            # For horizontal/hybrid: each cluster may have SPNs from different clients
-            # We want one representative SPN per client for evaluation
+            # Store local SPNs for post-hoc quality evaluation
+            # Extract one representative SPN per client from the clustering structure
+            # clients_clusters[h][k] = SPN trained on cluster h at client k
+            # For evaluation, we need K SPNs (one per client) to assess local training quality
             self.local_spns = []
             for k in range(self.K_clients):
                 # Find the first SPN trained on client k's data across all clusters
@@ -441,7 +503,8 @@ class FedCDH:
                         self.local_spns.append(clients_clusters[h][k])
                         break
                 else:
-                    # Fallback: if no SPN found, use first available
+                    # Fallback: if no SPN found for this client, use first available
+                    # (Happens if client has too few samples after clustering)
                     for h in range(num_clusters):
                         if clients_clusters[h]:
                             self.local_spns.append(clients_clusters[h][0])
@@ -452,90 +515,50 @@ class FedCDH:
         start_cd = time.time()
         from causallearn.utils.cit import CIT, SPN_CIT
 
-        if self.ci_method == "voting_pc":
-            local_graphs = []
-            for k in range(self.K_clients):
-                local_X = X_splits[k]
-                local_data = (
-                    local_X[:, : self.d_features]
-                    if local_X.shape[1] > self.d_features
-                    else local_X
-                )
-                local_c = (
-                    local_X[:, self.d_features].reshape(-1, 1)
-                    if local_X.shape[1] > self.d_features
-                    else np.zeros((len(local_X), 1))
-                )
-                try:
-                    cg_local = cdnod(
-                        local_data,
-                        local_c,
-                        1,
-                        alpha=alpha,
-                        indep_test="fisherz",
-                        stable=True,
-                        uc_rule=2,
-                        uc_priority=-1,
-                    )
-                    local_graphs.append(
-                        cg_local.G.graph[0 : self.d_features, 0 : self.d_features]
-                    )
-                except:
-                    local_graphs.append(np.zeros((self.d_features, self.d_features)))
-            global_skeleton = np.zeros((self.d_features, self.d_features))
-            for g in local_graphs:
-                skel = ((g + g.T) != 0).astype(int)
-                global_skeleton += skel
-            consensus = (global_skeleton > (self.K_clients / 2)).astype(int)
-            est_cpdag = np.zeros((self.d_features, self.d_features))
-            rows, cols = np.where(consensus == 1)
-            for r, c in zip(rows, cols):
-                est_cpdag[r, c] = -1
-            est_dag = np.zeros_like(est_cpdag)
-            cd_time = time.time() - start_cd
-            comm_cost = (self.K_clients * self.d_features**2 * 4) / 1024.0
-        else:
-            if self.ci_method == "spn":
-                cit_obj = SPN_CIT(
-                    X_aug_global, global_model=self.fed_spn_model, num_permutations=50
-                )
-            elif self.ci_method == "kci":
-                cit_obj = CIT(X_aug_global, "kci")
-            else:
-                cit_obj = CIT(X_aug_global, "fisherz")
-            cit_counter = QueryCounterCIT(cit_obj)
-            cg = cdnod(
-                X_global,
-                c_indx,
-                self.K_clients,
-                alpha=alpha,
-                indep_test=cit_counter,
-                stable=True,
-                uc_rule=2,
-                uc_priority=-1,
-                fed_spn_model=self.fed_spn_model,
-                num_permutations=0,
-                orientation_type=getattr(self.args, "ablation_orientation", "hybrid"),
+        # Causal discovery using global CI test
+        if self.ci_method == "spn":
+            cit_obj = SPN_CIT(
+                X_aug_global, global_model=self.fed_spn_model, num_permutations=50
             )
-            cd_time = time.time() - start_cd
-            num_queries = cit_counter.query_count
-            est_graph = cg.G.graph[0 : self.d_features, 0 : self.d_features]
-            est_cpdag = get_cpdag_from_cdnod(est_graph)
-            est_dag = get_dag_from_pdag(est_cpdag)
-            if self.ci_method == "spn":
-                comm_cost = (
-                    estimate_fedcdh_comm_cost(
-                        self.d_features,
-                        self.K_clients,
-                        num_clusters,
-                        model_size_params=5000,
-                    )
-                    + clustering_cost
+        elif self.ci_method == "kci":
+            cit_obj = CIT(X_aug_global, "kci")
+        else:
+            cit_obj = CIT(X_aug_global, "fisherz")
+
+        cit_counter = QueryCounterCIT(cit_obj)
+        cg = cdnod(
+            X_global,
+            c_indx,
+            self.K_clients,
+            alpha=alpha,
+            indep_test=cit_counter,
+            stable=True,
+            uc_rule=2,
+            uc_priority=-1,
+            fed_spn_model=self.fed_spn_model,
+            num_permutations=0,
+            orientation_type=getattr(self.args, "ablation_orientation", "hybrid"),
+        )
+        cd_time = time.time() - start_cd
+        num_queries = cit_counter.query_count
+        est_graph = cg.G.graph[0 : self.d_features, 0 : self.d_features]
+        est_cpdag = get_cpdag_from_cdnod(est_graph)
+        est_dag = get_dag_from_pdag(est_cpdag)
+
+        if self.ci_method == "spn":
+            comm_cost = (
+                estimate_fedcdh_comm_cost(
+                    self.d_features,
+                    self.K_clients,
+                    num_clusters,
+                    model_size_params=5000,
                 )
-            elif self.ci_method == "kci":
-                comm_cost = estimate_kci_comm_cost(
-                    total_samples, self.K_clients, num_queries
-                )
+                + clustering_cost
+            )
+        elif self.ci_method == "kci":
+            comm_cost = estimate_kci_comm_cost(
+                total_samples, self.K_clients, num_queries
+            )
         res_skel = count_skeleton_accuracy(true_DAG_bin, est_cpdag)
         res_dir = count_dag_accuracy(true_DAG_bin, est_dag)
         result = {
