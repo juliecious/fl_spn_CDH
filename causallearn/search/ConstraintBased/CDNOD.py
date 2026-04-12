@@ -108,6 +108,25 @@ def get_hybrid_direction_score(
         batch_data = batch_data[indices]
 
     u_idx = c_idx  # The index of the domain variable in the augmented data
+    num_features = batch_data.shape[1]  # Total number of features in augmented data
+
+    def create_marginal_batch(batch, keep_indices):
+        """
+        Create a batch with NaN for marginalized variables.
+        SPNs use NaN to indicate marginalized (unobserved) variables.
+
+        Args:
+            batch: Full data tensor [N, D]
+            keep_indices: List of column indices to keep
+
+        Returns:
+            Tensor [N, D] with NaN for marginalized columns
+        """
+        # Create a copy filled with NaN
+        marginal_batch = torch.full_like(batch, float("nan"))
+        # Keep only the specified columns
+        marginal_batch[:, keep_indices] = batch[:, keep_indices]
+        return marginal_batch
 
     def estimate_cmi_normalized(target_idx, context_idx, u_idx, batch):
         """
@@ -118,16 +137,20 @@ def get_hybrid_direction_score(
         with torch.no_grad():
             # A. Calculate log P(Y | X, U)
             # LL(Y, X, U)
-            ll_yxu = fed_spn_model.log_prob(batch[:, [target_idx, context_idx, u_idx]])
+            batch_yxu = create_marginal_batch(batch, [target_idx, context_idx, u_idx])
+            ll_yxu = fed_spn_model.log_prob(batch_yxu)
             # LL(X, U)
-            ll_xu = fed_spn_model.log_prob(batch[:, [context_idx, u_idx]])
+            batch_xu = create_marginal_batch(batch, [context_idx, u_idx])
+            ll_xu = fed_spn_model.log_prob(batch_xu)
             log_p_y_given_xu = ll_yxu - ll_xu
 
             # B. Calculate log P(Y | X)
             # LL(Y, X)
-            ll_yx = fed_spn_model.log_prob(batch[:, [target_idx, context_idx]])
+            batch_yx = create_marginal_batch(batch, [target_idx, context_idx])
+            ll_yx = fed_spn_model.log_prob(batch_yx)
             # LL(X)
-            ll_x = fed_spn_model.log_prob(batch[:, [context_idx]])
+            batch_x = create_marginal_batch(batch, [context_idx])
+            ll_x = fed_spn_model.log_prob(batch_x)
             log_p_y_given_x = ll_yx - ll_x
 
             # C. Calculate CMI (Pointwise Mutual Information difference)
@@ -137,7 +160,8 @@ def get_hybrid_direction_score(
 
             # D. Calculate H(Y) for Normalization
             # H(Y) = - E[ log P(Y) ]
-            ll_y = fed_spn_model.log_prob(batch[:, [target_idx]])
+            batch_y = create_marginal_batch(batch, [target_idx])
+            ll_y = fed_spn_model.log_prob(batch_y)
             h_y = -ll_y.mean().item()
 
             # Safety: Prevent division by zero or negative entropy (possible in continuous differential entropy)

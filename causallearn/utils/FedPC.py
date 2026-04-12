@@ -552,7 +552,9 @@ class GlobalFedSPN(nn.Module):
                 # Update
                 self.weights = new_weights.detach()
 
-        logging.info(f"[FedPC] EM Refined Weights: {self.weights.cpu().numpy()}")
+        # Convert to list for logging to avoid numpy/torch compatibility issues
+        weights_list = self.weights.cpu().numpy().tolist()
+        logging.info(f"[FedPC] EM Refined Weights: {weights_list}")
 
     def log_prob(self, x):
         """

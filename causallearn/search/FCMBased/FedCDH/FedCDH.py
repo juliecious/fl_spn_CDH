@@ -512,6 +512,224 @@ class FedCDH:
 
             train_time = time.time() - start_train
 
+        # ============================================================
+        # SPN Quality Evaluation (MMD, KS tests, UMAP visualization)
+        # ============================================================
+        if self.ci_method == "spn":
+            from causallearn.utils.spn_evaluation import (
+                evaluate_spn_quality,
+                log_spn_quality,
+                create_umap_visualization,
+            )
+            import os
+            from datetime import datetime
+
+            logging.info("\n" + "=" * 60)
+            logging.info("SPN Quality Evaluation")
+            logging.info("=" * 60)
+
+            # Create unique output directory for this run
+            if hasattr(self.args, "spn_eval_dir") and self.args.spn_eval_dir:
+                output_dir = self.args.spn_eval_dir
+            else:
+                # Auto-generate: eval/{timestamp}_{scenario}_{K}clients_{d}vars_{n}samples/
+                timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
+                run_id = f"{timestamp}_{self.scenario}_{self.K_clients}clients_{self.d_features}vars_{total_samples}samples"
+
+                # Get project root (3 levels up from FedCDH.py)
+                current_file = os.path.abspath(__file__)
+                project_root = os.path.dirname(
+                    os.path.dirname(
+                        os.path.dirname(os.path.dirname(os.path.dirname(current_file)))
+                    )
+                )
+                output_dir = os.path.join(project_root, "eval", run_id)
+
+            os.makedirs(output_dir, exist_ok=True)
+            self.spn_eval_dir = output_dir  # Store for access after fit()
+
+            # Setup file logging for this run
+            log_file = os.path.join(output_dir, "run.log")
+            file_handler = logging.FileHandler(log_file, mode="w")
+            file_handler.setLevel(logging.INFO)
+            file_handler.setFormatter(
+                logging.Formatter("%(asctime)s - %(levelname)s - %(message)s")
+            )
+
+            # Get root logger and add file handler
+            root_logger = logging.getLogger()
+            root_logger.addHandler(file_handler)
+            self._log_file_handler = file_handler  # Store to remove later
+
+            # Log run metadata
+            logging.info("=" * 60)
+            logging.info("FedCDH Run Configuration")
+            logging.info("=" * 60)
+            logging.info(f"Scenario: {self.scenario}")
+            logging.info(f"Clients (K): {self.K_clients}")
+            logging.info(f"Features (d): {self.d_features}")
+            logging.info(f"Total samples: {total_samples}")
+            logging.info(f"CI method: {self.ci_method}")
+            logging.info(f"Alpha: {getattr(self.args, 'alpha', 0.05)}")
+            logging.info(f"Device: {self.device}")
+            logging.info(f"Model type: {self.model_type}")
+            logging.info(f"SPN epochs: {getattr(self.args, 'epochs', 'N/A')}")
+            logging.info(f"Output directory: {output_dir}")
+            logging.info("=" * 60 + "\n")
+
+            # Evaluate local SPNs
+            if self.local_spns and len(self.local_spns) > 0:
+                logging.info(f"Evaluating {len(self.local_spns)} local SPNs...")
+
+                for k, local_spn in enumerate(self.local_spns):
+                    # Prepare client's data with context
+                    if self.scenario == "horizontal":
+                        samples_per_client = total_samples // self.K_clients
+                        X_client = X_global[
+                            k * samples_per_client : (k + 1) * samples_per_client, :
+                        ]
+                        c_client = c_indx[
+                            k * samples_per_client : (k + 1) * samples_per_client, :
+                        ]
+                    elif self.scenario == "vertical":
+                        # Vertical: all samples, subset of features
+                        # Skip evaluation for vertical local SPNs (dimension complexities)
+                        continue
+                    else:  # hybrid
+                        samples_per_client = total_samples // self.K_clients
+                        X_client = X_global[
+                            k * samples_per_client : (k + 1) * samples_per_client, :
+                        ]
+                        c_client = c_indx[
+                            k * samples_per_client : (k + 1) * samples_per_client, :
+                        ]
+
+                    X_client_aug = np.concatenate([X_client, c_client], axis=1)
+
+                    # Evaluate quality
+                    result = evaluate_spn_quality(
+                        local_spn,
+                        X_client_aug,
+                        n_samples=min(150, len(X_client)),
+                        device=self.device,
+                        compute_mmd=True,
+                        compute_ks=True,
+                        name=f"Local SPN Client {k}",
+                    )
+
+                    log_spn_quality(result)
+
+                    # Independence structure evaluation (if ground truth available)
+                    if true_DAG_bin is not None:
+                        from causallearn.utils.spn_evaluation import (
+                            evaluate_spn_independence_structure,
+                            log_independence_structure_results,
+                        )
+
+                        indep_result = evaluate_spn_independence_structure(
+                            spn_model=local_spn,
+                            X_data=X_client_aug,
+                            true_DAG_bin=true_DAG_bin,
+                            alpha=0.05,
+                            max_order=1,
+                            n_conditional_tests=30,
+                            num_permutations=50,
+                            device=self.device,
+                            name=f"Local SPN Client {k}",
+                        )
+                        log_independence_structure_results(indep_result)
+
+                    # UMAP visualization for multivariate data
+                    if X_client.shape[1] > 2:
+                        with torch.no_grad():
+                            samples = (
+                                local_spn.sample(min(200, len(X_client))).cpu().numpy()
+                            )
+                        # Remove context column
+                        X_features = X_client
+                        samples_features = (
+                            samples[:, :-1]
+                            if samples.shape[1] > X_client.shape[1]
+                            else samples
+                        )
+
+                        if X_features.shape[1] == samples_features.shape[1]:
+                            save_path = os.path.join(
+                                output_dir, f"umap_local_client_{k}.png"
+                            )
+                            create_umap_visualization(
+                                X_features,
+                                samples_features,
+                                save_path=save_path,
+                                title=f"Local SPN (Client {k})",
+                            )
+
+            # Evaluate global SPN
+            logging.info("Evaluating global federated SPN...")
+            global_result = evaluate_spn_quality(
+                self.fed_spn_model,
+                X_aug_global,
+                n_samples=min(300, total_samples),
+                device=self.device,
+                compute_mmd=True,
+                compute_ks=True,
+                name="Global Federated SPN",
+            )
+
+            log_spn_quality(global_result)
+
+            # Independence structure evaluation for global SPN (if ground truth available)
+            if true_DAG_bin is not None:
+                from causallearn.utils.spn_evaluation import (
+                    evaluate_spn_independence_structure,
+                    log_independence_structure_results,
+                )
+
+                global_indep_result = evaluate_spn_independence_structure(
+                    spn_model=self.fed_spn_model,
+                    X_data=X_aug_global,
+                    true_DAG_bin=true_DAG_bin,
+                    alpha=0.05,
+                    max_order=1,
+                    n_conditional_tests=50,  # More tests for global
+                    num_permutations=50,
+                    device=self.device,
+                    name="Global Federated SPN",
+                )
+                log_independence_structure_results(global_indep_result)
+
+            # UMAP for global SPN
+            if self.d_features > 2:
+                with torch.no_grad():
+                    samples = (
+                        self.fed_spn_model.sample(min(300, total_samples)).cpu().numpy()
+                    )
+                # Remove context column
+                X_features = X_global
+                samples_features = (
+                    samples[:, :-1] if samples.shape[1] > X_global.shape[1] else samples
+                )
+
+                if X_features.shape[1] == samples_features.shape[1]:
+                    save_path = os.path.join(output_dir, "umap_global_spn.png")
+                    create_umap_visualization(
+                        X_features,
+                        samples_features,
+                        save_path=save_path,
+                        title="Global Federated SPN",
+                    )
+
+            logging.info(f"SPN evaluation plots saved to: {output_dir}/")
+            logging.info(f"Run log saved to: {log_file}")
+            logging.info("=" * 60 + "\n")
+
+            # Remove file handler to avoid accumulation across runs
+            if hasattr(self, "_log_file_handler"):
+                file_handler.flush()
+                file_handler.close()
+                root_logger.removeHandler(file_handler)
+                delattr(self, "_log_file_handler")
+
         start_cd = time.time()
         from causallearn.utils.cit import CIT, SPN_CIT
 

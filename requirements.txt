@@ -76,6 +76,11 @@ seaborn==0.13.2
 # Plotly 5.24.1 - Interactive plots
 plotly==5.24.1
 
+# UMAP-learn 0.5.12 - Dimensionality reduction for SPN evaluation visualization
+# Used in: tests/benchmarks/evaluate_spn.py for UMAP plots (d>2)
+# Note: Install via conda if pip fails: conda install -c conda-forge umap-learn
+umap-learn==0.5.12
+
 # ============================================================================
 # UTILITIES
 # ============================================================================
