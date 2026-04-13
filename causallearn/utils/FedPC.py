@@ -636,6 +636,16 @@ class GlobalFedSPN(nn.Module):
 
             start_idx = end_idx
 
+        # FIX: Add context column if components are FederatedProduct (hybrid mode)
+        # This ensures hybrid mode samples have shape [n, d+1] like horizontal mode
+        is_hybrid = any(isinstance(c, FederatedProduct) for c in self.components)
+
+        if is_hybrid:
+            # Hybrid mode: Add context column with component indices
+            # This makes shape consistent with horizontal [n, d+1]
+            context_col = comp_indices.float().view(n, 1)
+            samples = torch.cat([samples, context_col], dim=1)
+
         return samples.view(n, -1)
 
     def log_prob_conditional_u(self, x, u_idx):

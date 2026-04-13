@@ -734,6 +734,9 @@ class FedCDH:
                             log_independence_structure_results,
                         )
 
+                        # Adaptive num_permutations for evaluation
+                        eval_perms = min(200, max(50, self.d_features * 10))
+
                         indep_result = evaluate_spn_independence_structure(
                             spn_model=local_spn,
                             X_data=X_client_aug,
@@ -741,7 +744,7 @@ class FedCDH:
                             alpha=0.05,
                             max_order=1,
                             n_conditional_tests=30,
-                            num_permutations=50,
+                            num_permutations=eval_perms,
                             device=self.device,
                             name=f"Local SPN Client {k}",
                         )
@@ -793,6 +796,9 @@ class FedCDH:
                     log_independence_structure_results,
                 )
 
+                # Adaptive num_permutations for evaluation
+                eval_perms = min(200, max(50, self.d_features * 10))
+
                 global_indep_result = evaluate_spn_independence_structure(
                     spn_model=self.fed_spn_model,
                     X_data=X_aug_global,
@@ -800,7 +806,7 @@ class FedCDH:
                     alpha=0.05,
                     max_order=1,
                     n_conditional_tests=50,  # More tests for global
-                    num_permutations=50,
+                    num_permutations=eval_perms,
                     device=self.device,
                     name="Global Federated SPN",
                 )
@@ -841,10 +847,21 @@ class FedCDH:
         start_cd = time.time()
         from causallearn.utils.cit import CIT, SPN_CIT
 
+        # Adaptive num_permutations based on dimensionality
+        # For d≥10, need more permutations for reliable p-value calibration
+        # Formula: min(200, max(50, d × 10))
+        num_permutations = min(200, max(50, self.d_features * 10))
+        if num_permutations > 50:
+            logging.info(
+                f"Using adaptive num_permutations={num_permutations} for d={self.d_features}"
+            )
+
         # Causal discovery using global CI test
         if self.ci_method == "spn":
             cit_obj = SPN_CIT(
-                X_aug_global, global_model=self.fed_spn_model, num_permutations=50
+                X_aug_global,
+                global_model=self.fed_spn_model,
+                num_permutations=num_permutations,
             )
         elif self.ci_method == "kci":
             cit_obj = CIT(X_aug_global, "kci")

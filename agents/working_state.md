@@ -37,7 +37,8 @@
 
 - **3 Phases of Code Cleanup**: Removed 47 lines dead code, eliminated duplicates, improved documentation
 - **2 Critical Routing Bugs Fixed**: Global SPN now correctly matches local SPN performance
-- **Hybrid Scenario Implementation Fixed** (April 13, 2026): Product-then-Mixture hierarchy now distinct from horizontal
+- **Hybrid Scenario Implementation** (April 13, 2026): Product-then-Mixture hierarchy implemented
+- **Hybrid Sampling Bug Fixed** (April 13, 2026): Context column now added for dimensional consistency, enabling proper evaluation
 - **Theoretical Validation**: All 7 core requirements verified across H/V/Hybrid scenarios
 - **SPN Quality Framework**: Comprehensive evaluation with MMD, KS tests, convergence analysis
 - **Independence Structure Evaluation** (April 10, 2026): Ground truth DAG comparison using d-separation + SPN_CIT
@@ -234,6 +235,84 @@ AFTER (Fixed):
 2. PC theory maps naturally: Products (vertical-like) + Mixtures (horizontal-like) = Hybrid
 3. Simplified approach (product-then-mixture) is more practical than full mixture-then-product hierarchy
 4. Always validate that different scenarios produce different results!
+
+---
+
+### Bug 5: Hybrid Sampling Dimension Mismatch (April 13, 2026)
+
+**Problem**: After implementing Product-then-Mixture hierarchy, hybrid mode generated samples with wrong dimensions, causing evaluation failure.
+
+**Symptom**:
+```
+WARNING: Global Federated SPN: Dimension mismatch: data=5, samples=4
+```
+
+**Root Cause Analysis**:
+1. **Context Column Missing**: Hybrid mode FederatedProduct.sample() returns `[n, d]` without context column
+2. **Evaluation Expects Context**: spn_evaluation.py removes last column assuming it's context: `samples[:, :-1]`
+3. **Result**: Evaluation gets `[n, d-1]` instead of `[n, d]`, breaking MMD and KS tests
+4. **UMAP Different But Metrics Identical**: Despite learning different distributions (visible in UMAPs), dimension mismatch caused CI tests to fail silently, producing identical metrics
+
+**Theoretical Context**:
+- Horizontal mode: Local SPNs trained on `[X, U]` where U is context (client ID)
+- Hybrid mode (before fix): FederatedProduct samples only features `[X]`, no context column
+- Evaluation code: Assumes all samples have shape `[n, d+1]` and strips context
+
+**Fix** (FedPC.py:637-648):
+```python
+# In GlobalFedSPN.sample() after component sampling
+# FIX: Add context column if components are FederatedProduct (hybrid mode)
+is_hybrid = any(isinstance(c, FederatedProduct) for c in self.components)
+
+if is_hybrid:
+    # Hybrid mode: Add context column with component indices
+    # This makes shape consistent with horizontal [n, d+1]
+    context_col = comp_indices.float().view(n, 1)
+    samples = torch.cat([samples, context_col], dim=1)
+
+return samples.view(n, -1)
+```
+
+**Rationale**:
+- Context column indicates which mixture component (client product) the sample came from
+- Maintains consistency with horizontal mode expectations
+- Enables proper SPN evaluation and CI testing
+
+**Validation** (test_hybrid_fix.py):
+```
+TEST 1: FederatedProduct dimension test
+  Expected: (100, 5)  [5 features, no context yet]
+  Got:      (100, 5) ✅
+
+TEST 2: GlobalFedSPN hybrid context test
+  Expected: (100, 6)  [5 features + 1 context]
+  Got:      (100, 6) ✅
+  Context values: [0.0, 1.0] ✅
+
+TEST 3: Horizontal mode unchanged
+  Expected: (100, 6)
+  Got:      (100, 6) ✅
+```
+
+**Results After Fix**:
+- ✅ NO dimension mismatch warning
+- ✅ Hybrid mode now produces DIFFERENT metrics from horizontal:
+  - Horizontal: Train LL=5.1649, Overall F1=0.609
+  - Hybrid: Train LL=-7.1461, Overall F1=0.897
+- ✅ UMAPs remain distinct (confirms different distributions learned)
+- ✅ CI tests now work correctly with hybrid SPNs
+
+**Files Modified**:
+- `causallearn/utils/FedPC.py` (lines 637-648): Added context column for hybrid mode
+- `eval/small_eval/test_hybrid_fix.py`: Created validation tests
+
+**Implementation Location**: `FedPC.py:GlobalFedSPN.sample()`
+
+**Learning**:
+1. Always ensure dimensional consistency between training and sampling
+2. Context columns serve dual purpose: routing (horizontal) and component tracking (hybrid)
+3. Validation tests should check both shape AND actual metric differences
+4. Dimension mismatches can cause silent failures in downstream evaluation
 
 ---
 
