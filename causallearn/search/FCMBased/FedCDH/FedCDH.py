@@ -444,37 +444,145 @@ class FedCDH:
                         clients_counts[h].append(len(local_data_h))
             global_components = []
             final_weights = []
-            for h in range(num_clusters):
-                if not clients_clusters[h]:
-                    continue
 
-                # Check if features are disjoint (only for vertical scenario)
-                is_disjoint = (
-                    feature_maps is not None
-                    and len(feature_maps) > 1
-                    and set(feature_maps[0]).isdisjoint(set(feature_maps[1]))
+            # Simplified Hybrid: Product-then-Mixture
+            # Check if hybrid scenario with feature groups
+            is_hybrid_mode = (
+                self.scenario == "hybrid"
+                and hasattr(self, "feature_groups")
+                and self.feature_groups is not None
+            )
+
+            if is_hybrid_mode:
+                logging.info(
+                    f"Using simplified hybrid aggregation with {len(self.feature_groups)} feature groups"
                 )
 
-                if is_disjoint and len(clients_clusters[h]) == self.K_clients:
-                    # Vertical scenario: Use FederatedProduct for disjoint features
-                    comp = FederatedProduct(
-                        clients_clusters[h],
-                        feature_map=feature_maps,
-                        device=self.device,
+                # For each cluster, build product-then-mixture
+                for h in range(num_clusters):
+                    if not clients_clusters[h]:
+                        continue
+
+                    # Each cluster has K clients * num_feature_groups SPNs
+                    # Group them by client
+                    num_groups = len(self.feature_groups)
+
+                    # Rebuild clients_clusters[h] with feature group structure
+                    # Current: clients_clusters[h] is flat list of SPNs
+                    # We need to re-train with feature groups
+
+                    client_products = []
+                    client_counts_updated = []
+
+                    # Get cluster data for re-training with feature groups
+                    cluster_mask_global = labels == h
+                    if cluster_mask_global.sum() < 5:
+                        continue
+
+                    for k in range(self.K_clients):
+                        # Get local data for this cluster and client
+                        local_data_h = X_splits[k][labels_splits[k] == h]
+
+                        if len(local_data_h) <= 2:
+                            continue
+
+                        # Train one SPN per feature group for this client
+                        group_spns = []
+                        for g, feature_group in enumerate(self.feature_groups):
+                            # Extract data for this feature group
+                            local_data_group = local_data_h[:, feature_group]
+                            local_d_group = local_data_group.shape[1]
+
+                            if local_d_group == 1:
+                                leaf = UnivariateSPNWrapper(
+                                    device=self.device,
+                                    num_sums=num_sums,
+                                    num_leaves=num_leaves,
+                                    seed=h * 100 + k * 10 + g,
+                                )
+                            else:
+                                leaf = LocalSPNWrapper(
+                                    num_features=local_d_group,
+                                    device=self.device,
+                                    num_sums=num_sums,
+                                    num_leaves=num_leaves,
+                                    depth=max(1, int(np.floor(np.log2(local_d_group)))),
+                                    num_repetitions=num_repetitions,
+                                    seed=h * 100 + k * 10 + g,
+                                )
+
+                            leaf.train_local(
+                                local_data_group, epochs=train_epochs, lr=0.01
+                            )
+                            group_spns.append(leaf)
+
+                        # Product over feature groups for this client
+                        if len(group_spns) > 1:
+                            # Convert feature_groups list to dict format for FederatedProduct
+                            # FederatedProduct expects {0: [features_g0], 1: [features_g1], ...}
+                            feature_map_dict = {
+                                g: self.feature_groups[g]
+                                for g in range(len(self.feature_groups))
+                            }
+
+                            client_product = FederatedProduct(
+                                group_spns,
+                                feature_map=feature_map_dict,
+                                device=self.device,
+                            )
+                            client_products.append(client_product)
+                            client_counts_updated.append(len(local_data_h))
+                        elif len(group_spns) == 1:
+                            # Only one group, use directly
+                            client_products.append(group_spns[0])
+                            client_counts_updated.append(len(local_data_h))
+
+                    # Mixture over clients (their products)
+                    if client_products:
+                        inner_ws = np.array(client_counts_updated)
+                        inner_ws = inner_ws / inner_ws.sum()
+                        comp = GlobalFedSPN(
+                            client_products,
+                            weights=inner_ws,
+                            strategy="mixture",
+                            device=self.device,
+                        )
+                        global_components.append(comp)
+                        final_weights.append(weights[h])
+
+            else:
+                # Original vertical/horizontal logic
+                for h in range(num_clusters):
+                    if not clients_clusters[h]:
+                        continue
+
+                    # Check if features are disjoint (only for vertical scenario)
+                    is_disjoint = (
+                        feature_maps is not None
+                        and len(feature_maps) > 1
+                        and set(feature_maps[0]).isdisjoint(set(feature_maps[1]))
                     )
-                    global_components.append(comp)
-                    final_weights.append(weights[h])
-                else:
-                    inner_ws = np.array(clients_counts[h])
-                    inner_ws = inner_ws / inner_ws.sum()
-                    comp = GlobalFedSPN(
-                        clients_clusters[h],
-                        weights=inner_ws,
-                        strategy="mixture",
-                        device=self.device,
-                    )
-                    global_components.append(comp)
-                    final_weights.append(weights[h])
+
+                    if is_disjoint and len(clients_clusters[h]) == self.K_clients:
+                        # Vertical scenario: Use FederatedProduct for disjoint features
+                        comp = FederatedProduct(
+                            clients_clusters[h],
+                            feature_map=feature_maps,
+                            device=self.device,
+                        )
+                        global_components.append(comp)
+                        final_weights.append(weights[h])
+                    else:
+                        inner_ws = np.array(clients_counts[h])
+                        inner_ws = inner_ws / inner_ws.sum()
+                        comp = GlobalFedSPN(
+                            clients_clusters[h],
+                            weights=inner_ws,
+                            strategy="mixture",
+                            device=self.device,
+                        )
+                        global_components.append(comp)
+                        final_weights.append(weights[h])
             if not final_weights:
                 global_spn = GlobalFedSPN([], device=self.device)
             else:
