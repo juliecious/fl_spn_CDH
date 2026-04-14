@@ -97,6 +97,203 @@ FedCDH Pipeline:
 
 ---
 
+## Detailed Architecture Analysis
+
+### Data Partitioning Strategies
+
+| Scenario | Samples | Features | Key Property |
+|----------|---------|----------|--------------|
+| **Horizontal** | Partitioned (different rows) | Shared (same columns) | Clients have same features, different samples |
+| **Vertical** | Shared (same rows) | Partitioned (different columns) | Clients have same samples, different features |
+| **Hybrid** | Partitioned (different rows) | Overlapping (some shared) | Clients have different samples, overlapping features |
+
+### Mathematical Forms
+
+```
+Horizontal: P(X) = Σ_k w_k × P_k(X)           (Mixture over clients)
+Vertical:   P(X) = Π_k P_k(X_k)               (Product over feature partitions)
+Hybrid:     P(X) = Π_g [ Σ_k w_k,g × P_k,g(X_g) ]  (Mixture-then-Product)
+```
+
+### Horizontal Mode (Mixture of SPNs)
+
+**Tree Structure:**
+```
+                     GlobalFedSPN (Mixture)
+                    /         |         \
+              w_0 /       w_1 |       w_2 \
+                 /            |            \
+        LocalSPN_0      LocalSPN_1      LocalSPN_2
+        [X_0,1,2,3,4]   [X_0,1,2,3,4]   [X_0,1,2,3,4]
+        (Client 0)      (Client 1)      (Client 2)
+
+        Each LocalSPN models ALL features
+        Trained on different sample subsets
+```
+
+**Classes Used:**
+1. **LocalSPNWrapper** - Learn P_k(X | U=k) for client k
+2. **GlobalFedSPN** (strategy="mixture") - Compute P(X) = Σ_k w_k × P_k(X)
+
+**Why it works:** Mixture captures heterogeneous sample distributions across clients.
+
+---
+
+### Vertical Mode (Product of SPNs)
+
+**Tree Structure:**
+```
+                     GlobalFedSPN (Mixture over clusters)
+                              |
+                    FederatedProduct (Product over clients)
+                    /         |         \
+          LocalSPN_0    LocalSPN_1    LocalSPN_2
+          [X_0,1]       [X_2,3]       [X_4,U]
+          (Client 0)    (Client 1)    (Client 2)
+
+          Each LocalSPN models a SUBSET of features
+          All clients see ALL samples
+```
+
+**Classes Used:**
+1. **LocalSPNWrapper** - Learn P_k(X_k | U) for feature subset X_k
+2. **FederatedProduct** - Compute P(X) = Π_k P_k(X_k)
+
+**Why it works:** Product captures conditional independence across disjoint feature partitions.
+
+---
+
+### Hybrid Mode (Mixture-then-Product)
+
+**Tree Structure:**
+```
+                    GlobalFedSPN (Mixture over clusters)
+                              |
+                    ProductOverGroups (Product over feature groups)
+                    /                           \
+        GroupMixture_g1                    GroupMixture_g2
+        (Features [0,1,2])                 (Features [3,4])
+        /        |        \                /              \
+  SPN_0,g1  SPN_1,g1  SPN_2,g1      SPN_0,g2          SPN_2,g2
+  (Client0) (Client1) (Client2)     (Client0)         (Client2)
+```
+
+**Classes Used:**
+1. **build_feature_indicator_matrix()** - Build M[k,j] = 1 if client k has feature j
+2. **group_features_by_client_set()** - Group features by identical column patterns (Algorithm 1)
+3. **GroupMixture** - Mixture over clients for single feature subspace: P(X_g) = Σ_k w_k,g × P_k,g(X_g)
+4. **ProductOverGroups** - Product over feature groups: P(X) = Π_g P(X_g)
+
+**Why it works:**
+- Algorithm 1 ensures each feature appears in exactly ONE group (no double-counting)
+- Mixture captures heterogeneity within each feature group
+- Product captures independence across feature groups
+- Matches Seng et al. (2025) formulation exactly
+
+**Example with Overlaps:**
+```
+Client 0: Features [0, 1, 2]
+Client 1: Features [1, 2, 3]
+Client 2: Features [2, 3, 4]
+
+Indicator Matrix M:
+              F0  F1  F2  F3  F4
+Client 0:     1   1   1   0   0
+Client 1:     0   1   1   1   0
+Client 2:     0   0   1   1   1
+
+Algorithm 1 Grouping (by column pattern):
+- F0: (1,0,0)ᵀ → Group for clients {0} only
+- F1: (1,1,0)ᵀ → Group for clients {0,1}
+- F2: (1,1,1)ᵀ → Group for clients {0,1,2}
+- F3: (0,1,1)ᵀ → Group for clients {1,2}
+- F4: (0,0,1)ᵀ → Group for client {2} only
+
+Result: 5 GroupMixtures, each modeling one feature
+```
+
+---
+
+### Code Flow Comparison
+
+**Horizontal:**
+```
+1. Train LocalSPN_k on each client's samples (all features)
+2. Create GlobalFedSPN(clients, strategy="mixture")
+3. log_prob: logsumexp(ll_stack + log_weights)
+4. sample: Choose client k ~ Categorical(weights), return LocalSPN_k.sample(n)
+```
+
+**Vertical:**
+```
+1. Build feature_maps: {0: [0,1], 1: [2,3], 2: [4,U]}
+2. Train LocalSPN_k on client k's feature subset
+3. Create FederatedProduct(clients, feature_map)
+4. log_prob: sum(ll_k for each client)
+5. sample: Concatenate samples from each client's feature subset
+```
+
+**Hybrid:**
+```
+1. Build indicator matrix M
+2. Group features by client set → feature_subspaces
+3. Train SPNs per (client, feature_subspace) pair
+4. Create GroupMixtures (Mixture FIRST per feature group)
+5. Create ProductOverGroups (Product SECOND over groups)
+6. log_prob: sum(GroupMixture_g.log_prob(x) for each group)
+7. sample: Concatenate samples from each GroupMixture
+```
+
+---
+
+### Mathematical Correctness
+
+**Horizontal:** ✅ Mixture captures heterogeneity when clients have different sample distributions over same features.
+
+**Vertical:** ✅ Product captures factorization when features are disjoint and conditionally independent.
+
+**Hybrid:** ✅ Mixture-then-Product captures BOTH heterogeneity (within groups) AND independence (across groups).
+
+**Key Insight:** Each feature appears in exactly ONE GroupMixture (via Algorithm 1), preventing double-counting.
+
+---
+
+### Old vs New Hybrid Comparison
+
+**Old (Product-then-Mixture) - INCORRECT:**
+```
+P(X) = Σ_k w_k × [ Π_g P_k,g(X_g) ]
+
+Issues:
+- Mixture at top assumes clients are independent samples
+- But clients have DIFFERENT features (not just different samples)
+- Overlap issue: Shared features get modeled twice (once per client)
+```
+
+**New (Mixture-then-Product) - CORRECT:**
+```
+P(X) = Π_g [ Σ_k∈S_g w_k,g × P_k,g(X_g) ]
+
+Correct because:
+- Product at top combines independent feature groups
+- Mixture within each group captures heterogeneity
+- Each feature appears in exactly one group (via Algorithm 1)
+- Matches Seng et al. (2025) formulation
+```
+
+---
+
+### Validation Checklist
+
+✅ **Horizontal:** GlobalFedSPN(strategy="mixture"), logsumexp, ancestral sampling
+✅ **Vertical:** FederatedProduct, sum of log-probs, feature concatenation
+✅ **Hybrid:** ProductOverGroups → GroupMixtures → LocalSPNs, Algorithm 1 grouping
+✅ **Context Column:** Added for all modes in GlobalFedSPN.sample() (Bug fix: April 14, 2026)
+✅ **Dimension Consistency:** All modes produce [n, d+1] samples
+✅ **Mathematical Correctness:** All three modes proven correct for their respective data structures
+
+---
+
 ## Critical Bug Fixes & Learnings
 
 ### Bug 1: Global SPN Routing - Dimension Mismatch (March 30, 2026)
