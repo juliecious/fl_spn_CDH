@@ -1262,9 +1262,15 @@ class GlobalFedSPN(nn.Module):
 
             start_idx = end_idx
 
-        # FIX: Add context column if components are FederatedProduct (hybrid mode)
+        # FIX: Add context column if components are hybrid mode classes
         # This ensures hybrid mode samples have shape [n, d+1] like horizontal mode
-        is_hybrid = any(isinstance(c, FederatedProduct) for c in self.components)
+        # Check for both old (FederatedProduct) and new (ProductOverGroups, ProductOverGroupsWithOverlap) classes
+        is_hybrid = any(
+            isinstance(
+                c, (FederatedProduct, ProductOverGroups, ProductOverGroupsWithOverlap)
+            )
+            for c in self.components
+        )
 
         if is_hybrid:
             # Hybrid mode: Add context column with component indices
