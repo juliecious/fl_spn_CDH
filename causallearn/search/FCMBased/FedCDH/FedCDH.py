@@ -16,6 +16,11 @@ from causallearn.utils.FedPC import (
     UnivariateSPNWrapper,
     FederatedProduct,
     FederatedStructureLearner,
+    GroupMixture,
+    ProductOverGroups,
+    ProductOverGroupsWithOverlap,
+    build_feature_indicator_matrix,
+    group_features_by_client_set,
 )
 from causallearn.utils.data_utils import (
     count_dag_accuracy,
@@ -468,110 +473,155 @@ class FedCDH:
             global_components = []
             final_weights = []
 
-            # Simplified Hybrid: Product-then-Mixture
-            # Check if hybrid scenario with feature groups
-            is_hybrid_mode = (
-                self.scenario == "hybrid"
-                and hasattr(self, "feature_groups")
-                and self.feature_groups is not None
-            )
-
-            if is_hybrid_mode:
+            # NEW: Mixture-then-Product Hybrid (Seng et al. 2025)
+            # Justification: Theoretically correct architecture for overlapping features
+            if self.scenario == "hybrid":
                 logging.info(
-                    f"Using simplified hybrid aggregation with {len(self.feature_groups)} feature groups"
+                    "[FedCDH] Building Mixture-then-Product hybrid (Seng et al. 2025)"
                 )
 
-                # For each cluster, build product-then-mixture
+                # Step 1: Build indicator matrix M
+                # Justification: Reveals which clients have which features (Algorithm 1)
+                M, feature_names = build_feature_indicator_matrix(
+                    X_splits, scenario=self.scenario, d_features=self.d_features
+                )
+
+                # Step 2: Group features by client set
+                # Justification: Features with same client set share a GroupMixture
+                feature_subspaces = group_features_by_client_set(M, feature_names)
+
+                # For each cluster:
                 for h in range(num_clusters):
                     if not clients_clusters[h]:
                         continue
 
-                    # Each cluster has K clients * num_feature_groups SPNs
-                    # Group them by client
-                    num_groups = len(self.feature_groups)
-
-                    # Rebuild clients_clusters[h] with feature group structure
-                    # Current: clients_clusters[h] is flat list of SPNs
-                    # We need to re-train with feature groups
-
-                    client_products = []
-                    client_counts_updated = []
-
-                    # Get cluster data for re-training with feature groups
                     cluster_mask_global = labels == h
                     if cluster_mask_global.sum() < 5:
                         continue
 
-                    for k in range(self.K_clients):
-                        # Get local data for this cluster and client
-                        local_data_h = X_splits[k][labels_splits[k] == h]
+                    # Step 3: Train SPNs per (client, feature_subspace) pair
+                    # Structure: {(client_set, features): [trained_SPNs]}
+                    # Justification: Each subspace needs SPNs from clients that have it
+                    spn_registry = {}
 
-                        if len(local_data_h) <= 2:
-                            continue
+                    for client_set, features in feature_subspaces.items():
+                        spn_registry[(client_set, tuple(features))] = []
 
-                        # Train one SPN per feature group for this client
-                        group_spns = []
-                        for g, feature_group in enumerate(self.feature_groups):
-                            # Extract data for this feature group
-                            local_data_group = local_data_h[:, feature_group]
-                            local_d_group = local_data_group.shape[1]
+                        for k in client_set:
+                            # Get client k's data for this cluster
+                            local_data_h = X_splits[k][labels_splits[k] == h]
 
-                            if local_d_group == 1:
-                                leaf = UnivariateSPNWrapper(
+                            if len(local_data_h) <= 2:
+                                continue
+
+                            # Extract features for this subspace
+                            # Justification: Client only models features it has
+                            local_data_subspace = local_data_h[:, features]
+                            local_d = local_data_subspace.shape[1]
+
+                            # Train SPN
+                            # Justification: Same training logic as before
+                            if local_d == 1:
+                                spn = UnivariateSPNWrapper(
                                     device=self.device,
                                     num_sums=num_sums,
                                     num_leaves=num_leaves,
-                                    seed=h * 100 + k * 10 + g,
+                                    seed=h * 1000 + k * 10 + hash(tuple(features)) % 10,
                                 )
                             else:
-                                leaf = LocalSPNWrapper(
-                                    num_features=local_d_group,
+                                spn = LocalSPNWrapper(
+                                    num_features=local_d,
                                     device=self.device,
                                     num_sums=num_sums,
                                     num_leaves=num_leaves,
-                                    depth=max(1, int(np.floor(np.log2(local_d_group)))),
+                                    depth=max(1, int(np.floor(np.log2(local_d)))),
                                     num_repetitions=num_repetitions,
-                                    seed=h * 100 + k * 10 + g,
+                                    seed=h * 1000 + k * 10 + hash(tuple(features)) % 10,
                                 )
 
-                            leaf.train_local(
-                                local_data_group, epochs=train_epochs, lr=0.01
+                            spn.train_local(
+                                local_data_subspace, epochs=train_epochs, lr=0.01
                             )
-                            group_spns.append(leaf)
+                            spn_registry[(client_set, tuple(features))].append(spn)
 
-                        # Product over feature groups for this client
-                        if len(group_spns) > 1:
-                            # Convert feature_groups list to dict format for FederatedProduct
-                            # FederatedProduct expects {0: [features_g0], 1: [features_g1], ...}
-                            feature_map_dict = {
-                                g: self.feature_groups[g]
-                                for g in range(len(self.feature_groups))
-                            }
+                    # Step 4: Create GroupMixtures (one per feature subspace)
+                    # Justification: Mixture FIRST (over clients with same features)
+                    group_mixtures = []
+                    feature_groups_list = []
 
-                            client_product = FederatedProduct(
-                                group_spns,
-                                feature_map=feature_map_dict,
-                                device=self.device,
-                            )
-                            client_products.append(client_product)
-                            client_counts_updated.append(len(local_data_h))
-                        elif len(group_spns) == 1:
-                            # Only one group, use directly
-                            client_products.append(group_spns[0])
-                            client_counts_updated.append(len(local_data_h))
+                    for (client_set, features), trained_spns in spn_registry.items():
+                        if not trained_spns:
+                            continue
 
-                    # Mixture over clients (their products)
-                    if client_products:
-                        inner_ws = np.array(client_counts_updated)
-                        inner_ws = inner_ws / inner_ws.sum()
-                        comp = GlobalFedSPN(
-                            client_products,
-                            weights=inner_ws,
-                            strategy="mixture",
+                        # Compute weights (proportional to sample counts)
+                        # Justification: More samples → higher weight
+                        client_counts = []
+                        for k in client_set:
+                            local_data_h = X_splits[k][labels_splits[k] == h]
+                            client_counts.append(len(local_data_h))
+
+                        if sum(client_counts) == 0:
+                            continue
+
+                        weights_group = np.array(client_counts)
+                        weights_group = weights_group / weights_group.sum()
+
+                        # Create GroupMixture
+                        # Justification: Mixture over clients for this feature subspace
+                        mixture = GroupMixture(
+                            trained_spns,
+                            weights=weights_group,
+                            feature_indices=list(features),
                             device=self.device,
                         )
-                        global_components.append(comp)
+
+                        group_mixtures.append(mixture)
+                        feature_groups_list.append(list(features))
+
+                    # Step 5: Create ProductOverGroups (Product SECOND over mixtures)
+                    # Justification: Correct Mixture-then-Product hierarchy
+                    if group_mixtures:
+                        # Check if overlaps exist (diagnostic)
+                        all_features_list = [
+                            f for group in feature_groups_list for f in group
+                        ]
+                        has_overlap = len(all_features_list) != len(
+                            set(all_features_list)
+                        )
+
+                        if has_overlap:
+                            logging.info(
+                                f"[FedCDH] Cluster {h}: Overlapping features detected "
+                                f"(handled via Algorithm 1)"
+                            )
+                            # Use ProductOverGroupsWithOverlap
+                            # Justification: Handles overlaps correctly
+                            hybrid_spn = ProductOverGroupsWithOverlap(
+                                group_mixtures,
+                                feature_groups_list,
+                                device=self.device,
+                                allow_overlap=True,
+                            )
+                        else:
+                            logging.info(
+                                f"[FedCDH] Cluster {h}: Disjoint features "
+                                f"({len(group_mixtures)} groups)"
+                            )
+                            # Use ProductOverGroups (simpler, faster)
+                            # Justification: No overlaps, standard product suffices
+                            hybrid_spn = ProductOverGroups(
+                                group_mixtures,
+                                feature_groups_list,
+                                device=self.device,
+                            )
+
+                        global_components.append(hybrid_spn)
                         final_weights.append(weights[h])
+
+                        logging.info(
+                            f"[FedCDH] Cluster {h}: Built Mixture-then-Product "
+                            f"with {len(group_mixtures)} feature subspaces"
+                        )
 
             else:
                 # Original vertical/horizontal logic

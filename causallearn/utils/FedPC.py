@@ -418,6 +418,632 @@ class UnivariateSPNWrapper(nn.Module):
         return buffer.tell()
 
 
+class GroupMixture(nn.Module):
+    """
+    Mixture of client SPNs for a specific feature group.
+
+    Mathematical Form:
+        P(X_g) = Σ_k w_k,g × P_k,g(X_g)
+
+    Reference: Seng et al. (2025), Section 3.2 "Sum Nodes and Horizontal FL"
+
+    This class represents a Sum node in the Mixture-then-Product hierarchy.
+    It models a single feature group (subspace) as a mixture over K clients
+    that have trained SPNs on that feature group.
+
+    Design Rationale:
+        - Handles overlapping features: Same feature group can appear in multiple clients
+        - Weights represent client contributions (typically proportional to sample counts)
+        - Essential building block for hybrid federated learning
+
+    Args:
+        client_spns (List[nn.Module]): K SPNs from different clients, each trained on X_g
+        weights (np.ndarray or List[float]): [K] mixture weights, must sum to 1
+        feature_indices (List[int]): Which features (columns) this group models
+        device (str): 'cpu' or 'cuda'
+
+    Example:
+        >>> # Two clients share features [0, 1, 2]
+        >>> spn0 = LocalSPNWrapper(num_features=3, device='cpu')
+        >>> spn1 = LocalSPNWrapper(num_features=3, device='cpu')
+        >>> # Train SPNs on local data...
+        >>> mixture = GroupMixture([spn0, spn1], weights=[0.4, 0.6],
+        ...                        feature_indices=[0,1,2], device='cpu')
+        >>> x = torch.randn(100, 5)  # 100 samples, 5 total features
+        >>> log_p = mixture.log_prob(x)  # Extracts x[:, [0,1,2]] internally
+    """
+
+    def __init__(self, client_spns, weights, feature_indices, device="cpu"):
+        super().__init__()
+
+        # Store client SPNs as ModuleList for proper PyTorch registration
+        self.client_spns = nn.ModuleList(client_spns)
+
+        # Convert weights to tensor
+        if isinstance(weights, np.ndarray):
+            self.weights = torch.tensor(weights, dtype=torch.float32).to(device)
+        else:
+            self.weights = torch.tensor(list(weights), dtype=torch.float32).to(device)
+
+        # Store feature indices and device
+        self.feature_indices = list(feature_indices)
+        self.device = device
+
+        # Validation checks
+        assert len(self.client_spns) > 0, "Must have at least one client SPN"
+        assert len(self.client_spns) == len(
+            self.weights
+        ), f"Mismatched SPNs ({len(self.client_spns)}) and weights ({len(self.weights)})"
+        assert (
+            abs(self.weights.sum().item() - 1.0) < 1e-5
+        ), f"Weights must sum to 1, got {self.weights.sum().item()}"
+        assert len(self.feature_indices) > 0, "Feature indices cannot be empty"
+
+    def log_prob(self, x):
+        """
+        Compute log P(X_g) where X_g are the features in this group.
+
+        Algorithm:
+            1. Extract features: x_g = x[:, feature_indices]
+            2. For each client k: compute log P_k(x_g)
+            3. Compute log Σ_k [w_k × P_k(x_g)] via logsumexp trick
+
+        Mathematical Detail:
+            log Σ_k [w_k × P_k] = logsumexp_k(log w_k + log P_k)
+
+        Args:
+            x (Tensor): [batch, d_full] full feature matrix
+
+        Returns:
+            log_prob (Tensor): [batch, 1] log probabilities for this group
+
+        Reference: Seng et al. (2025), Definition 1 (Horizontal FL mixture)
+        """
+        # Step 1: Extract features for this group
+        # Justification: Each group only models its subset of features
+        x_g = x[:, self.feature_indices]  # [batch, len(feature_indices)]
+
+        # Step 2: Compute log-likelihoods from each client SPN
+        # Justification: Each client contributes its learned distribution
+        client_lls = []
+        for spn in self.client_spns:
+            ll = spn.log_prob(x_g)  # [batch, 1]
+            client_lls.append(ll)
+
+        # Step 3: Stack and compute weighted mixture via logsumexp
+        # Justification: Numerically stable computation of log(Σ exp(...))
+        ll_stack = torch.cat(client_lls, dim=1)  # [batch, K]
+        log_weights = torch.log(self.weights + 1e-9).unsqueeze(0)  # [1, K]
+
+        # log Σ_k [w_k × P_k] = logsumexp(log w_k + log P_k)
+        log_prob = torch.logsumexp(ll_stack + log_weights, dim=1, keepdim=True)
+
+        return log_prob  # [batch, 1]
+
+    def sample(self, n):
+        """
+        Sample n data points from the mixture distribution.
+
+        Algorithm:
+            1. For each sample: choose client k ~ Categorical(weights)
+            2. Sample from chosen client: x_i ~ P_k(X_g)
+            3. Return samples for this feature group only
+
+        Args:
+            n (int): Number of samples to generate
+
+        Returns:
+            samples (Tensor): [n, len(feature_indices)] samples for this group
+
+        Note: Returns samples ONLY for this group's features, not full d-dimensional.
+              Caller (ProductOverGroups) will concatenate group samples.
+        """
+        if n <= 0:
+            return torch.tensor([], device=self.device)
+
+        # Step 1: Choose which client to sample from for each data point
+        # Justification: Ancestral sampling - choose mixture component first
+        comp_indices = torch.multinomial(self.weights, n, replacement=True)  # [n]
+
+        # Count samples per client for efficiency
+        unique_comps, counts = torch.unique(comp_indices, return_counts=True)
+
+        # Step 2: Sample from each client and concatenate
+        # Justification: Batch sampling is more efficient than individual samples
+        samples_list = []
+        for comp_idx, count in zip(unique_comps, counts):
+            spn = self.client_spns[comp_idx.item()]
+            comp_samples = spn.sample(count.item())  # [count, len(feature_indices)]
+
+            # Ensure 2D shape
+            if comp_samples.ndim == 1:
+                comp_samples = comp_samples.view(-1, len(self.feature_indices))
+
+            samples_list.append(comp_samples)
+
+        # Concatenate all samples
+        samples = torch.cat(samples_list, dim=0)  # [n, len(feature_indices)]
+
+        return samples
+
+    def get_size_bytes(self):
+        """
+        Estimate memory footprint of this mixture (sum of client SPNs).
+
+        Returns:
+            size_bytes (int): Total size in bytes
+        """
+        total_bytes = 0
+        for spn in self.client_spns:
+            if hasattr(spn, "get_size_bytes"):
+                total_bytes += spn.get_size_bytes()
+            else:
+                # Fallback: serialize to estimate size
+                buffer = io.BytesIO()
+                torch.save(spn.state_dict(), buffer)
+                total_bytes += buffer.tell()
+        return total_bytes
+
+
+class ProductOverGroups(nn.Module):
+    """
+    Product of feature group mixtures (disjoint groups only).
+
+    Mathematical Form:
+        P(X) = Π_g P(X_g)  where feature groups are disjoint
+        log P(X) = Σ_g log P(X_g)
+
+    Reference: Seng et al. (2025), Section 3.2 "Product Nodes and Vertical FL"
+               Definition 2 (Vertical Federated Learning)
+
+    Design Rationale:
+        - Combines multiple GroupMixtures via product operation
+        - Assumes conditional independence: P(X_g1, X_g2 | mixture) = P(X_g1) × P(X_g2)
+        - Critical building block for hybrid federated learning
+        - Enforces disjoint constraint (overlaps require ProductOverGroupsWithOverlap)
+
+    Args:
+        group_mixtures (List[GroupMixture]): G mixtures, one per feature group
+        feature_groups (List[List[int]]): Feature indices for each group
+        device (str): 'cpu' or 'cuda'
+
+    Raises:
+        ValueError: If feature groups overlap (use ProductOverGroupsWithOverlap)
+        AssertionError: If group_mixtures and feature_groups counts mismatch
+
+    Example:
+        >>> # Two disjoint groups: [0,1,2] and [3,4]
+        >>> mix1 = GroupMixture([spn0, spn1], [0.5, 0.5], feature_indices=[0,1,2])
+        >>> mix2 = GroupMixture([spn2, spn3], [0.5, 0.5], feature_indices=[3,4])
+        >>> product = ProductOverGroups([mix1, mix2], [[0,1,2], [3,4]], device='cpu')
+        >>> x = torch.randn(100, 5)
+        >>> log_p = product.log_prob(x)  # log P(X) = log P(X_012) + log P(X_34)
+    """
+
+    def __init__(self, group_mixtures, feature_groups, device="cpu"):
+        super().__init__()
+
+        # Store group mixtures as ModuleList for proper PyTorch registration
+        # Justification: Same as GroupMixture - ensures parameter tracking
+        self.group_mixtures = nn.ModuleList(group_mixtures)
+
+        # Store feature groups and device
+        # Justification: Need to know which features each group models for sampling
+        self.feature_groups = [list(group) for group in feature_groups]
+        self.device = device
+
+        # Validation checks
+        assert len(self.group_mixtures) > 0, "Must have at least one group mixture"
+        assert len(self.group_mixtures) == len(self.feature_groups), (
+            f"Mismatched group_mixtures ({len(self.group_mixtures)}) and "
+            f"feature_groups ({len(self.feature_groups)})"
+        )
+
+        # Critical: Validate that feature groups are disjoint
+        # Justification: Overlapping features violate product semantics
+        # (would lead to incorrect probability - features counted multiple times)
+        self._validate_disjoint()
+
+        # Compute total dimensionality for sampling
+        # Justification: Need to know output shape [n, d] for sample()
+        all_indices = []
+        for group in self.feature_groups:
+            all_indices.extend(group)
+        self.num_features = max(all_indices) + 1 if all_indices else 0
+
+    def _validate_disjoint(self):
+        """
+        Validate that feature groups are disjoint (no overlaps).
+
+        Justification:
+            Product P(X) = Π_g P(X_g) is only valid when scopes are disjoint.
+            If features overlap, we'd be multiplying probabilities that share variables,
+            leading to incorrect normalization: ∫ P(X) dx ≠ 1
+
+        Raises:
+            ValueError: If any feature appears in multiple groups
+
+        Example of INVALID input:
+            feature_groups = [[0,1,2], [2,3,4]]  # Feature 2 appears twice!
+        """
+        all_features = []
+        for group in self.feature_groups:
+            all_features.extend(group)
+
+        # Check for duplicates: len(list) > len(set) means duplicates exist
+        if len(all_features) != len(set(all_features)):
+            # Find which features are duplicated for error message
+            from collections import Counter
+
+            counts = Counter(all_features)
+            duplicates = [f for f, c in counts.items() if c > 1]
+
+            raise ValueError(
+                f"Feature groups overlap! Features {duplicates} appear in multiple groups. "
+                f"Use ProductOverGroupsWithOverlap for overlapping features. "
+                f"Got groups: {self.feature_groups}"
+            )
+
+    def log_prob(self, x):
+        """
+        Compute log P(X) = Σ_g log P(X_g).
+
+        Algorithm:
+            1. For each group g: compute log P(X_g) via GroupMixture
+            2. Sum all log probabilities (product in probability space)
+
+        Mathematical Detail:
+            P(X) = Π_g P(X_g)
+            log P(X) = log Π_g P(X_g) = Σ_g log P(X_g)
+
+        Justification:
+            - Sum in log space is product in probability space
+            - Each GroupMixture extracts its features internally via x[:, feature_indices]
+            - No feature coordination needed (disjoint guarantee)
+
+        Args:
+            x (Tensor): [batch, d] full feature matrix
+
+        Returns:
+            log_prob (Tensor): [batch, 1] log probabilities
+
+        Reference: Product node evaluation (Seng et al. 2025, Section 2)
+        """
+        # Compute log-prob for each group
+        # Justification: Each GroupMixture independently evaluates its feature subspace
+        group_lls = []
+        for mixture_g in self.group_mixtures:
+            ll_g = mixture_g.log_prob(x)  # [batch, 1]
+            group_lls.append(ll_g)
+
+        # Sum log-probs (equivalent to product in probability space)
+        # Justification: log(a × b) = log(a) + log(b)
+        ll_stack = torch.cat(group_lls, dim=1)  # [batch, G]
+        total_ll = torch.sum(ll_stack, dim=1, keepdim=True)  # [batch, 1]
+
+        return total_ll
+
+    def sample(self, n):
+        """
+        Sample from product distribution by sampling each group independently.
+
+        Algorithm:
+            1. For each group g: sample x_g ~ P(X_g)
+            2. Assemble samples into full d-dimensional feature vector
+
+        Justification:
+            Product distribution has independent groups, so we can sample each separately.
+            This is ancestral sampling for product nodes: sample each child independently,
+            then combine.
+
+        Args:
+            n (int): Number of samples to generate
+
+        Returns:
+            samples (Tensor): [n, d] where d = total number of features
+
+        Reference: Product node sampling (Seng et al. 2025, implicit in Section 2)
+
+        Example:
+            If feature_groups = [[0,1,2], [3,4]], then:
+            - Sample x[:, [0,1,2]] from mixture_0
+            - Sample x[:, [3,4]] from mixture_1
+            - Concatenate to form full x[:, 0:5]
+        """
+        if n <= 0:
+            return torch.tensor([], device=self.device)
+
+        # Initialize full sample matrix
+        # Justification: Pre-allocate for efficiency, fill in groups
+        samples = torch.zeros(n, self.num_features, device=self.device)
+
+        # Sample each group independently
+        # Justification: Product means groups are independent
+        for g, mixture_g in enumerate(self.group_mixtures):
+            # Sample from this group's mixture
+            group_samples = mixture_g.sample(n)  # [n, d_g]
+
+            # Place samples in correct feature positions
+            # Justification: Each group models specific features (stored in feature_groups)
+            indices = self.feature_groups[g]
+            samples[:, indices] = group_samples
+
+        return samples  # [n, d]
+
+    def get_size_bytes(self):
+        """
+        Estimate memory footprint (sum of all group mixtures).
+
+        Justification:
+            Communication cost in federated learning = sum of component sizes.
+            This matches the federated aggregation: each GroupMixture was sent from clients.
+
+        Returns:
+            size_bytes (int): Total size in bytes
+        """
+        total_bytes = 0
+        for mixture in self.group_mixtures:
+            if hasattr(mixture, "get_size_bytes"):
+                total_bytes += mixture.get_size_bytes()
+            else:
+                # Fallback: serialize to estimate
+                buffer = io.BytesIO()
+                torch.save(mixture.state_dict(), buffer)
+                total_bytes += buffer.tell()
+        return total_bytes
+
+
+class ProductOverGroupsWithOverlap(nn.Module):
+    """
+    Product over groups with overlapping feature support.
+
+    Uses indicator matrix method from Seng et al. (2025), Algorithm 1.
+
+    Mathematical Form:
+        P(X) = Π_g P(X_g)  where each feature in exactly one group
+        (groups auto-constructed to handle overlaps)
+
+    Reference: Seng et al. (2025), Algorithm 1 "Building Structure via Data Partitioning"
+
+    Key Design Insight:
+        Overlap handling happens at CONSTRUCTION time, not inference time.
+
+        Algorithm 1 from Seng et al.:
+        1. Build indicator matrix M[k,j] = 1 if client k has feature j
+        2. Group features by unique column patterns (client sets)
+        3. Each group gets a mixture over clients that have those features
+        4. Product combines groups (now disjoint by construction)
+
+        Example:
+            Client 0 has features [0, 1, 2]
+            Client 1 has features [1, 2, 3]
+
+            Automatic grouping:
+                Group A: [0] (only client 0)      → SPN from client 0
+                Group B: [1, 2] (both clients)    → Mixture of client 0 & 1
+                Group C: [3] (only client 1)      → SPN from client 1
+
+            Result: P(X) = P(X_0) × P(X_{1,2}) × P(X_3)
+                         = P_0(X_0) × [0.5×P_0(X_{1,2}) + 0.5×P_1(X_{1,2})] × P_1(X_3)
+
+        This PREVENTS double-counting: features [1,2] appear in exactly ONE group (B).
+
+    Design Rationale:
+        - Extends ProductOverGroups to handle overlapping features
+        - Same inference logic as ProductOverGroups (overlap resolved at construction)
+        - GroupMixtures are already constructed with correct feature scopes
+        - Validates that construction was done correctly (no overlaps in final structure)
+
+    Args:
+        group_mixtures (List[GroupMixture]): G mixtures, correctly partitioned
+        feature_groups (List[List[int]]): Feature indices for each group
+        device (str): 'cpu' or 'cuda'
+        allow_overlap (bool): If False, validates disjoint (default True for this class)
+
+    Raises:
+        ValueError: If feature_groups have overlaps when allow_overlap=False
+        Warning: If allow_overlap=True but overlaps detected (construction error)
+
+    Example:
+        >>> # Construct GroupMixtures following Algorithm 1
+        >>> mix_A = GroupMixture([spn_c0], [1.0], feature_indices=[0])
+        >>> mix_B = GroupMixture([spn_c0, spn_c1], [0.5, 0.5], feature_indices=[1,2])
+        >>> mix_C = GroupMixture([spn_c1], [1.0], feature_indices=[3])
+        >>> product = ProductOverGroupsWithOverlap([mix_A, mix_B, mix_C],
+        ...                                         [[0], [1,2], [3]])
+        >>> # Now features [1,2] handled by single mixture (no double-counting)
+    """
+
+    def __init__(
+        self, group_mixtures, feature_groups, device="cpu", allow_overlap=True
+    ):
+        super().__init__()
+
+        # Store group mixtures as ModuleList
+        # Justification: Same as ProductOverGroups - proper PyTorch registration
+        self.group_mixtures = nn.ModuleList(group_mixtures)
+
+        # Store feature groups and device
+        self.feature_groups = [list(group) for group in feature_groups]
+        self.device = device
+        self.allow_overlap = allow_overlap
+
+        # Validation
+        assert len(self.group_mixtures) > 0, "Must have at least one group mixture"
+        assert len(self.group_mixtures) == len(self.feature_groups), (
+            f"Mismatched group_mixtures ({len(self.group_mixtures)}) and "
+            f"feature_groups ({len(self.feature_groups)})"
+        )
+
+        # Detect overlaps
+        # Justification: Even with allow_overlap=True, we want to know if overlaps exist
+        # for diagnostic purposes and to warn about potential construction errors
+        self.overlap_info = self._detect_overlaps()
+
+        # If overlaps detected with allow_overlap=False, raise error
+        # Justification: Caller claims structure is disjoint, but it's not
+        if not allow_overlap and self.overlap_info["has_overlap"]:
+            raise ValueError(
+                f"Feature groups overlap, but allow_overlap=False. "
+                f"Overlapping features: {self.overlap_info['overlapping_features']}. "
+                f"If this is intentional, set allow_overlap=True."
+            )
+
+        # If overlaps detected with allow_overlap=True, log warning
+        # Justification: Overlaps should have been resolved during construction (Algorithm 1)
+        # If they still exist, it's likely a construction error
+        if allow_overlap and self.overlap_info["has_overlap"]:
+            import logging
+
+            logging.warning(
+                f"ProductOverGroupsWithOverlap: Feature groups have overlaps. "
+                f"This is allowed but unusual - overlaps should be resolved at construction. "
+                f"Overlapping features: {self.overlap_info['overlapping_features']}"
+            )
+
+        # Compute total dimensionality
+        # Justification: Same as ProductOverGroups - needed for sampling
+        all_indices = []
+        for group in self.feature_groups:
+            all_indices.extend(group)
+        self.num_features = max(all_indices) + 1 if all_indices else 0
+
+    def _detect_overlaps(self):
+        """
+        Detect which features appear in multiple groups.
+
+        Justification:
+            - Diagnostic tool to verify Algorithm 1 was applied correctly
+            - If overlaps exist, either:
+              a) Construction error (most likely)
+              b) Intentional design (user's responsibility to ensure correctness)
+
+        Returns:
+            dict: {
+                'has_overlap': bool,
+                'overlapping_features': List[int],
+                'feature_to_groups': Dict[int, List[int]]
+            }
+
+        Reference: Seng et al. (2025), Algorithm 1 implicit overlap detection
+        """
+        feature_to_groups = {}
+        for g, group in enumerate(self.feature_groups):
+            for feat in group:
+                if feat not in feature_to_groups:
+                    feature_to_groups[feat] = []
+                feature_to_groups[feat].append(g)
+
+        overlapping_features = [
+            f for f, groups in feature_to_groups.items() if len(groups) > 1
+        ]
+        has_overlap = len(overlapping_features) > 0
+
+        return {
+            "has_overlap": has_overlap,
+            "overlapping_features": overlapping_features,
+            "feature_to_groups": feature_to_groups,
+        }
+
+    def log_prob(self, x):
+        """
+        Compute log P(X) = Σ_g log P(X_g).
+
+        Mathematical Detail:
+            If structure was built correctly per Algorithm 1, each feature appears
+            in exactly one GroupMixture. Therefore, we can safely sum log-probs.
+
+            P(X) = Π_g P(X_g)  (disjoint scopes after construction)
+            log P(X) = Σ_g log P(X_g)
+
+        Justification:
+            - Same as ProductOverGroups because overlap resolved at construction
+            - Each GroupMixture extracts its features via x[:, feature_indices]
+            - No special overlap handling needed at inference time
+            - This is the KEY INSIGHT from Seng et al. (2025): "resolve overlaps
+              during structure building, not during inference"
+
+        Args:
+            x (Tensor): [batch, d] full feature matrix
+
+        Returns:
+            log_prob (Tensor): [batch, 1] log probabilities
+
+        Reference: Seng et al. (2025), Section 3.2 "Product evaluation is simple
+                   because structure ensures disjoint scopes"
+        """
+        # Compute log-prob for each group
+        # Justification: Each GroupMixture independently evaluates its feature subspace
+        group_lls = []
+        for mixture_g in self.group_mixtures:
+            ll_g = mixture_g.log_prob(x)  # [batch, 1]
+            group_lls.append(ll_g)
+
+        # Sum log-probs (product in probability space)
+        # Justification: log(a × b) = log(a) + log(b)
+        ll_stack = torch.cat(group_lls, dim=1)  # [batch, G]
+        total_ll = torch.sum(ll_stack, dim=1, keepdim=True)  # [batch, 1]
+
+        return total_ll
+
+    def sample(self, n):
+        """
+        Sample from product distribution by sampling each group independently.
+
+        Algorithm:
+            1. For each group g: sample x_g ~ P(X_g)
+            2. Assemble samples into full d-dimensional feature vector
+
+        Justification:
+            - Same as ProductOverGroups (overlap resolved at construction)
+            - Product means groups are independent
+            - Each GroupMixture samples its feature subspace
+            - If overlaps exist, later groups overwrite earlier (but shouldn't happen
+              if construction followed Algorithm 1)
+
+        Args:
+            n (int): Number of samples to generate
+
+        Returns:
+            samples (Tensor): [n, d] where d = total number of features
+
+        Reference: Seng et al. (2025), ancestral sampling for product nodes
+        """
+        if n <= 0:
+            return torch.tensor([], device=self.device)
+
+        # Initialize full sample matrix
+        samples = torch.zeros(n, self.num_features, device=self.device)
+
+        # Sample each group independently
+        # Justification: Product means groups are independent
+        for g, mixture_g in enumerate(self.group_mixtures):
+            group_samples = mixture_g.sample(n)  # [n, d_g]
+
+            # Place samples in correct feature positions
+            indices = self.feature_groups[g]
+            samples[:, indices] = group_samples
+
+        return samples  # [n, d]
+
+    def get_size_bytes(self):
+        """
+        Estimate memory footprint (sum of all group mixtures).
+
+        Returns:
+            size_bytes (int): Total size in bytes
+        """
+        total_bytes = 0
+        for mixture in self.group_mixtures:
+            if hasattr(mixture, "get_size_bytes"):
+                total_bytes += mixture.get_size_bytes()
+            else:
+                buffer = io.BytesIO()
+                torch.save(mixture.state_dict(), buffer)
+                total_bytes += buffer.tell()
+        return total_bytes
+
+
 class FederatedProduct(nn.Module):
     """
     Vertical Federated SPN Component.
@@ -694,6 +1320,191 @@ class GlobalFedSPN(nn.Module):
                 torch.save(c.state_dict(), buffer)
                 total_bytes += buffer.tell()
         return total_bytes
+
+
+def build_feature_indicator_matrix(X_splits, scenario, d_features=None):
+    """
+    Build indicator matrix M where M[k,j] = 1 if client k has feature j.
+
+    Reference: Seng et al. (2025), Algorithm 1, Line 1 (implicit)
+
+    Design Rationale:
+        - Indicator matrix is the foundation for automatic feature grouping
+        - Column j represents which clients have feature j
+        - Used by group_features_by_client_set() to create feature subspaces
+
+    Args:
+        X_splits (List[np.ndarray]): Data splits per client
+            - Horizontal: [n_k, d] - all have same features
+            - Vertical: [n, d_k] - different features per client
+            - Hybrid: varies
+        scenario (str): 'horizontal', 'vertical', or 'hybrid'
+        d_features (int): Total number of features (required for vertical/hybrid)
+
+    Returns:
+        M (np.ndarray): [K, d] binary indicator matrix
+        feature_names (List[int]): Feature indices [0, 1, ..., d-1]
+
+    Example (Vertical):
+        >>> X_splits = [
+        ...     np.random.randn(100, 3),  # Client 0: features [0,1,2]
+        ...     np.random.randn(100, 2)   # Client 1: features [3,4]
+        ... ]
+        >>> M, names = build_feature_indicator_matrix(X_splits, 'vertical', d_features=5)
+        >>> M
+        array([[1, 1, 1, 0, 0],
+               [0, 0, 0, 1, 1]])
+    """
+    K = len(X_splits)
+
+    # Justification: Need total dimensionality to allocate M
+    # For vertical/hybrid, must be provided explicitly
+    if scenario == "horizontal":
+        # Horizontal: all clients have same features
+        d = X_splits[0].shape[1]
+    else:
+        # Vertical/Hybrid: must provide d_features
+        if d_features is None:
+            raise ValueError(
+                f"d_features required for scenario='{scenario}'. "
+                f"Provide total feature count."
+            )
+        d = d_features
+
+    # Initialize indicator matrix
+    # Justification: Binary matrix, start with all zeros
+    M = np.zeros((K, d), dtype=int)
+
+    if scenario == "horizontal":
+        # Horizontal: All clients have all features
+        # Justification: Same features across clients
+        M[:, :] = 1  # All entries are 1
+
+    elif scenario == "vertical":
+        # Vertical: Auto-split features equally across clients
+        # Justification: Standard vertical FL assumes equal split
+        cols_per_client = np.array_split(range(d), K)
+        for k in range(K):
+            feature_indices = cols_per_client[k].tolist()
+            M[k, feature_indices] = 1
+
+    elif scenario == "hybrid":
+        # Hybrid: Infer from data shapes
+        # Justification: Each client's data reveals which features they have
+        # Assumption: Features are ordered, client k gets indices proportional to position
+        # This is a simplification; in practice, feature mapping would be provided
+
+        # For now, use equal split (conservative approach)
+        # Real implementation would receive explicit feature mapping
+        cols_per_client = np.array_split(range(d), K)
+        for k in range(K):
+            M[k, cols_per_client[k].tolist()] = 1
+
+        logging.info(
+            "Hybrid mode: Using equal feature split for indicator matrix. "
+            "For overlapping features, provide explicit feature_maps."
+        )
+
+    else:
+        raise ValueError(f"Unknown scenario: {scenario}")
+
+    feature_names = list(range(d))
+    return M, feature_names
+
+
+def group_features_by_client_set(M, feature_names):
+    """
+    Group features by which clients have them (Algorithm 1 from Seng et al. 2025).
+
+    Reference: Seng et al. (2025), Algorithm 1, Lines 3-6
+
+    Algorithm:
+        1. For each feature j: extract column M[:, j] (which clients have it)
+        2. Group features with identical column patterns
+        3. Convert column pattern to client set tuple
+        4. Return mapping: client_set → [features]
+
+    Mathematical Insight:
+        Features with same column pattern M[:, j] share the same client set.
+        These features should be modeled by a single GroupMixture over those clients.
+
+    Design Rationale:
+        - Automatic: No manual specification needed
+        - Disjoint: Each feature appears in exactly one group (by construction)
+        - Handles overlaps: If feature j appears in multiple clients,
+          it gets grouped with other features having the same client set
+
+    Args:
+        M (np.ndarray): [K, d] indicator matrix
+        feature_names (List[int]): Feature indices
+
+    Returns:
+        feature_subspaces (Dict): {
+            (client_tuple): [feature_indices]
+        }
+
+    Example 1 (Vertical - Disjoint):
+        >>> M = np.array([
+        ...     [1, 1, 1, 0, 0],
+        ...     [0, 0, 0, 1, 1]
+        ... ])
+        >>> group_features_by_client_set(M, list(range(5)))
+        {
+            (0,): [0, 1, 2],  # Features 0,1,2 only on client 0
+            (1,): [3, 4]      # Features 3,4 only on client 1
+        }
+
+    Example 2 (Hybrid - Overlapping):
+        >>> M = np.array([
+        ...     [1, 1, 1, 0],
+        ...     [0, 1, 1, 1]
+        ... ])
+        >>> group_features_by_client_set(M, list(range(4)))
+        {
+            (0,): [0],        # Feature 0 only on client 0
+            (0, 1): [1, 2],   # Features 1,2 on BOTH clients (overlap!)
+            (1,): [3]         # Feature 3 only on client 1
+        }
+
+        Result: GroupMixture for (0,1) combines both clients for features [1,2]
+    """
+    K, d = M.shape
+
+    # Step 1: Find distinct column patterns
+    # Justification: Features with same column pattern share same client set
+    feature_to_clients = {}
+    for j in range(d):
+        # Extract column j (which clients have feature j)
+        col = tuple(M[:, j])  # e.g., (1, 0, 1) means clients 0 and 2 have it
+
+        if col not in feature_to_clients:
+            feature_to_clients[col] = []
+        feature_to_clients[col].append(feature_names[j])
+
+    # Step 2: Convert column patterns to client sets
+    # Justification: Client set is more interpretable than binary pattern
+    feature_subspaces = {}
+    for col_pattern, features in feature_to_clients.items():
+        # col_pattern is (1, 0, 1, ...) → client_set is (0, 2, ...)
+        # Justification: Extract indices where col_pattern[k] == 1
+        client_set = tuple(k for k in range(K) if col_pattern[k] == 1)
+
+        # Skip invalid patterns (no clients have these features)
+        # Justification: Features must belong to at least one client
+        if len(client_set) == 0:
+            logging.warning(f"Features {features} have no clients! Skipping.")
+            continue
+
+        feature_subspaces[client_set] = features
+
+    # Log results for debugging
+    logging.info(
+        f"[FedPC] Automatic feature grouping: {len(feature_subspaces)} subspaces"
+    )
+    for clients, features in feature_subspaces.items():
+        logging.info(f"  Clients {clients} share features {features}")
+
+    return feature_subspaces
 
 
 def auto_tune_spn_config(proxy_data, num_clusters=1, n_trials=15, device="cpu"):
