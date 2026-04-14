@@ -37,9 +37,11 @@
 
 - **3 Phases of Code Cleanup**: Removed 47 lines dead code, eliminated duplicates, improved documentation
 - **2 Critical Routing Bugs Fixed**: Global SPN now correctly matches local SPN performance
-- **Hybrid Scenario Implementation** (April 13, 2026): Product-then-Mixture hierarchy implemented
+- **Hybrid Scenario Implementation** (April 13, 2026): Product-then-Mixture hierarchy implemented (interim fix)
 - **Hybrid Sampling Bug Fixed** (April 13, 2026): Context column now added for dimensional consistency, enabling proper evaluation
-- **Theoretical Validation**: All 7 core requirements verified across H/V/Hybrid scenarios
+- **Vertical SPN Visualization Enabled** (April 13, 2026): Local SPNs now evaluated with feature subset extraction and context-aware augmentation
+- **Hybrid Rewrite Planned** (April 13, 2026): Paper verification confirms Mixture-then-Product is correct hierarchy, 12-day implementation plan documented
+- **Theoretical Validation**: 6/7 core requirements verified (hybrid pending rewrite)
 - **SPN Quality Framework**: Comprehensive evaluation with MMD, KS tests, convergence analysis
 - **Independence Structure Evaluation** (April 10, 2026): Ground truth DAG comparison using d-separation + SPN_CIT
 - **Automated Evaluation Logging** (April 10, 2026): Timestamped eval/ directories with UMAP visualizations + run logs
@@ -47,7 +49,8 @@
 ### ⚠️ Known Limitations
 
 - **Sample Size Dependency**: SPNs need n≥1000/client for reliable nonlinear advantage
-- **No Major Blocking Issues**: All critical bugs resolved as of March 30, 2026
+- **Hybrid Mode Temporary**: Current Product-then-Mixture works empirically but theoretically incorrect; Mixture-then-Product rewrite planned (12 days)
+- **No Overlapping Features**: Current hybrid assumes disjoint feature groups; paper supports overlaps (planned in rewrite)
 
 ---
 
@@ -77,7 +80,8 @@ FedCDH Pipeline:
 |----------|----------|----------------|
 | **Horizontal** | Mixture-of-experts | `GlobalFedSPN(..., strategy="mixture")` |
 | **Vertical** | Product-of-experts | `FederatedProduct(...)` |
-| **Hybrid** | Product-then-Mixture (Simplified) | `GlobalFedSPN(client_products, ...)` where each client_product = `FederatedProduct(feature_group_spns)` |
+| **Hybrid (Current)** | Product-then-Mixture (Temporary) | `GlobalFedSPN(client_products, ...)` where each client_product = `FederatedProduct(feature_group_spns)` |
+| **Hybrid (Planned)** | Mixture-then-Product (Correct) | `ProductOverGroups([GroupMixture(clients_g1), GroupMixture(clients_g2), ...])` per Seng et al. 2025 |
 
 #### 3. **Orientation Method** (mi_hybrid)
 - **50% SPN**: Variance-based mechanism invariance
@@ -233,8 +237,9 @@ AFTER (Fixed):
 **Learning**:
 1. Hybrid FL requires **both** sample and feature partitioning
 2. PC theory maps naturally: Products (vertical-like) + Mixtures (horizontal-like) = Hybrid
-3. Simplified approach (product-then-mixture) is more practical than full mixture-then-product hierarchy
+3. ⚠️ **DEPRECATED LEARNING #3**: Product-then-mixture was interim fix; paper verification shows Mixture-then-Product is correct (see Hybrid Mode Rewrite section)
 4. Always validate that different scenarios produce different results!
+5. **NEW**: Always verify implementation against paper/reference code before claiming correctness (empirical performance ≠ theoretical correctness)
 
 ---
 
@@ -313,6 +318,576 @@ TEST 3: Horizontal mode unchanged
 2. Context columns serve dual purpose: routing (horizontal) and component tracking (hybrid)
 3. Validation tests should check both shape AND actual metric differences
 4. Dimension mismatches can cause silent failures in downstream evaluation
+
+---
+
+### Bug 6: Vertical Mode Local SPN Visualization Skipped (April 13, 2026)
+
+**Problem**: Vertical mode local SPNs were never evaluated or visualized despite being properly trained instances.
+
+**Symptom**:
+```python
+# FedCDH.py:702-705 (before fix)
+elif self.scenario == "vertical":
+    # Skip: Dimension complexities with vertical feature splits
+    continue
+```
+
+**Root Cause Analysis**:
+1. **Comment Misleading**: Code claimed "dimension complexities" but issue was simply feature extraction
+2. **Vertical Feature Maps Not Stored**: `vertical_feature_map` created during training but not saved for evaluation
+3. **Context Column Asymmetry**: Only Client 0 gets context in vertical mode (k==0 check in line 313-314), but evaluation assumed all clients have context
+4. **DAG Subset Missing**: Independence structure evaluation used full d×d DAG but vertical clients only have subset of features
+
+**Theoretical Context**:
+- Vertical mode creates **genuine local SPN instances** on feature subsets
+- Client 0: Trained on features [0, 1, 2] + context (4 dims total)
+- Client 1: Trained on features [3, 4] only (2 dims, no context)
+- Each SPN is a valid probabilistic model over its feature subset
+
+**Fix** (FedCDH.py:575, 704-744, 770-781, 798-808):
+
+**Part 1: Store feature_map (line 575)**
+```python
+# When creating FederatedProduct for vertical mode
+comp = FederatedProduct(
+    clients_clusters[h],
+    feature_map=feature_maps,
+    device=self.device,
+)
+# NEW: Store for later evaluation
+self.vertical_feature_map = feature_maps  # {0: [0,1,2,5], 1: [3,4]}
+```
+
+**Part 2: Extract feature subset (lines 704-721)**
+```python
+elif self.scenario == "vertical":
+    # Extract feature subset for this client
+    if hasattr(self, 'vertical_feature_map'):
+        feature_indices = self.vertical_feature_map.get(k, None)
+        if feature_indices is not None:
+            # Filter out context column (only in full feature_map for training)
+            feature_indices_no_context = [
+                idx for idx in feature_indices if idx < self.d_features
+            ]
+            # Extract features
+            X_client = X_global[:, feature_indices_no_context]
+            c_client = c_indx  # All samples
+
+            logging.info(f"  Client {k}: Evaluating on features {feature_indices_no_context}")
+```
+
+**Part 3: Context-aware augmentation (lines 732-738)**
+```python
+# For vertical mode, only client 0 has context column during training
+if self.scenario == "vertical" and k > 0:
+    X_client_aug = X_client  # No context for clients other than 0
+else:
+    X_client_aug = np.concatenate([X_client, c_client], axis=1)
+```
+
+**Part 4: Subset DAG for independence tests (lines 770-781)**
+```python
+# For vertical mode, subset true_DAG_bin to client's features
+if self.scenario == "vertical" and hasattr(self, 'vertical_feature_map'):
+    feature_indices_no_context = [
+        idx for idx in feature_indices_full if idx < self.d_features
+    ]
+    # Extract submatrix for this client's features
+    true_DAG_subset = true_DAG_bin[np.ix_(
+        feature_indices_no_context,
+        feature_indices_no_context
+    )]
+```
+
+**Part 5: Descriptive names with feature info (lines 738-744, 798-808)**
+```python
+# Add feature indices to SPN names and UMAP titles
+spn_name = f"Local SPN Client {k} (Features {feature_indices_display})"
+umap_title = f"Local SPN (Client {k}, Features {feature_indices_display})"
+```
+
+**Validation** (test_vertical_visualization.py):
+```
+Configuration: d=5, K=2, n=200
+  Client 0: Features [0,1,2] + context → 4 dims
+  Client 1: Features [3,4], no context → 2 dims
+
+Results:
+✓ Local SPNs stored: 2 SPNs
+✓ Feature map stored: {0: [0, 1, 2, 5], 1: [3, 4]}
+✓ Client 0: Evaluating on features [0, 1, 2]
+  - Independence Structure: 33 tests, 75.8% accuracy
+  - UMAP generated ✓
+✓ Client 1: Evaluating on features [3, 4]
+  - Independence Structure: 1 test, 100% accuracy
+  - UMAP not generated (only 2 features, needs >2) ✓ Expected
+```
+
+**Log Output Example**:
+```
+2026-04-13 19:31:47 - INFO -   Client 0: Evaluating on features [0, 1, 2]
+2026-04-13 19:31:47 - INFO -   [Local SPN Client 0 (Features [0, 1, 2])] Quality Metrics:
+2026-04-13 19:31:47 - INFO -     Train LL: -4.8164
+2026-04-13 19:31:52 - INFO -   [Local SPN Client 0 (Features [0, 1, 2])] Independence Structure:
+2026-04-13 19:31:52 - INFO -     Tests: 33 total (3 skeleton, 30 conditional)
+2026-04-13 19:31:52 - INFO -     Overall Accuracy: 0.758 ✓
+
+2026-04-13 19:31:58 - INFO -   Client 1: Evaluating on features [3, 4]
+2026-04-13 19:31:58 - INFO -   [Local SPN Client 1 (Features [3, 4])] Quality Metrics:
+2026-04-13 19:31:58 - INFO -     Train LL: -2.2367
+2026-04-13 19:31:58 - INFO -   [Local SPN Client 1 (Features [3, 4])] Independence Structure:
+2026-04-13 19:31:58 - INFO -     Tests: 1 total (1 skeleton, 0 conditional)
+2026-04-13 19:31:58 - INFO -     Overall Accuracy: 1.000 ✓
+```
+
+**Files Modified**:
+- `causallearn/search/FCMBased/FedCDH/FedCDH.py` (lines 575, 704-744, 770-781, 798-808)
+- `test_vertical_visualization.py`: Created validation test
+
+**Impact**:
+- ✅ Vertical mode now evaluates local SPNs with correct feature subsets
+- ✅ Log files include feature information for each client
+- ✅ UMAP generated for clients with >2 features
+- ✅ Independence structure tests use correct DAG submatrix
+- ✅ Context column only added for Client 0 (matches training)
+
+**Learning**:
+1. Never skip evaluation without understanding why - "dimension complexities" was a cop-out
+2. Vertical mode requires careful feature subset extraction, not full dataset
+3. Context column policy must match between training and evaluation
+4. Independence tests need DAG submatrix matching client's feature set
+5. UMAP requires >2 dimensions - document expected behavior for low-dimensional clients
+
+---
+
+## Hybrid Mode Rewrite: Mixture-then-Product Implementation Plan (April 13, 2026)
+
+### Motivation
+
+**Critical Discovery**: Current hybrid implementation is fundamentally incorrect (Bug 4 reference)
+
+**Evidence from Benchmarks**:
+- Horizontal F1: 0.903, Train LL: 7.8457
+- Hybrid F1: 0.973, Train LL: -4.3444
+- **Problem**: Despite "fixing" Bug 4, hybrid still shows suspicious behavior (negative LL vs positive LL)
+
+**Current Implementation** (Product-then-Mixture):
+```
+P(X) = Σ_k w_k × [ Π_g P_k,g(X_g) ]
+
+Level 1: Per-client product over feature groups
+Level 2: Mixture over clients
+```
+
+**Issues**:
+1. ❌ **Wrong hierarchy**: Should be Mixture-then-Product per Seng et al. 2025
+2. ❌ **No overlap support**: Assumes disjoint feature groups
+3. ❌ **Manual feature grouping**: User must specify, not automatic
+4. ⚠️ **Empirically works but theoretically questionable**: Performance gains don't validate correctness
+
+---
+
+### Paper Verification (Seng et al. 2025)
+
+**Reference**: "Scaling Probabilistic Circuits via Data Partitioning" (agents/reference/)
+**GitHub**: https://github.com/J0nasSeng/federated-spn
+
+#### Finding 1: Correct Hierarchy is Mixture-then-Product ✅
+
+**Paper Definition** (Section 3.2):
+> "Hybrid FL describes a combination of horizontal and vertical FL. In terms of PC semantics, this amounts to building a **hierarchy of fusing marginals and learning mixtures**."
+
+**GitHub Implementation** (`src/network-aligned-spn/driver.py`):
+```python
+def build_spn_verhyb_naive(self, feature_subspaces, nodes):
+    spn = Product()  # OUTER: Product over feature groups
+    for clients, subspace in feature_subspaces.items():
+        if len(clients) > 1:
+            s = Sum()  # INNER: Mixture over clients
+            for c in clients:
+                leafs.append(nodes[c].get_spn(tuple(subspace)))
+            s.children = leafs
+            spn.children += [s]
+    return spn
+```
+
+**Correct Mathematical Form**:
+```
+P(X) = Π_g [ Σ_k w_k,g × P_k,g(X_g) ]
+
+where:
+  g = feature group/subspace
+  k = client
+  P_k,g = SPN trained by client k on features g
+```
+
+**Structure**:
+```
+Product(
+    Sum(Client0_SPN(group1), Client1_SPN(group1)),  # Mixture per group
+    Sum(Client0_SPN(group2), Client2_SPN(group2)),  # Mixture per group
+    ...
+)
+```
+
+**Why This is Correct**:
+1. **Horizontal limit**: When all clients share all features → single group → reduces to Mixture
+2. **Vertical limit**: When each client has unique features → one client per group → reduces to Product
+3. **Hybrid generalization**: Some features shared (mixture per group), some unique (direct product child)
+
+---
+
+#### Finding 2: Overlapping Features Explicitly Supported ✅
+
+**Paper Evidence** (Section 2):
+> "Hybrid FL where clients can hold both different (but **possibly overlapping**) sets of samples and features."
+
+**Algorithm 1 (Lines 1-6)**: Feature Grouping via Indicator Matrix
+```python
+M[|C| × |X|] = 0
+M[i,j] = 1 if feature X^(j) on client i
+
+# Group features by "which clients have them"
+for j, u in enumerate(distinct columns U):
+    S^(j) = {i : all(u == M[:,i])}  # Clients with this column pattern
+    feature_groups[S^(j)].append(j)
+```
+
+**Example with Overlaps**:
+```
+Features:     [F0, F1, F2, F3]
+Client 0:     [ 1,  1,  0,  0]  → has F0, F1
+Client 1:     [ 1,  1,  1,  0]  → has F0, F1, F2 (OVERLAPS!)
+Client 2:     [ 0,  0,  1,  1]  → has F2, F3 (OVERLAPS!)
+
+Column patterns:
+F0, F1: [1,1,0]ᵀ → clients {0, 1} (shared)
+F2:     [0,1,1]ᵀ → clients {1, 2} (shared)
+F3:     [0,0,1]ᵀ → client {2} (unique)
+
+Structure:
+Product(
+    Sum(Client0_SPN(F0,F1), Client1_SPN(F0,F1)),  # Mixture for shared
+    Sum(Client1_SPN(F2), Client2_SPN(F2)),        # Mixture for shared
+    Client2_SPN(F3)                               # Direct for unique
+)
+```
+
+**Key Insight**: No double-counting! Each feature appears in exactly one child of the product node.
+
+---
+
+#### Finding 3: One-Pass Training (No Federated EM) ✅
+
+**Paper Statement** (Section 3.3):
+> "Training with Expectation Maximization (EM) requires access to the same samples for all clients, which is **incompatible with horizontal and hybrid FL**. To solve this, we propose a **one-pass training procedure**."
+
+**Implications**:
+1. ❌ **No iterative EM**: Cannot refine weights via E-M steps
+2. ✅ **One-pass structure learning**: Build structure once from data partitioning
+3. ✅ **Simple weight inference**: Sample-count proportional or uniform
+
+**Weight Learning**:
+- **Paper**: Not explicitly specified, likely uniform or sample-count
+- **GitHub**: Uniform weights `w_k = 1/K` initially
+- **Recommendation**: Sample-count proportional (our current method) or uniform
+
+---
+
+#### Finding 4: Automatic Feature Grouping ✅
+
+**Paper Method**: Groups features by "which clients have them"
+
+**Algorithm**:
+1. Each client reports which features it has
+2. Build indicator matrix M (clients × features)
+3. Group features with identical column patterns (same client set)
+4. Create mixture per group, product over groups
+
+**Example**:
+```python
+# Client 0 has features [0, 1, 2]
+# Client 1 has features [3, 4]
+
+# Automatic grouping:
+feature_subspaces = {
+    (0,): [0, 1, 2],     # Only on client 0
+    (1,): [3, 4]         # Only on client 1
+}
+
+# Structure: Product(Client0_SPN(0,1,2), Client1_SPN(3,4))
+```
+
+**Benefits**:
+- Data-driven (no manual specification needed)
+- Naturally handles overlaps
+- Optimal for given data partitioning
+
+---
+
+### Implementation Plan (Simplified from Original)
+
+**Original Timeline**: 22 days (5 phases)
+**Revised Timeline**: ~12 days (simplified based on paper findings)
+
+---
+
+#### Phase 1: New Probabilistic Circuit Classes (4 days)
+
+**Goal**: Implement Mixture-then-Product hierarchy with overlap support
+
+**New Classes**:
+
+1. **GroupMixture** (2 days)
+   ```python
+   class GroupMixture(nn.Module):
+       """
+       Mixture over clients for specific feature group.
+       P(X_g) = Σ_k w_k,g × P_k,g(X_g)
+       """
+       def __init__(self, client_spns, weights, feature_indices, device='cpu')
+       def log_prob(self, x) -> Tensor  # Extract features, compute mixture
+       def sample(self, n) -> Tensor    # Sample from one client, return group features
+   ```
+
+2. **ProductOverGroups** (1 day)
+   ```python
+   class ProductOverGroups(nn.Module):
+       """
+       Product over feature group mixtures (disjoint groups).
+       P(X) = Π_g P(X_g)
+       """
+       def __init__(self, group_mixtures, feature_groups, device='cpu')
+       def log_prob(self, x) -> Tensor  # Sum log-probs
+       def sample(self, n) -> Tensor    # Sample each group independently
+   ```
+
+3. **ProductOverGroupsWithOverlap** (1 day)
+   ```python
+   class ProductOverGroupsWithOverlap(nn.Module):
+       """
+       Product with overlap detection and mixture-based handling.
+       Uses indicator matrix method from paper.
+       """
+       def __init__(self, group_mixtures, feature_groups, device='cpu')
+       def _compute_overlap_map(self) -> Dict  # Find shared features
+       def log_prob(self, x) -> Tensor         # Mixture per shared subspace
+       def sample(self, n) -> Tensor           # Consensus for overlaps
+   ```
+
+**Test Coverage**:
+- Unit tests for each class
+- Overlap detection tests
+- Degenerate cases (single group → horizontal, unique groups → vertical)
+
+---
+
+#### Phase 2: Feature Grouping (Removed - Use Automatic)
+
+**Original Plan**: Implement Federated EM (4 days)
+**Paper Finding**: EM explicitly incompatible, use one-pass
+
+**Revised Plan**: Implement automatic feature grouping (1 day, moved to Phase 3)
+
+**Justification**: Paper shows automatic grouping from data partitioning is sufficient
+
+---
+
+#### Phase 3: Integration into FedCDH.py (3 days)
+
+**Location**: Replace lines 456-552 (current hybrid section)
+
+**New Logic**:
+```python
+if self.scenario == "hybrid":
+    # Step 1: Build indicator matrix M
+    M = build_indicator_matrix(X_splits)  # Which clients have which features
+
+    # Step 2: Automatic feature grouping
+    feature_subspaces = group_features_by_client_set(M)
+
+    # Step 3: Detect overlaps
+    has_overlap = check_overlaps(feature_subspaces)
+
+    # Step 4: Train K × G SPNs
+    for h in range(num_clusters):
+        spn_registry = {}
+        for k, client_features in enumerate(feature_subspaces):
+            for g, (client_set, features) in enumerate(client_features.items()):
+                if k in client_set:
+                    # Train SPN on this client-group pair
+                    spn = train_spn(X_splits[k][:, features])
+                    spn_registry[(k, g)] = spn
+
+        # Step 5: Create per-group mixtures
+        group_mixtures = []
+        for g, (client_set, features) in enumerate(feature_subspaces.items()):
+            client_spns = [spn_registry[(k, g)] for k in client_set]
+            weights = sample_count_proportional(client_set)
+            mixture = GroupMixture(client_spns, weights, features, device)
+            group_mixtures.append(mixture)
+
+        # Step 6: Create product
+        if has_overlap:
+            cluster_model = ProductOverGroupsWithOverlap(group_mixtures, ...)
+        else:
+            cluster_model = ProductOverGroups(group_mixtures, ...)
+
+        global_components.append(cluster_model)
+```
+
+**Backward Compatibility**:
+- Add `hybrid_mode` parameter: "mixture_then_product" (default) or "product_then_mixture" (legacy)
+- Keep old implementation with deprecation warning
+
+---
+
+#### Phase 4: Evaluation Updates (2 days)
+
+**Updates**:
+1. Local SPN evaluation handles K × G SPNs (not just K)
+2. UMAP titles include group info: "Local SPN (Client 0, Group 1, Features [0,1,2])"
+3. Log overlap statistics if detected
+
+**Test Cases**:
+- Hybrid generates K × G UMAP plots
+- Log contains feature subspace info
+- No errors with overlapping features
+
+---
+
+#### Phase 5: Testing & Validation (2 days)
+
+**Test Suite**:
+
+1. **Unit Tests** (1 day)
+   - GroupMixture correctness
+   - ProductOverGroups correctness
+   - Overlap detection
+   - Degenerate cases
+
+2. **Integration Tests** (1 day)
+   - Smoke test: disjoint groups [[0,1,2], [3,4]]
+   - Overlap test: overlapping groups [[0,1], [1,2], [3]]
+   - Comparison: old vs new hybrid (different results expected)
+
+---
+
+#### Phase 6: Documentation (1 day)
+
+**Updates**:
+1. working_state.md: Document Bug 7 (Product-then-Mixture incorrect)
+2. Update hybrid architecture description
+3. Migration guide for users
+4. Examples (disjoint, overlapping, automatic grouping)
+
+---
+
+### Revised Timeline Summary
+
+| Phase | Duration | Deliverable |
+|-------|----------|-------------|
+| **1. New PC Classes** | 4 days | GroupMixture, ProductOverGroups, ProductOverGroupsWithOverlap |
+| **2. ~~Federated EM~~** | ~~4 days~~ → **0 days** | **REMOVED** (paper rejects EM) |
+| **3. Integration** | 3 days | Updated FedCDH.py hybrid section + auto-grouping |
+| **4. Evaluation** | 2 days | K × G SPN handling, overlap logging |
+| **5. Testing** | 2 days | Unit + integration tests |
+| **6. Documentation** | 1 day | Updated docs, migration guide |
+| **TOTAL** | **12 days** | Theoretically grounded hybrid mode |
+
+**Savings**: 10 days (from original 22 days)
+
+---
+
+### Critical Success Criteria
+
+**Must-Haves** (Blocking Thesis):
+1. ✅ Correct Mixture-then-Product hierarchy
+2. ✅ Automatic feature grouping from data partitioning
+3. ✅ Overlap detection via indicator matrix
+4. ✅ One-pass training (no EM iteration)
+5. ✅ Hybrid produces different results from horizontal
+
+**Nice-to-Haves** (Future Work):
+6. ⚠️ Learned feature grouping via structure learning (out of scope)
+7. ⚠️ Differential privacy (out of scope for simulation-based study)
+8. ⚠️ Convergence guarantees (empirical study, no formal proofs)
+
+---
+
+### Risk Assessment
+
+| Risk | Likelihood | Impact | Mitigation |
+|------|------------|--------|------------|
+| Overlap handling breaks product | MEDIUM | HIGH | Extensive testing, paper method proven |
+| Performance regression | MEDIUM | MEDIUM | Comparison study old vs new |
+| Integration breaks H/V | LOW | HIGH | Only modify hybrid section, regression tests |
+| Timeline overrun | LOW | MEDIUM | Simplified plan, removed EM (4 days saved) |
+
+---
+
+### Next Steps
+
+**Immediate** (This Week):
+1. ⬜ Implement GroupMixture class (2 days)
+2. ⬜ Implement ProductOverGroups classes (2 days)
+3. ⬜ Unit tests for new classes (included in above)
+
+**Week 2**:
+4. ⬜ Integrate into FedCDH.py (3 days)
+5. ⬜ Update evaluation code (2 days)
+
+**Week 3** (Final):
+6. ⬜ Testing & validation (2 days)
+7. ⬜ Documentation (1 day)
+8. ⬜ **Total: 12 days from start to thesis-ready implementation**
+
+---
+
+### Theoretical Justification Summary
+
+**Why Mixture-then-Product is Correct**:
+
+1. **FedPC Assumption 2**: Data generating process = mixture of products conditioned on latent L
+   ```
+   P(X) = Σ_L q(L) × [ Π_g P(X_g | L) ]
+   ```
+
+2. **Natural Generalization**:
+   - Horizontal (all features shared): P(X) = Σ_k w_k × P_k(X)
+   - Vertical (disjoint features): P(X) = Π_g P(X_g)
+   - Hybrid (some shared): P(X) = Π_g [ Σ_k w_k,g × P_k,g(X_g) ]
+
+3. **Overlap Handling**: Mixture per shared subspace prevents double-counting
+   - Each feature in exactly one product child
+   - Clients sharing features combined via mixture
+   - Disjoint subspaces combined via product
+
+4. **Empirical Evidence**: GitHub implementation and experiments validate this approach
+
+**Acknowledgment**: This is an **empirical study with no formal guarantees** (Seng et al. 2025 disclaimer). We rely on:
+- Empirical validation from paper experiments
+- Tractability from PC theory (sum/product semantics)
+- GitHub reference implementation correctness
+
+---
+
+### Comparison: Product-then-Mixture vs Mixture-then-Product
+
+| Aspect | Product-then-Mixture (CURRENT - WRONG) | Mixture-then-Product (CORRECT) |
+|--------|---------------------------------------|-------------------------------|
+| **Formula** | P(X) = Σ_k [ Π_g P_k,g(X_g) ] | P(X) = Π_g [ Σ_k P_k,g(X_g) ] |
+| **Semantics** | "Which client, then features" | "Which features, then clients" |
+| **Overlaps** | Breaks (double-counting) | Supported (mixture per subspace) |
+| **H limit** | Reduces to mixture ✓ | Reduces to mixture ✓ |
+| **V limit** | Reduces to product ✓ | Reduces to product ✓ |
+| **Grouping** | Manual | Automatic from data |
+| **Paper support** | ❌ No | ✅ Yes (Seng et al. 2025) |
+| **GitHub implementation** | ❌ No | ✅ Yes |
+| **Current status** | Implemented (Bug 4 "fix") | **PLANNED** (this section) |
+
+**Conclusion**: Current implementation works empirically but is **theoretically incorrect**. Rewrite needed for thesis credibility.
 
 ---
 
@@ -493,7 +1068,7 @@ results = fedcdh.fit(X_splits, c_indx, B)
 print(f"Results saved to: {fedcdh.spn_eval_dir}")
 ```
 
-**Note**: For vertical scenario, local SPN evaluation is skipped due to dimension complexities (each client has disjoint features).
+**Note**: ✅ **Fixed (April 13, 2026)**: Vertical scenario now evaluates local SPNs with correct feature subset extraction. Each client's SPN is evaluated on its assigned features only (e.g., Client 0: features [0,1,2], Client 1: features [3,4]).
 
 ---
 

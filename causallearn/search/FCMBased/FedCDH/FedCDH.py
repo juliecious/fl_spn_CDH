@@ -267,6 +267,29 @@ class FedCDH:
         # to validate that local models learn correct distributions before causal discovery
         self.local_spns = []
 
+    def _extract_feature_indices(self, client_id: int, include_context: bool = False):
+        """
+        Extract feature indices for a client in vertical mode.
+
+        Args:
+            client_id: Client index
+            include_context: If True, include context column index if present
+
+        Returns:
+            List of feature indices for the client
+        """
+        if not hasattr(self, "vertical_feature_map") or not self.vertical_feature_map:
+            # Fallback: return all features
+            return list(range(self.d_features))
+
+        indices = self.vertical_feature_map.get(client_id, [])
+
+        if not include_context:
+            # Filter out context column (indices >= d_features)
+            indices = [idx for idx in indices if idx < self.d_features]
+
+        return indices
+
     def fit(self, X_splits, c_indx, true_DAG_bin):
         # Get training epochs and alpha from args
         if hasattr(self.args, "epochs"):
@@ -572,6 +595,8 @@ class FedCDH:
                         )
                         global_components.append(comp)
                         final_weights.append(weights[h])
+                        # Store feature_map for vertical evaluation
+                        self.vertical_feature_map = feature_maps
                     else:
                         inner_ws = np.array(clients_counts[h])
                         inner_ws = inner_ws / inner_ws.sum()
@@ -701,8 +726,23 @@ class FedCDH:
                         ]
                     elif self.scenario == "vertical":
                         # Vertical: all samples, subset of features
-                        # Skip evaluation for vertical local SPNs (dimension complexities)
-                        continue
+                        feature_indices_no_context = self._extract_feature_indices(
+                            k, include_context=False
+                        )
+
+                        if not feature_indices_no_context:
+                            logging.warning(
+                                f"  Client {k}: No features found, skipping"
+                            )
+                            continue
+
+                        # Extract features for this client
+                        X_client = X_global[:, feature_indices_no_context]
+                        c_client = c_indx  # All samples, context doesn't change
+
+                        logging.info(
+                            f"  Client {k}: Evaluating on features {feature_indices_no_context}"
+                        )
                     else:  # hybrid
                         samples_per_client = total_samples // self.K_clients
                         X_client = X_global[
@@ -712,7 +752,22 @@ class FedCDH:
                             k * samples_per_client : (k + 1) * samples_per_client, :
                         ]
 
-                    X_client_aug = np.concatenate([X_client, c_client], axis=1)
+                    # For vertical mode, only client 0 has context column during training
+                    if self.scenario == "vertical" and k > 0:
+                        X_client_aug = X_client  # No context for clients other than 0
+                    else:
+                        X_client_aug = np.concatenate([X_client, c_client], axis=1)
+
+                    # Create descriptive name
+                    if self.scenario == "vertical":
+                        feature_indices_display = self._extract_feature_indices(
+                            k, include_context=False
+                        )
+                        spn_name = (
+                            f"Local SPN Client {k} (Features {feature_indices_display})"
+                        )
+                    else:
+                        spn_name = f"Local SPN Client {k}"
 
                     # Evaluate quality
                     result = evaluate_spn_quality(
@@ -722,7 +777,7 @@ class FedCDH:
                         device=self.device,
                         compute_mmd=True,
                         compute_ks=True,
-                        name=f"Local SPN Client {k}",
+                        name=spn_name,
                     )
 
                     log_spn_quality(result)
@@ -737,16 +792,34 @@ class FedCDH:
                         # Adaptive num_permutations for evaluation
                         eval_perms = min(200, max(50, self.d_features * 10))
 
+                        # For vertical mode, subset true_DAG_bin to client's features
+                        if self.scenario == "vertical":
+                            feature_indices_no_context = self._extract_feature_indices(
+                                k, include_context=False
+                            )
+                            if len(feature_indices_no_context) > 0:
+                                # Extract submatrix for this client's features
+                                true_DAG_subset = true_DAG_bin[
+                                    np.ix_(
+                                        feature_indices_no_context,
+                                        feature_indices_no_context,
+                                    )
+                                ]
+                            else:
+                                true_DAG_subset = true_DAG_bin
+                        else:
+                            true_DAG_subset = true_DAG_bin
+
                         indep_result = evaluate_spn_independence_structure(
                             spn_model=local_spn,
                             X_data=X_client_aug,
-                            true_DAG_bin=true_DAG_bin,
+                            true_DAG_bin=true_DAG_subset,
                             alpha=0.05,
                             max_order=1,
                             n_conditional_tests=30,
                             num_permutations=eval_perms,
                             device=self.device,
-                            name=f"Local SPN Client {k}",
+                            name=spn_name,  # Use the same descriptive name
                         )
                         log_independence_structure_results(indep_result)
 
@@ -768,11 +841,20 @@ class FedCDH:
                             save_path = os.path.join(
                                 output_dir, f"umap_local_client_{k}.png"
                             )
+                            # Create descriptive title
+                            if self.scenario == "vertical":
+                                feature_indices_display = self._extract_feature_indices(
+                                    k, include_context=False
+                                )
+                                umap_title = f"Local SPN (Client {k}, Features {feature_indices_display})"
+                            else:
+                                umap_title = f"Local SPN (Client {k})"
+
                             create_umap_visualization(
                                 X_features,
                                 samples_features,
                                 save_path=save_path,
-                                title=f"Local SPN (Client {k})",
+                                title=umap_title,
                             )
 
             # Evaluate global SPN
