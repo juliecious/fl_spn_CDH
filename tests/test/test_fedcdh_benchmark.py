@@ -7,10 +7,12 @@ production-quality hyperparameters to evaluate real performance of FedCDH.
 Scenarios:
 - Horizontal: Mixture-of-experts (sample partitioning)
 - Vertical: Product-of-experts (feature partitioning)
-- Hybrid: Product-then-Mixture (feature groups + sample partitioning)
+- Hybrid: Mixture-then-Product ✅ (Algorithm 1 automatic feature grouping)
 
-Hardware: Requires CUDA-capable GPU (recommended)
-Runtime: ~15-30 minutes per configuration
+Hardware: GPU-enabled (CUDA/MPS) recommended for faster training
+Runtime: ~10-20 minutes per configuration (GPU), ~30-60 minutes (CPU)
+
+Updated: April 14, 2026 - Reflects Week 2 Mixture-then-Product implementation
 """
 
 import logging
@@ -43,6 +45,13 @@ from causallearn.utils.data_utils import (
 
 # Experiment configurations
 BENCHMARK_CONFIGS = {
+    "quick": {
+        "d": 5,
+        "K": 2,
+        "n": 200,
+        "epochs": 20,
+        "description": "Quick smoke test: 5 vars, 2 clients, 200 samples",
+    },
     "small": {
         "d": 8,
         "K": 3,
@@ -55,22 +64,86 @@ BENCHMARK_CONFIGS = {
         "K": 3,
         "n": 1200,
         "epochs": 100,
-        "description": "Medium-scale: 10 vars, 3 clients, 1200 samples (fixed: n=120/dim, adaptive perms)",
+        "description": "Medium-scale: 10 vars, 3 clients, 1200 samples",
     },
     "large": {
         "d": 11,
         "K": 5,
-        "n": 1000,
+        "n": 1650,
         "epochs": 150,
-        "description": "Large-scale: 11 vars, 5 clients, 1000 samples (Sachs-like)",
+        "description": "Large-scale: 11 vars, 5 clients, 1650 samples (Sachs-like: 330/client)",
+    },
+    "sachs": {
+        "d": 11,
+        "K": 3,
+        "n": 853,
+        "epochs": 150,
+        "description": "Sachs dataset dimensions: 11 vars, 3 clients, 853 samples",
     },
 }
 
 # Seeds for statistical robustness
 SEEDS = [42, 123, 456, 789, 2024]  # 5 runs per configuration
 
-# Device configuration
-DEVICE = "cuda" if torch.cuda.is_available() else "cpu"
+# Device configuration (supports CUDA and MPS for Mac)
+def get_device():
+    """Detect best available device (CUDA > MPS > CPU)."""
+    if torch.cuda.is_available():
+        return "cuda"
+    elif hasattr(torch.backends, "mps") and torch.backends.mps.is_available():
+        return "mps"
+    else:
+        return "cpu"
+
+
+DEVICE = get_device()
+
+
+# ============================================================
+# GPU Utilities
+# ============================================================
+
+
+def warmup_gpu(device="cuda"):
+    """Warmup GPU with a small tensor operation."""
+    if device in ["cuda", "mps"]:
+        try:
+            x = torch.randn(1000, 1000, device=device)
+            y = torch.matmul(x, x)
+            del x, y
+            if device == "cuda":
+                torch.cuda.synchronize()
+            logging.info(f"GPU warmup completed on {device}")
+        except Exception as e:
+            logging.warning(f"GPU warmup failed: {e}")
+
+
+def get_gpu_memory_info(device="cuda"):
+    """Get GPU memory usage info."""
+    if device == "cuda" and torch.cuda.is_available():
+        allocated = torch.cuda.memory_allocated(0) / 1e9
+        reserved = torch.cuda.memory_reserved(0) / 1e9
+        total = torch.cuda.get_device_properties(0).total_memory / 1e9
+        return {
+            "allocated_gb": allocated,
+            "reserved_gb": reserved,
+            "total_gb": total,
+            "free_gb": total - reserved,
+        }
+    return None
+
+
+def log_gpu_memory(prefix="", device="cuda"):
+    """Log GPU memory usage."""
+    if device == "cuda" and torch.cuda.is_available():
+        mem_info = get_gpu_memory_info(device)
+        if mem_info:
+            logging.info(
+                f"{prefix}GPU Memory: "
+                f"Allocated={mem_info['allocated_gb']:.2f}GB, "
+                f"Reserved={mem_info['reserved_gb']:.2f}GB, "
+                f"Free={mem_info['free_gb']:.2f}GB"
+            )
 
 
 # ============================================================
@@ -165,6 +238,9 @@ def run_single_experiment(
         f"Running: {config_name} | {scenario} | {data_type} | seed={seed} | device={device}"
     )
 
+    # Log GPU memory before experiment
+    log_gpu_memory(prefix="[Pre-experiment] ", device=device)
+
     start_time = time.time()
 
     # Generate data
@@ -197,6 +273,13 @@ def run_single_experiment(
     train_time = time.time() - train_start
     total_time = time.time() - start_time
 
+    # Log GPU memory after experiment
+    log_gpu_memory(prefix="[Post-experiment] ", device=device)
+
+    # Clear GPU cache if using CUDA
+    if device == "cuda":
+        torch.cuda.empty_cache()
+
     # Extract metrics
     return {
         "config": config_name,
@@ -228,19 +311,24 @@ def run_single_experiment(
 # ============================================================
 
 
-def run_scenario_comparison(config_name="medium", data_type="linear", seeds=None):
+def run_scenario_comparison(
+    config_name="medium", data_type="linear", seeds=None, device=None
+):
     """
     Benchmark: Compare 3 SPN scenarios (H/V/Hy) on specified data type.
 
     Tests which aggregation strategy performs best.
 
     Args:
-        config_name: Configuration to use (small/medium/large)
+        config_name: Configuration to use (quick/small/medium/large/sachs)
         data_type: Type of data generation (linear/nonlinear)
         seeds: Random seeds for multiple runs
+        device: Device to use (cuda/mps/cpu) or None for global DEVICE
     """
     if seeds is None:
         seeds = SEEDS
+
+    active_device = device if device is not None else DEVICE
 
     config = BENCHMARK_CONFIGS[config_name]
     scenarios = ["horizontal", "vertical", "hybrid"]
@@ -268,7 +356,7 @@ def run_scenario_comparison(config_name="medium", data_type="linear", seeds=None
                 scenario=scenario,
                 data_type=data_type,
                 seed=seed,
-                device=DEVICE,
+                device=active_device,
             )
             results.append(result)
 
@@ -416,14 +504,19 @@ def analyze_results(results, output_dir="benchmark_results"):
 # ============================================================
 
 
-def main(config_name, data_type="linear"):
+def main(config_name, data_type="linear", device=None, seeds=None):
     """
     Run scenario comparison benchmark.
 
     Args:
-        config_name: Configuration to use (small/medium/large)
+        config_name: Configuration to use (quick/small/medium/large/sachs)
         data_type: Type of data generation (linear/nonlinear)
+        device: Device to use (cuda/mps/cpu) or None for auto-detect
+        seeds: List of random seeds or None for default
     """
+    # Use provided device or global DEVICE
+    active_device = device if device is not None else DEVICE
+    active_seeds = seeds if seeds is not None else SEEDS
     # Create output directory
     os.makedirs("benchmark_results", exist_ok=True)
 
@@ -442,21 +535,39 @@ def main(config_name, data_type="linear"):
     logging.info("=" * 80)
     logging.info(f"Configuration: {config_name}")
     logging.info(f"Data type: {data_type}")
-    logging.info(f"Device: {DEVICE}")
-    logging.info(f"GPU Available: {torch.cuda.is_available()}")
-    if torch.cuda.is_available():
+    logging.info(f"Device: {active_device}")
+
+    # Device information
+    if active_device == "cuda":
+        logging.info(f"CUDA Available: Yes")
         logging.info(f"GPU Name: {torch.cuda.get_device_name(0)}")
         logging.info(
             f"GPU Memory: {torch.cuda.get_device_properties(0).total_memory / 1e9:.1f} GB"
         )
-    logging.info(f"Seeds: {SEEDS}")
+        logging.info(f"CUDA Version: {torch.version.cuda}")
+    elif active_device == "mps":
+        logging.info(f"MPS (Apple Silicon GPU) Available: Yes")
+        logging.info(f"Running on Apple Silicon GPU")
+    else:
+        logging.info(f"Running on CPU (GPU not available)")
+
+    logging.info(f"PyTorch Version: {torch.__version__}")
+    logging.info(f"Seeds: {active_seeds}")
     logging.info("=" * 80)
+
+    # GPU warmup
+    if active_device in ["cuda", "mps"]:
+        logging.info("\nWarming up GPU...")
+        warmup_gpu(device=active_device)
 
     overall_start = time.time()
 
     # Run scenario comparison benchmark
     all_results = run_scenario_comparison(
-        config_name=config_name, data_type=data_type, seeds=SEEDS
+        config_name=config_name,
+        data_type=data_type,
+        seeds=active_seeds,
+        device=active_device,
     )
 
     overall_time = time.time() - overall_start
@@ -487,4 +598,44 @@ def main(config_name, data_type="linear"):
 
 
 if __name__ == "__main__":
-    df, summary = main(config_name="small", data_type="linear")
+    import argparse
+
+    parser = argparse.ArgumentParser(description="FedCDH Benchmark Suite")
+    parser.add_argument(
+        "--config",
+        type=str,
+        default="quick",
+        choices=["quick", "small", "medium", "large", "sachs"],
+        help="Benchmark configuration (default: quick)",
+    )
+    parser.add_argument(
+        "--data-type",
+        type=str,
+        default="linear",
+        choices=["linear", "nonlinear"],
+        help="Data generation type (default: linear)",
+    )
+    parser.add_argument(
+        "--device",
+        type=str,
+        default=None,
+        choices=["cuda", "mps", "cpu"],
+        help="Override device selection (default: auto-detect)",
+    )
+    parser.add_argument(
+        "--seeds",
+        type=int,
+        nargs="+",
+        default=None,
+        help="Custom seed list (default: [42, 123, 456, 789, 2024])",
+    )
+
+    args = parser.parse_args()
+
+    # Pass device and seeds to main()
+    df, summary = main(
+        config_name=args.config,
+        data_type=args.data_type,
+        device=args.device,
+        seeds=args.seeds,
+    )
