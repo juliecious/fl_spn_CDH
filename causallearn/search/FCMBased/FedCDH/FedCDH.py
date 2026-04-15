@@ -873,8 +873,8 @@ class FedCDH:
                         )
                         log_independence_structure_results(indep_result)
 
-                    # UMAP visualization for multivariate data
-                    if X_client.shape[1] > 2:
+                    # UMAP visualization for multivariate data (requires >= 2 features)
+                    if X_client.shape[1] >= 2:
                         with torch.no_grad():
                             samples = (
                                 local_spn.sample(min(200, len(X_client))).cpu().numpy()
@@ -944,8 +944,8 @@ class FedCDH:
                 )
                 log_independence_structure_results(global_indep_result)
 
-            # UMAP for global SPN
-            if self.d_features > 2:
+            # UMAP for global SPN (requires >= 2 features)
+            if self.d_features >= 2:
                 with torch.no_grad():
                     samples = (
                         self.fed_spn_model.sample(min(300, total_samples)).cpu().numpy()
