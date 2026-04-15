@@ -945,25 +945,46 @@ class FedCDH:
                 log_independence_structure_results(global_indep_result)
 
             # UMAP for global SPN
+            logging.info(f"Preparing global SPN UMAP (d_features={self.d_features})...")
             if self.d_features > 2:
                 with torch.no_grad():
                     samples = (
                         self.fed_spn_model.sample(min(300, total_samples)).cpu().numpy()
                     )
+                logging.info(
+                    f"  X_global shape: {X_global.shape}, samples shape: {samples.shape}"
+                )
+
                 # Remove context column
                 X_features = X_global
                 samples_features = (
                     samples[:, :-1] if samples.shape[1] > X_global.shape[1] else samples
                 )
 
+                logging.info(
+                    f"  After context removal: X_features={X_features.shape}, samples_features={samples_features.shape}"
+                )
+
                 if X_features.shape[1] == samples_features.shape[1]:
                     save_path = os.path.join(output_dir, "umap_global_spn.png")
+                    logging.info(f"  Creating UMAP visualization at: {save_path}")
                     create_umap_visualization(
                         X_features,
                         samples_features,
                         save_path=save_path,
                         title="Global Federated SPN",
                     )
+                    logging.info(f"  ✓ Global UMAP saved")
+                else:
+                    logging.warning(
+                        f"  ✗ Dimension mismatch - skipping global UMAP: "
+                        f"X_features has {X_features.shape[1]} features, "
+                        f"samples_features has {samples_features.shape[1]} features"
+                    )
+            else:
+                logging.info(
+                    f"  Skipping global UMAP: d_features={self.d_features} <= 2"
+                )
 
             logging.info(f"SPN evaluation plots saved to: {output_dir}/")
             logging.info(f"Run log saved to: {log_file}")
