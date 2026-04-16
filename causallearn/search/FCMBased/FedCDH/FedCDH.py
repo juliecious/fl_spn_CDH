@@ -499,20 +499,36 @@ class FedCDH:
                                 seed=h * 10 + k,
                             )
                         else:
-                            # Adaptive depth: more expressive for higher dimensions
-                            # Old: depth = floor(log2(d))  → d=8→3, d=10→3 (SAME!)
-                            # New: depth = ceil(log2(d)) + 1  → d=8→5, d=10→5 (better capacity)
-                            # Rationale: Need deeper trees to capture high-dim dependencies
-                            adaptive_depth = int(np.ceil(np.log2(local_d))) + 1
-                            adaptive_depth = max(
-                                2, adaptive_depth
-                            )  # Minimum depth of 2
+                            # Adaptive depth: respect Einet constraint while maximizing capacity
+                            # Einet constraint: 2^depth <= num_features
+                            # Therefore: depth <= log2(num_features)
+                            # Max depth = floor(log2(num_features))
+                            #
+                            # Strategy: Use maximum allowed depth, no reduction
+                            # Old: Used floor(log2(d)) which is already the max
+                            # New: Increase capacity via num_sums/leaves instead
+                            #
+                            # Since depth is constrained, we compensate by increasing
+                            # architecture parameters for higher dimensions
+                            max_depth = int(np.floor(np.log2(local_d)))
+                            adaptive_depth = max(1, max_depth)
+
+                            # Adaptive architecture parameters: increase for higher dimensions
+                            # Rationale: Since depth is constrained, increase width/repetitions
+                            # Formula: scale by sqrt(d/5) to add capacity without explosion
+                            scale_factor = np.sqrt(max(1.0, local_d / 5.0))
+                            adaptive_num_sums = max(
+                                num_sums, int(num_sums * scale_factor)
+                            )
+                            adaptive_num_leaves = max(
+                                num_leaves, int(num_leaves * scale_factor)
+                            )
 
                             leaf = LocalSPNWrapper(
                                 num_features=local_d,
                                 device=self.device,
-                                num_sums=num_sums,
-                                num_leaves=num_leaves,
+                                num_sums=adaptive_num_sums,
+                                num_leaves=adaptive_num_leaves,
                                 depth=adaptive_depth,
                                 num_repetitions=num_repetitions,
                                 seed=h * 10 + k,
@@ -581,17 +597,25 @@ class FedCDH:
                                     seed=h * 1000 + k * 10 + hash(tuple(features)) % 10,
                                 )
                             else:
-                                # Adaptive depth for hybrid mode (same as regular mode)
-                                adaptive_depth_hybrid = (
-                                    int(np.ceil(np.log2(local_d))) + 1
+                                # Adaptive depth for hybrid mode (respects Einet constraint)
+                                # Same strategy as regular mode: max allowed depth + adaptive width
+                                max_depth_hybrid = int(np.floor(np.log2(local_d)))
+                                adaptive_depth_hybrid = max(1, max_depth_hybrid)
+
+                                # Adaptive architecture parameters for hybrid
+                                scale_factor_hybrid = np.sqrt(max(1.0, local_d / 5.0))
+                                adaptive_num_sums_hybrid = max(
+                                    num_sums, int(num_sums * scale_factor_hybrid)
                                 )
-                                adaptive_depth_hybrid = max(2, adaptive_depth_hybrid)
+                                adaptive_num_leaves_hybrid = max(
+                                    num_leaves, int(num_leaves * scale_factor_hybrid)
+                                )
 
                                 spn = LocalSPNWrapper(
                                     num_features=local_d,
                                     device=self.device,
-                                    num_sums=num_sums,
-                                    num_leaves=num_leaves,
+                                    num_sums=adaptive_num_sums_hybrid,
+                                    num_leaves=adaptive_num_leaves_hybrid,
                                     depth=adaptive_depth_hybrid,
                                     num_repetitions=num_repetitions,
                                     seed=h * 1000 + k * 10 + hash(tuple(features)) % 10,
