@@ -418,10 +418,24 @@ class FedCDH:
                         min_bic = bic
                         best_h = h_candidate
                         best_model = fed_km
-                num_clusters = best_h
-                logging.info(
-                    f"BIC selection: chosen K={num_clusters} from {bic_scores}"
+
+                # Adaptive cluster count: cap based on data availability
+                # Rationale: Each SPN needs sufficient samples to train properly
+                # Formula: max_clusters = max(2, min(BIC_choice, samples_per_client // 100))
+                max_clusters_by_data = max(
+                    2, min(5, total_samples // (self.K_clients * 100))
                 )
+                num_clusters = min(best_h, max_clusters_by_data)
+
+                if num_clusters < best_h:
+                    logging.info(
+                        f"BIC selection: K={best_h} from {bic_scores}, "
+                        f"capped to K={num_clusters} (data-driven: {total_samples} samples)"
+                    )
+                else:
+                    logging.info(
+                        f"BIC selection: chosen K={num_clusters} from {bic_scores}"
+                    )
 
             labels = best_model.labels_
             clustering_cost = best_model.comm_cost / 1024.0
@@ -433,10 +447,37 @@ class FedCDH:
             weights = np.bincount(labels, minlength=num_clusters) / len(labels)
             clients_clusters = [[] for _ in range(num_clusters)]
             clients_counts = [[] for _ in range(num_clusters)]
-            # Extract SPN architecture parameters
+
+            # Adaptive hyperparameters based on dimensionality
+            # Rationale: Higher dimensions need more model capacity and training
             num_sums = getattr(self.args, "num_sums", 5)
             num_leaves = getattr(self.args, "num_leaves", 5)
             num_repetitions = getattr(self.args, "num_repetitions", 5)
+
+            # Adaptive learning rate: decrease for higher dimensions
+            # Formula: lr = 0.01 / sqrt(d/5)
+            # Effect: d=5→0.010, d=8→0.008, d=10→0.007, d=15→0.006
+            base_lr = getattr(self.args, "lr", 0.01)
+            adaptive_lr = base_lr / np.sqrt(max(1.0, self.d_features / 5.0))
+            logging.info(
+                f"Adaptive learning rate: base={base_lr:.4f}, "
+                f"d={self.d_features} → lr={adaptive_lr:.4f}"
+            )
+
+            # Adaptive epochs: scale with complexity
+            # Formula: epochs = base_epochs * (d/5)^1.5
+            # Effect: d=5→base, d=8→2.3×base, d=10→2.8×base
+            base_epochs = train_epochs
+            adaptive_epochs = int(base_epochs * (self.d_features / 5.0) ** 1.5)
+            adaptive_epochs = max(base_epochs, adaptive_epochs)  # Never less than base
+            if adaptive_epochs != base_epochs:
+                logging.info(
+                    f"Adaptive epochs: base={base_epochs}, "
+                    f"d={self.d_features} → epochs={adaptive_epochs} ({adaptive_epochs/base_epochs:.1f}×)"
+                )
+            else:
+                logging.info(f"Training epochs: {adaptive_epochs}")
+            train_epochs = adaptive_epochs
 
             for h in range(num_clusters):
                 cluster_mask_global = labels == h
@@ -458,16 +499,27 @@ class FedCDH:
                                 seed=h * 10 + k,
                             )
                         else:
+                            # Adaptive depth: more expressive for higher dimensions
+                            # Old: depth = floor(log2(d))  → d=8→3, d=10→3 (SAME!)
+                            # New: depth = ceil(log2(d)) + 1  → d=8→5, d=10→5 (better capacity)
+                            # Rationale: Need deeper trees to capture high-dim dependencies
+                            adaptive_depth = int(np.ceil(np.log2(local_d))) + 1
+                            adaptive_depth = max(
+                                2, adaptive_depth
+                            )  # Minimum depth of 2
+
                             leaf = LocalSPNWrapper(
                                 num_features=local_d,
                                 device=self.device,
                                 num_sums=num_sums,
                                 num_leaves=num_leaves,
-                                depth=max(1, int(np.floor(np.log2(local_d)))),
+                                depth=adaptive_depth,
                                 num_repetitions=num_repetitions,
                                 seed=h * 10 + k,
                             )
-                        leaf.train_local(local_data_h, epochs=train_epochs, lr=0.01)
+                        leaf.train_local(
+                            local_data_h, epochs=train_epochs, lr=adaptive_lr
+                        )
                         clients_clusters[h].append(leaf)
                         clients_counts[h].append(len(local_data_h))
             global_components = []
@@ -519,8 +571,8 @@ class FedCDH:
                             local_data_subspace = local_data_h[:, features]
                             local_d = local_data_subspace.shape[1]
 
-                            # Train SPN
-                            # Justification: Same training logic as before
+                            # Train SPN with adaptive parameters
+                            # Justification: Same training logic as before, now with adaptive depth/lr
                             if local_d == 1:
                                 spn = UnivariateSPNWrapper(
                                     device=self.device,
@@ -529,18 +581,24 @@ class FedCDH:
                                     seed=h * 1000 + k * 10 + hash(tuple(features)) % 10,
                                 )
                             else:
+                                # Adaptive depth for hybrid mode (same as regular mode)
+                                adaptive_depth_hybrid = (
+                                    int(np.ceil(np.log2(local_d))) + 1
+                                )
+                                adaptive_depth_hybrid = max(2, adaptive_depth_hybrid)
+
                                 spn = LocalSPNWrapper(
                                     num_features=local_d,
                                     device=self.device,
                                     num_sums=num_sums,
                                     num_leaves=num_leaves,
-                                    depth=max(1, int(np.floor(np.log2(local_d)))),
+                                    depth=adaptive_depth_hybrid,
                                     num_repetitions=num_repetitions,
                                     seed=h * 1000 + k * 10 + hash(tuple(features)) % 10,
                                 )
 
                             spn.train_local(
-                                local_data_subspace, epochs=train_epochs, lr=0.01
+                                local_data_subspace, epochs=train_epochs, lr=adaptive_lr
                             )
                             spn_registry[(client_set, tuple(features))].append(spn)
 
