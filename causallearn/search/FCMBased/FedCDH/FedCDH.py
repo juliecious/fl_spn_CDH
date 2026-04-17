@@ -450,9 +450,11 @@ class FedCDH:
 
             # Adaptive hyperparameters based on dimensionality
             # Rationale: Higher dimensions need more model capacity and training
-            num_sums = getattr(self.args, "num_sums", 5)
-            num_leaves = getattr(self.args, "num_leaves", 5)
-            num_repetitions = getattr(self.args, "num_repetitions", 5)
+            # Updated defaults: 5→20 for num_sums/leaves (4× capacity improvement)
+            # Rationale: RAT-SPN literature uses 20-40 for similar problems
+            num_sums = getattr(self.args, "num_sums", 20)
+            num_leaves = getattr(self.args, "num_leaves", 20)
+            num_repetitions = getattr(self.args, "num_repetitions", 10)
 
             # Adaptive learning rate: decrease for higher dimensions
             # Formula: lr = 0.01 / sqrt(d/5)

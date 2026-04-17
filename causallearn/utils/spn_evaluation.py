@@ -470,8 +470,12 @@ def log_spn_quality(results, name=None):
 
     if "mmd_pvalue" in results:
         mmd_p = results["mmd_pvalue"]
+        mmd_sq = results.get("mmd_squared", None)
         status = "✓" if mmd_p > 0.05 else "✗"
-        logging.info(f"    MMD p-value: {mmd_p:.3f} {status}")
+        if mmd_sq is not None:
+            logging.info(f"    MMD²: {mmd_sq:.6f}, p-value: {mmd_p:.3f} {status}")
+        else:
+            logging.info(f"    MMD p-value: {mmd_p:.3f} {status}")
 
     if "ks_fail_ratio" in results:
         ks_ratio = results["ks_fail_ratio"]
