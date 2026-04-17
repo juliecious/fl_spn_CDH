@@ -343,6 +343,8 @@ class FedCDH:
                     feature_maps[k] = f_indices
                     X_splits_train.append(X_aug_global[:, f_indices])
                 X_splits = X_splits_train
+                # Store for evaluation (fixes vertical mode LL evaluation bug)
+                self.X_splits_train = X_splits_train
             else:
                 # Horizontal/Hybrid: All clients see all features (no feature map needed)
                 feature_maps = None
@@ -859,24 +861,41 @@ class FedCDH:
                             k * samples_per_client : (k + 1) * samples_per_client, :
                         ]
                     elif self.scenario == "vertical":
-                        # Vertical: all samples, subset of features
-                        feature_indices_no_context = self._extract_feature_indices(
-                            k, include_context=False
-                        )
-
-                        if not feature_indices_no_context:
-                            logging.warning(
-                                f"  Client {k}: No features found, skipping"
+                        # Vertical: Use the ACTUAL training data for accurate evaluation
+                        # Bug fix: Previously reconstructed data from X_global, causing normalization mismatch
+                        if hasattr(self, "X_splits_train") and k < len(
+                            self.X_splits_train
+                        ):
+                            X_client_aug = self.X_splits_train[k]
+                            # Extract feature indices for logging only
+                            feature_indices_no_context = self._extract_feature_indices(
+                                k, include_context=False
                             )
-                            continue
+                            logging.info(
+                                f"  Client {k}: Evaluating on training data (features {feature_indices_no_context}, "
+                                f"shape={X_client_aug.shape})"
+                            )
+                            # Skip the context handling below
+                            c_client = None
+                        else:
+                            # Fallback to old method if training data not available
+                            feature_indices_no_context = self._extract_feature_indices(
+                                k, include_context=False
+                            )
 
-                        # Extract features for this client
-                        X_client = X_global[:, feature_indices_no_context]
-                        c_client = c_indx  # All samples, context doesn't change
+                            if not feature_indices_no_context:
+                                logging.warning(
+                                    f"  Client {k}: No features found, skipping"
+                                )
+                                continue
 
-                        logging.info(
-                            f"  Client {k}: Evaluating on features {feature_indices_no_context}"
-                        )
+                            # Extract features for this client
+                            X_client = X_global[:, feature_indices_no_context]
+                            c_client = c_indx  # All samples, context doesn't change
+
+                            logging.info(
+                                f"  Client {k}: Evaluating on features {feature_indices_no_context}"
+                            )
                     else:  # hybrid
                         samples_per_client = total_samples // self.K_clients
                         X_client = X_global[
@@ -887,7 +906,11 @@ class FedCDH:
                         ]
 
                     # For vertical mode, only client 0 has context column during training
-                    if self.scenario == "vertical" and k > 0:
+                    # Skip this if we already have X_client_aug from training data
+                    if self.scenario == "vertical" and c_client is None:
+                        # Already set X_client_aug from training data, skip
+                        pass
+                    elif self.scenario == "vertical" and k > 0:
                         X_client_aug = X_client  # No context for clients other than 0
                     else:
                         X_client_aug = np.concatenate([X_client, c_client], axis=1)
@@ -907,7 +930,7 @@ class FedCDH:
                     result = evaluate_spn_quality(
                         local_spn,
                         X_client_aug,
-                        n_samples=min(150, len(X_client)),
+                        n_samples=min(150, len(X_client_aug)),
                         device=self.device,
                         compute_mmd=True,
                         compute_ks=True,
@@ -958,16 +981,44 @@ class FedCDH:
                         log_independence_structure_results(indep_result)
 
                     # UMAP visualization for multivariate data (requires >= 2 features)
-                    if X_client.shape[1] >= 2:
+                    # For vertical mode, X_client_aug includes context for client 0, so use shape[1]-1 for client 0
+                    # For other modes, X_client is defined and used directly
+                    if self.scenario == "vertical" and hasattr(self, "X_splits_train"):
+                        # Use training data shape minus context column (if present)
+                        n_features_no_context = X_client_aug.shape[1] - (
+                            1 if k == 0 else 0
+                        )
+                    else:
+                        n_features_no_context = (
+                            X_client.shape[1]
+                            if "X_client" in locals()
+                            else X_client_aug.shape[1] - 1
+                        )
+
+                    if n_features_no_context >= 2:
                         with torch.no_grad():
                             samples = (
-                                local_spn.sample(min(200, len(X_client))).cpu().numpy()
+                                local_spn.sample(min(200, len(X_client_aug)))
+                                .cpu()
+                                .numpy()
                             )
                         # Remove context column
-                        X_features = X_client
+                        if self.scenario == "vertical" and k == 0:
+                            X_features = X_client_aug[
+                                :, :-1
+                            ]  # Remove context from client 0
+                        elif self.scenario == "vertical":
+                            X_features = X_client_aug  # Client 1+ has no context
+                        else:
+                            X_features = (
+                                X_client
+                                if "X_client" in locals()
+                                else X_client_aug[:, :-1]
+                            )
+
                         samples_features = (
                             samples[:, :-1]
-                            if samples.shape[1] > X_client.shape[1]
+                            if samples.shape[1] > X_features.shape[1]
                             else samples
                         )
 
