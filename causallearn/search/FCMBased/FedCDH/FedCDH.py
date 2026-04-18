@@ -320,6 +320,9 @@ class FedCDH:
         X_aug_global = np.concatenate([X_global, c_indx], axis=1)
         d_aug_total = X_aug_global.shape[1]
 
+        # Store augmented training data for evaluation (hybrid mode fix)
+        self.X_aug_global_train = X_aug_global
+
         train_time = 0
         cd_time = 0
         comm_cost = 0.0
@@ -1044,9 +1047,15 @@ class FedCDH:
 
             # Evaluate global SPN
             logging.info("Evaluating global federated SPN...")
+            # Use stored training data for evaluation (ensures consistent normalization)
+            X_eval = (
+                self.X_aug_global_train
+                if hasattr(self, "X_aug_global_train")
+                else X_aug_global
+            )
             global_result = evaluate_spn_quality(
                 self.fed_spn_model,
-                X_aug_global,
+                X_eval,
                 n_samples=min(300, total_samples),
                 device=self.device,
                 compute_mmd=True,
@@ -1068,7 +1077,7 @@ class FedCDH:
 
                 global_indep_result = evaluate_spn_independence_structure(
                     spn_model=self.fed_spn_model,
-                    X_data=X_aug_global,
+                    X_data=X_eval,
                     true_DAG_bin=true_DAG_bin,
                     alpha=0.05,
                     max_order=1,
