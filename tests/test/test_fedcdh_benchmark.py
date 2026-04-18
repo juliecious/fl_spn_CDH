@@ -12,7 +12,11 @@ Scenarios:
 Hardware: GPU-enabled (CUDA/MPS) recommended for faster training
 Runtime: ~10-20 minutes per configuration (GPU), ~30-60 minutes (CPU)
 
-Updated: April 14, 2026 - Reflects Week 2 Mixture-then-Product implementation
+Data:
+- quick/small/medium/large configs: Synthetic data (linear or nonlinear)
+- sachs config: Real Sachs protein signaling dataset (loaded via sachs_loader.py)
+
+Updated: April 18, 2026 - Fixed Sachs config to load real dataset
 """
 
 import logging
@@ -78,7 +82,7 @@ BENCHMARK_CONFIGS = {
         "K": 3,
         "n": 853,
         "epochs": 150,
-        "description": "Sachs dataset dimensions: 11 vars, 3 clients, 853 samples",
+        "description": "Real Sachs protein signaling dataset: 11 vars, 3 clients, 853 samples (interventional heterogeneity)",
     },
 }
 
@@ -243,21 +247,48 @@ def run_single_experiment(
 
     start_time = time.time()
 
-    # Generate data
-    W, B, X, c_indx, choice = create_benchmark_data(
-        d=d, K=K, n=n, seed=seed, data_type=data_type, sem_type="gauss"
-    )
+    # Load data: Use real Sachs dataset if config is "sachs", otherwise generate synthetic
+    if config_name == "sachs":
+        logging.info("Loading real Sachs dataset...")
+        from tests.utils.sachs_loader import load_sachs_federated
 
-    # Partition data
-    X_splits = partition_data(X, c_indx, K, scenario)
+        # Load Sachs data partitioned by interventional conditions (horizontal-like)
+        X_splits_raw, B, c_indx_raw = load_sachs_federated(
+            n_clients=K, n_samples_limit=n
+        )
+
+        # Reconstruct global data
+        X = np.vstack(X_splits_raw)
+
+        # Re-partition based on scenario
+        # Create c_indx matching the global data shape
+        c_indx = np.repeat(np.arange(K), n // K).reshape(-1, 1)
+        X_splits = partition_data(X, c_indx, K, scenario)
+
+        W = B  # Use ground truth DAG as W (no need for separate weights)
+        choice = None  # No heterogeneity choice for real data
+
+        logging.info(
+            f"  Sachs data: {X.shape[0]} samples, {X.shape[1]} features, "
+            f"partitioned for {scenario} scenario"
+        )
+    else:
+        # Generate synthetic data
+        W, B, X, c_indx, choice = create_benchmark_data(
+            d=d, K=K, n=n, seed=seed, data_type=data_type, sem_type="gauss"
+        )
+
+        # Partition data
+        X_splits = partition_data(X, c_indx, K, scenario)
 
     # Setup FedCDH with production parameters
+    model_type = "real" if config_name == "sachs" else "synthetic"
     args = Namespace(
         K=K,
         d=d,
         n=n // K,
         scenario=scenario,
-        model_type="synthetic",
+        model_type=model_type,
         ci_method="spn",
         alpha=0.05,
         epochs=epochs,
