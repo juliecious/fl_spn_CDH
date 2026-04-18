@@ -1826,6 +1826,128 @@ FedSPN-Hy           0.XX ± 0.XX    0.XX ± 0.XX    XX ± XX   XX s
 
 ---
 
+## Backlog: Potential Improvements
+
+### SPN Architecture Optimizations
+
+**Status**: 💡 Investigated, not implemented (April 18, 2026)
+**Priority**: Medium (optional enhancement for future work)
+
+#### Background
+
+After investigating LearnSPN integration (Gens & Domingos 2013), identified significant incompatibilities:
+- ❌ SPFlow API incompatible with simple-einet
+- ❌ Structure learning requires centralized data (conflicts with federated setting)
+- ❌ Integration effort: 20-28 hours with uncertain benefits
+- ✅ Current RAT-SPN sufficient after 4× architecture increase
+
+**Decision**: Focus on RAT-SPN optimizations instead.
+
+#### Recommended: Combined Adaptive Scaling + Ensemble Approach
+
+**Option 1: Adaptive Architecture Scaling**
+```python
+# Scale capacity with dimensionality
+num_sums = 20 + d * 2          # e.g., 36 for d=8, 40 for d=10
+num_leaves = 20 + d * 2
+num_repetitions = 10 + d // 2  # e.g., 14 for d=8, 15 for d=10
+```
+
+**Expected Benefits**:
+- Reduces bias (underfitting)
+- +1.0 to +2.0 LL improvement
+- +3-5% CI test accuracy
+- Implementation: 2 hours
+
+**Option 2: Ensemble of RAT-SPNs**
+```python
+# Multiple RAT-SPNs with different random seeds
+class EnsembleSPN:
+    def __init__(self, d, n_models=5, device='cpu'):
+        self.models = [
+            Einet(scaled_config, seed=42+i)
+            for i in range(n_models)
+        ]
+
+    def log_prob(self, X):
+        # Average log-probs → lower variance
+        lls = [model.ll(X) for model in self.models]
+        return torch.logsumexp(torch.stack(lls), dim=0) - np.log(len(self.models))
+```
+
+**Expected Benefits**:
+- Reduces variance (random structure sensitivity)
+- +5-8% CI test accuracy improvement
+- More robust CI tests (main benefit!)
+- Implementation: 1 hour
+
+#### Combined Approach: Synergistic Benefits
+
+**Why combine both?**
+- Option 1 reduces **bias** → better individual models
+- Option 2 reduces **variance** → more stable estimates
+- **Synergy**: Better individual models → even better ensemble
+
+**Expected Combined Improvements**:
+| Metric | Current | Scaling Only | Ensemble Only | **Combined** |
+|--------|---------|--------------|---------------|--------------|
+| Train LL | -9 to -11 | -8 to -9 | -9 to -11 | **-7.5 to -8.5** |
+| CI Accuracy | 60-70% | 65-72% | 68-75% | **72-80%** |
+| Skeleton F1 | 0.65 | 0.68 | 0.70 | **0.75** |
+| Training Time | 1-2 min | 2-3 min | 5-10 min | 10-15 min |
+| Memory | 200 KB | 300 KB | 1 MB | 1.5 MB |
+
+**Costs**:
+- ⚠️ 5× slower inference (but parallelizable)
+- ✅ Memory negligible (<2 MB)
+- ✅ Implementation: ~3 hours total
+
+**Adaptive Strategy** (Recommended):
+```python
+def get_spn_config(d, scenario, is_final=False):
+    # Always scale architecture
+    num_sums = 20 + d * 2
+    num_leaves = 20 + d * 2
+    num_repetitions = 10 + d // 2
+
+    # Use ensemble for complex cases
+    if d >= 8 or scenario in ["vertical", "hybrid"] or is_final:
+        n_ensemble = 5
+    else:
+        n_ensemble = 1  # Single model for quick tests
+
+    return config
+```
+
+#### Implementation Timeline (If Pursued)
+
+**Total: ~9 hours**
+- Hour 1-2: Implement EnsembleSPNWrapper with adaptive scaling
+- Hour 3: Add `--n-ensemble` flag to benchmark script
+- Hour 4-5: Test on quick config (d=5), debug
+- Hour 6-9: Run full benchmarks (d=8, d=10), analyze results
+
+#### When to Implement
+
+**✅ Implement if**:
+- Final thesis results need improvement (F1 < 0.7)
+- Reviewers request stronger baselines
+- Time permits after main experiments complete
+
+**❌ Skip if**:
+- Current results already competitive (F1 > 0.7)
+- Tight deadline (focus on writing)
+- RAT-SPN performance already sufficient
+
+#### References
+
+- Investigation: `LEARNSPN_INVESTIGATION.md`
+- Analysis: `LEARNSPN_ANALYSIS.md`
+- Detailed comparison: `ENSEMBLE_SCALING_ANALYSIS.md`
+- Test script: `test_learnspn_basic.py` (SPFlow integration test)
+
+---
+
 ## Next Steps
 
 ### Immediate (This Week - Week 3)
