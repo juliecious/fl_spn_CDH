@@ -1,22 +1,33 @@
 """
-FedCDH Benchmark Suite - Scenario Comparison.
+FedCDH v2 Benchmark Suite - Adaptive Hyperparameters + CI Ranking.
 
 Compares 3 SPN aggregation scenarios (Horizontal/Vertical/Hybrid) with
-production-quality hyperparameters to evaluate real performance of FedCDH.
+v2 adaptive hyperparameters and optional CI ranking.
+
+v2 Features:
+- ✅ 5-Criterion Adaptive Hyperparameters (mode-aware capacity scaling)
+- ✅ Optional Top-N% CI Ranking (percentile-based edge selection)
+- ✅ Consistent sample sizes across modes (n_total same, distribution differs)
 
 Scenarios:
-- Horizontal: Mixture-of-experts (sample partitioning)
-- Vertical: Product-of-experts (feature partitioning)
-- Hybrid: Mixture-then-Product ✅ (Algorithm 1 automatic feature grouping)
+- Horizontal: Mixture-of-experts (sample partitioning across K clients)
+- Vertical: Product-of-experts (feature partitioning, all clients see all samples)
+- Hybrid: Mixture-then-Product (overlapping features + sample partitioning)
 
-Hardware: GPU-enabled (CUDA/MPS) recommended for faster training
-Runtime: ~10-20 minutes per configuration (GPU), ~30-60 minutes (CPU)
+Sample Size Consistency:
+- All modes use n_total samples, but distribution differs:
+  * Horizontal: n_total samples split across K clients (n_per_client = n_total/K)
+  * Vertical: All K clients see the same n_total samples (all samples shared)
+  * Hybrid: n_total samples split across K clients (like horizontal)
+
+Hardware: GPU-enabled (CUDA) recommended for faster training
+Runtime: ~15-30 minutes per configuration (GPU), ~45-90 minutes (CPU)
 
 Data:
 - quick/small/medium/large configs: Synthetic data (linear or nonlinear)
-- sachs config: Real Sachs protein signaling dataset (loaded via sachs_loader.py)
+- sachs config: Real Sachs protein signaling dataset
 
-Updated: April 18, 2026 - Fixed Sachs config to load real dataset
+Updated: April 22, 2026 - v2 implementation with adaptive hyperparameters
 """
 
 import logging
@@ -47,42 +58,65 @@ from causallearn.utils.data_utils import (
 # Configuration
 # ============================================================
 
-# Experiment configurations
+# Sample Size Strategy (v2):
+# ---------------------------
+# All modes use the same n_total samples, ensuring fair comparison:
+#
+#   Mode         | Total Samples | Per-Client Samples  | Per-Client Features
+#   -------------|---------------|---------------------|--------------------
+#   Horizontal   | n_total       | n_total/K          | d (all features)
+#   Vertical     | n_total       | n_total (all)      | d/K (split features)
+#   Hybrid       | n_total       | n_total/K          | d (overlapping)
+#
+# Example (MEDIUM: n_total=1200, K=3, d=10):
+#   - Horizontal: 3 clients × 400 samples × 10 features
+#   - Vertical:   3 clients × 1200 samples × ~3-4 features
+#   - Hybrid:     3 clients × 400 samples × 10 features (with overlap)
+#
+# This ensures:
+#   1. Same total information available (n_total samples)
+#   2. Fair capacity comparison (SPNs trained on same data volume)
+#   3. Mode-specific challenges properly reflected (horizontal: sample heterogeneity,
+#      vertical: feature fragmentation, hybrid: both with overlap)
+
+# Experiment configurations (v2 with consistent sample sizes)
+# n_total: Total samples (consistent across modes)
+# n_per_client: Samples per client (horizontal/hybrid: n_total/K, vertical: n_total)
 BENCHMARK_CONFIGS = {
     "quick": {
         "d": 5,
         "K": 2,
-        "n": 200,
+        "n_total": 200,
         "epochs": 20,
-        "description": "Quick smoke test: 5 vars, 2 clients, 200 samples",
+        "description": "Quick smoke test: 5 vars, 2 clients, 200 total samples",
     },
     "small": {
         "d": 8,
         "K": 3,
-        "n": 600,
+        "n_total": 900,  # Increased from 600 for better ratio (900/8=112.5)
         "epochs": 50,
-        "description": "Small-scale: 8 vars, 3 clients, 600 samples",
+        "description": "Small-scale: 8 vars, 3 clients, 900 total samples (300/client horizontal)",
     },
     "medium": {
         "d": 10,
         "K": 3,
-        "n": 1200,
+        "n_total": 1200,
         "epochs": 100,
-        "description": "Medium-scale: 10 vars, 3 clients, 1200 samples",
+        "description": "Medium-scale: 10 vars, 3 clients, 1200 total samples (400/client horizontal)",
     },
     "large": {
         "d": 11,
         "K": 5,
-        "n": 1650,
+        "n_total": 2000,  # Increased from 1650, cleaner division (400/client)
         "epochs": 150,
-        "description": "Large-scale: 11 vars, 5 clients, 1650 samples (Sachs-like: 330/client)",
+        "description": "Large-scale: 11 vars, 5 clients, 2000 total samples (400/client horizontal)",
     },
     "sachs": {
         "d": 11,
         "K": 3,
-        "n": 853,
+        "n_total": 852,  # Divisible by 3 for clean horizontal split
         "epochs": 150,
-        "description": "Real Sachs protein signaling dataset: 11 vars, 3 clients, 853 samples (interventional heterogeneity)",
+        "description": "Real Sachs protein signaling dataset: 11 vars, 3 clients, 852 samples (284/client)",
     },
 }
 
@@ -190,29 +224,60 @@ def create_benchmark_data(d, K, n, seed, data_type="linear", sem_type="gauss"):
 
 
 def partition_data(X, c_indx, K, scenario):
-    """Partition data according to federated scenario."""
+    """
+    Partition data according to federated scenario.
+
+    Key insight: All modes use the same n_total samples, but distribution differs:
+    - Horizontal: n_total split across K clients (each gets n_total/K samples, all features)
+    - Vertical: All K clients see same n_total samples (each gets all samples, subset of features)
+    - Hybrid: n_total split across K clients (each gets n_total/K samples, overlapping features)
+
+    Args:
+        X: Global data (n_total, d)
+        c_indx: Context indices
+        K: Number of clients
+        scenario: 'horizontal', 'vertical', or 'hybrid'
+
+    Returns:
+        X_splits: List of K data partitions
+    """
     n, d = X.shape
 
     if scenario == "horizontal":
+        # Horizontal: Split samples, all clients see all features
         samples_per_client = n // K
         X_splits = [
             X[k * samples_per_client : (k + 1) * samples_per_client, :]
             for k in range(K)
         ]
+        logging.info(
+            f"  Horizontal partition: {K} clients, each with {samples_per_client} samples × {d} features"
+        )
+
     elif scenario == "vertical":
+        # Vertical: All clients see all samples, each gets subset of features
         features_per_client = d // K
-        X_splits = [
-            X[:, k * features_per_client : (k + 1) * features_per_client]
-            for k in range(K)
-        ]
-        if d % K != 0:
-            X_splits[-1] = X[:, (K - 1) * features_per_client :]
-    elif scenario == "hybrid":
-        samples_per_client = n // K
         X_splits = []
         for k in range(K):
-            X_k = X[k * samples_per_client : (k + 1) * samples_per_client, :]
-            X_splits.append(X_k)
+            start_feat = k * features_per_client
+            end_feat = (k + 1) * features_per_client if k < K - 1 else d
+            X_splits.append(X[:, start_feat:end_feat])
+
+        logging.info(
+            f"  Vertical partition: {K} clients, each with {n} samples × ~{features_per_client} features"
+        )
+
+    elif scenario == "hybrid":
+        # Hybrid: Split samples (like horizontal), overlapping features created by FedCDH
+        samples_per_client = n // K
+        X_splits = [
+            X[k * samples_per_client : (k + 1) * samples_per_client, :]
+            for k in range(K)
+        ]
+        logging.info(
+            f"  Hybrid partition: {K} clients, each with {samples_per_client} samples × {d} features (overlap added by FedCDH)"
+        )
+
     else:
         raise ValueError(f"Unknown scenario: {scenario}")
 
@@ -225,22 +290,42 @@ def partition_data(X, c_indx, K, scenario):
 
 
 def run_single_experiment(
-    config_name, config, scenario, data_type, seed, device="cuda"
+    config_name,
+    config,
+    scenario,
+    data_type,
+    seed,
+    device="cuda",
+    use_ci_ranking=False,
+    sparsity_percentile=0.2,
 ):
     """
-    Run a single benchmark experiment.
+    Run a single benchmark experiment (v2 with adaptive hyperparameters).
+
+    Args:
+        config_name: Configuration name
+        config: Configuration dictionary
+        scenario: 'horizontal', 'vertical', or 'hybrid'
+        data_type: 'linear' or 'nonlinear'
+        seed: Random seed
+        device: Device to use
+        use_ci_ranking: Enable CI ranking (experimental)
+        sparsity_percentile: Sparsity for ranking (if enabled)
 
     Returns:
         Dictionary with results
     """
     d = config["d"]
     K = config["K"]
-    n = config["n"]
+    n_total = config["n_total"]
     epochs = config["epochs"]
 
     logging.info(
-        f"Running: {config_name} | {scenario} | {data_type} | seed={seed} | device={device}"
+        f"Running: {config_name} | {scenario} | {data_type} | seed={seed} | "
+        f"device={device} | adaptive_hyperparams=True"
     )
+    if use_ci_ranking:
+        logging.info(f"  CI Ranking: enabled (sparsity={sparsity_percentile})")
 
     # Log GPU memory before experiment
     log_gpu_memory(prefix="[Pre-experiment] ", device=device)
@@ -254,7 +339,7 @@ def run_single_experiment(
 
         # Load Sachs data partitioned by interventional conditions (horizontal-like)
         X_splits_raw, B, c_indx_raw = load_sachs_federated(
-            n_clients=K, n_samples_limit=n
+            n_clients=K, n_samples_limit=n_total
         )
 
         # Reconstruct global data
@@ -262,7 +347,7 @@ def run_single_experiment(
 
         # Re-partition based on scenario
         # Create c_indx matching the global data shape
-        c_indx = np.repeat(np.arange(K), n // K).reshape(-1, 1)
+        c_indx = np.repeat(np.arange(K), n_total // K).reshape(-1, 1)
         X_splits = partition_data(X, c_indx, K, scenario)
 
         W = B  # Use ground truth DAG as W (no need for separate weights)
@@ -275,18 +360,26 @@ def run_single_experiment(
     else:
         # Generate synthetic data
         W, B, X, c_indx, choice = create_benchmark_data(
-            d=d, K=K, n=n, seed=seed, data_type=data_type, sem_type="gauss"
+            d=d, K=K, n=n_total, seed=seed, data_type=data_type, sem_type="gauss"
         )
 
         # Partition data
         X_splits = partition_data(X, c_indx, K, scenario)
 
-    # Setup FedCDH with production parameters
+    # Calculate n_per_client based on scenario
+    if scenario == "vertical":
+        # Vertical: All clients see all samples
+        n_per_client = n_total
+    else:
+        # Horizontal/Hybrid: Samples split across clients
+        n_per_client = n_total // K
+
+    # Setup FedCDH with v2 parameters
     model_type = "real" if config_name == "sachs" else "synthetic"
     args = Namespace(
         K=K,
         d=d,
-        n=n // K,
+        n=n_per_client,
         scenario=scenario,
         model_type=model_type,
         ci_method="spn",
@@ -294,6 +387,15 @@ def run_single_experiment(
         epochs=epochs,
         device=device,
         skip_bic=False,  # Use BIC for optimal cluster selection
+        # v2 features
+        data_type=data_type,  # NEW: For adaptive hyperparameters
+        use_ci_ranking=use_ci_ranking,  # NEW: Enable ranking (experimental)
+        sparsity_percentile=sparsity_percentile,  # NEW: For ranking
+    )
+
+    logging.info(f"  FedCDH args: d={d}, K={K}, n_per_client={n_per_client}")
+    logging.info(
+        f"  v2 features: data_type={data_type}, use_ci_ranking={use_ci_ranking}"
     )
 
     fedcdh = FedCDH(args)
@@ -311,7 +413,7 @@ def run_single_experiment(
     if device == "cuda":
         torch.cuda.empty_cache()
 
-    # Extract metrics
+    # Extract metrics (v2 with additional tracking)
     return {
         "config": config_name,
         "scenario": scenario,
@@ -319,9 +421,15 @@ def run_single_experiment(
         "seed": seed,
         "d": d,
         "K": K,
-        "n": n,
+        "n_total": n_total,  # Track total samples
+        "n_per_client": n_per_client,  # Track per-client samples
         "epochs": epochs,
         "device": device,
+        # v2 tracking
+        "use_ci_ranking": use_ci_ranking,
+        "sparsity_percentile": sparsity_percentile if use_ci_ranking else None,
+        "v2_adaptive": True,  # Flag to indicate v2 adaptive hyperparameters used
+        # Performance metrics
         "skeleton_f1": results.get("f1_skeleton", 0.0),
         "skeleton_precision": results.get("precision_skeleton", 0.0),
         "skeleton_recall": results.get("recall_skeleton", 0.0),
@@ -343,18 +451,25 @@ def run_single_experiment(
 
 
 def run_scenario_comparison(
-    config_name="medium", data_type="linear", seeds=None, device=None
+    config_name="medium",
+    data_type="linear",
+    seeds=None,
+    device=None,
+    use_ci_ranking=False,
+    sparsity_percentile=0.2,
 ):
     """
-    Benchmark: Compare 3 SPN scenarios (H/V/Hy) on specified data type.
+    Benchmark: Compare 3 SPN scenarios (H/V/Hy) with v2 adaptive hyperparameters.
 
-    Tests which aggregation strategy performs best.
+    Tests which aggregation strategy performs best with adaptive capacity scaling.
 
     Args:
         config_name: Configuration to use (quick/small/medium/large/sachs)
         data_type: Type of data generation (linear/nonlinear)
         seeds: Random seeds for multiple runs
         device: Device to use (cuda/mps/cpu) or None for global DEVICE
+        use_ci_ranking: Enable CI ranking (experimental)
+        sparsity_percentile: Sparsity for ranking (if enabled)
     """
     if seeds is None:
         seeds = SEEDS
@@ -365,9 +480,14 @@ def run_scenario_comparison(
     scenarios = ["horizontal", "vertical", "hybrid"]
 
     logging.info("\n" + "=" * 80)
-    logging.info(f"BENCHMARK: SCENARIO COMPARISON ({config_name})")
+    logging.info(f"BENCHMARK: v2 SCENARIO COMPARISON ({config_name})")
     logging.info(config["description"])
     logging.info(f"Data type: {data_type}")
+    logging.info(f"v2 Adaptive Hyperparameters: ENABLED")
+    if use_ci_ranking:
+        logging.info(f"CI Ranking: ENABLED (sparsity={sparsity_percentile})")
+    else:
+        logging.info(f"CI Ranking: DISABLED (alpha=0.05)")
     logging.info(f"Seeds: {seeds}")
     logging.info("=" * 80)
 
@@ -388,6 +508,8 @@ def run_scenario_comparison(
                 data_type=data_type,
                 seed=seed,
                 device=active_device,
+                use_ci_ranking=use_ci_ranking,
+                sparsity_percentile=sparsity_percentile,
             )
             results.append(result)
 
@@ -439,7 +561,7 @@ def create_experiment_manifest(results, output_dir="benchmark_results"):
             f.write(f"Data Type:      {result['data_type']}\n")
             f.write(f"Seed:           {result['seed']}\n")
             f.write(
-                f"Dimensions:     d={result['d']}, K={result['K']}, n={result['n']}\n"
+                f"Dimensions:     d={result['d']}, K={result['K']}, n_total={result['n_total']}, n_per_client={result['n_per_client']}\n"
             )
             f.write(f"Epochs:         {result['epochs']}\n")
             f.write(f"Device:         {result['device']}\n")
@@ -535,15 +657,24 @@ def analyze_results(results, output_dir="benchmark_results"):
 # ============================================================
 
 
-def main(config_name, data_type="linear", device=None, seeds=None):
+def main(
+    config_name,
+    data_type="linear",
+    device=None,
+    seeds=None,
+    use_ci_ranking=False,
+    sparsity_percentile=0.2,
+):
     """
-    Run scenario comparison benchmark.
+    Run v2 scenario comparison benchmark with adaptive hyperparameters.
 
     Args:
         config_name: Configuration to use (quick/small/medium/large/sachs)
         data_type: Type of data generation (linear/nonlinear)
         device: Device to use (cuda/mps/cpu) or None for auto-detect
         seeds: List of random seeds or None for default
+        use_ci_ranking: Enable CI ranking (experimental)
+        sparsity_percentile: Sparsity for ranking (if enabled)
     """
     # Use provided device or global DEVICE
     active_device = device if device is not None else DEVICE
@@ -562,11 +693,16 @@ def main(config_name, data_type="linear", device=None, seeds=None):
     )
 
     logging.info("\n" + "=" * 80)
-    logging.info("FEDCDH BENCHMARK SUITE - SCENARIO COMPARISON")
+    logging.info("FEDCDH v2 BENCHMARK SUITE - ADAPTIVE HYPERPARAMETERS")
     logging.info("=" * 80)
     logging.info(f"Configuration: {config_name}")
     logging.info(f"Data type: {data_type}")
     logging.info(f"Device: {active_device}")
+    logging.info(f"v2 Adaptive Hyperparameters: ENABLED")
+    if use_ci_ranking:
+        logging.info(f"CI Ranking: ENABLED (sparsity={sparsity_percentile})")
+    else:
+        logging.info(f"CI Ranking: DISABLED (alpha=0.05)")
 
     # Device information
     if active_device == "cuda":
@@ -593,12 +729,14 @@ def main(config_name, data_type="linear", device=None, seeds=None):
 
     overall_start = time.time()
 
-    # Run scenario comparison benchmark
+    # Run v2 scenario comparison benchmark
     all_results = run_scenario_comparison(
         config_name=config_name,
         data_type=data_type,
         seeds=active_seeds,
         device=active_device,
+        use_ci_ranking=use_ci_ranking,
+        sparsity_percentile=sparsity_percentile,
     )
 
     overall_time = time.time() - overall_start
@@ -631,7 +769,9 @@ def main(config_name, data_type="linear", device=None, seeds=None):
 if __name__ == "__main__":
     import argparse
 
-    parser = argparse.ArgumentParser(description="FedCDH Benchmark Suite")
+    parser = argparse.ArgumentParser(
+        description="FedCDH v2 Benchmark Suite - Adaptive Hyperparameters + CI Ranking"
+    )
     parser.add_argument(
         "--config",
         type=str,
@@ -660,13 +800,27 @@ if __name__ == "__main__":
         default=None,
         help="Custom seed list (default: [42, 123, 456, 789, 2024])",
     )
+    # v2 experimental features
+    parser.add_argument(
+        "--use-ci-ranking",
+        action="store_true",
+        help="Enable CI ranking (experimental, replaces alpha=0.05)",
+    )
+    parser.add_argument(
+        "--sparsity-percentile",
+        type=float,
+        default=0.2,
+        help="Sparsity percentile for CI ranking (default: 0.2 = top 20%%)",
+    )
 
     args = parser.parse_args()
 
-    # Pass device and seeds to main()
+    # Pass all parameters to main()
     df, summary = main(
         config_name=args.config,
         data_type=args.data_type,
         device=args.device,
         seeds=args.seeds,
+        use_ci_ranking=args.use_ci_ranking,
+        sparsity_percentile=args.sparsity_percentile,
     )
