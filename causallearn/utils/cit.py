@@ -700,12 +700,22 @@ from scipy.stats import chi2, norm, gamma
 
 class SPN_CIT(CIT_Base):
     def __init__(
-        self, data, global_model=None, threshold=0.01, num_permutations=50, **kwargs
+        self,
+        data,
+        global_model=None,
+        threshold=0.01,
+        num_permutations=50,
+        use_ranking=False,
+        ranking_tracker=None,
+        **kwargs,
     ):
         super().__init__(data, **kwargs)
         self.model = global_model
         self.threshold = threshold
         self.num_permutations = num_permutations
+        self.use_ranking = use_ranking
+        self.ranking_tracker = ranking_tracker
+        self.test_counter = 0
         self.check_cache_method_consistent(
             "spn", "threshold_" + str(threshold) + "_perm_" + str(num_permutations)
         )
@@ -868,13 +878,26 @@ class SPN_CIT(CIT_Base):
             p_value = (np.sum(null_stats >= stat_obs) + 1.0) / (
                 self.num_permutations + 1.0
             )
-            return p_value
-
         else:
             # Fallback to analytic Chi2 (Only if user explicitly sets perms=0)
             # Warning: df=1 is often incorrect for continuous/mixed SPNs
             p_value = chi2.sf(max(0.0, stat_obs), df=1)
-            return p_value
+
+        # If using ranking mode, collect result for later percentile-based decision
+        if self.use_ranking and self.ranking_tracker is not None:
+            self.ranking_tracker.add_result(
+                x=X[0] if X else -1,
+                y=Y[0] if Y else -1,
+                S=tuple(Z),
+                cmi_score=score_obs,  # Use CMI magnitude for ranking
+                p_value=p_value,
+                stat_obs=stat_obs,
+                depth=len(Z),
+                test_index=self.test_counter,
+            )
+            self.test_counter += 1
+
+        return p_value
 
 
 class FedPC(CIT_Base):

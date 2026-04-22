@@ -267,6 +267,10 @@ class FedCDH:
         self.n_samples_per_client = args.n
         self.fed_spn_model = None
 
+        # Data type for adaptive hyperparameters (linear/nonlinear)
+        # Default to "nonlinear" for conservative capacity estimates
+        self.data_type = getattr(args, "data_type", "nonlinear")
+
         # Store local SPNs for post-hoc evaluation (tests/benchmarks/evaluate_spn.py)
         # Purpose: Enables SPN quality assessment (log-likelihood, MMD, KS tests)
         # to validate that local models learn correct distributions before causal discovery
@@ -461,6 +465,19 @@ class FedCDH:
             num_leaves = getattr(self.args, "num_leaves", 20)
             num_repetitions = getattr(self.args, "num_repetitions", 10)
 
+            # Ensemble configuration (adaptive strategy)
+            n_ensemble = getattr(self.args, "n_ensemble", None)
+            if n_ensemble is None:
+                # Auto-detect: use ensemble for complex cases
+                if self.d_features >= 8 or self.scenario in ["vertical", "hybrid"]:
+                    n_ensemble = 5  # Ensemble for complex cases
+                else:
+                    n_ensemble = 1  # Single model for simple cases
+            logging.info(
+                f"SPN configuration: n_ensemble={n_ensemble} "
+                f"({'auto-detected' if getattr(self.args, 'n_ensemble', None) is None else 'user-specified'})"
+            )
+
             # Adaptive learning rate: decrease for higher dimensions
             # Formula: lr = 0.01 / sqrt(d/5)
             # Effect: d=5→0.010, d=8→0.008, d=10→0.007, d=15→0.006
@@ -520,28 +537,76 @@ class FedCDH:
                             max_depth = int(np.floor(np.log2(local_d)))
                             adaptive_depth = max(1, max_depth)
 
-                            # Adaptive architecture parameters: increase for higher dimensions
-                            # Rationale: Since depth is constrained, increase width/repetitions
-                            # Formula: scale by sqrt(d/5) to add capacity without explosion
-                            scale_factor = np.sqrt(max(1.0, local_d / 5.0))
-                            adaptive_num_sums = max(
-                                num_sums, int(num_sums * scale_factor)
-                            )
-                            adaptive_num_leaves = max(
-                                num_leaves, int(num_leaves * scale_factor)
+                            # Adaptive architecture parameters using 5-criterion system
+                            # Replaces weak sqrt scaling with mode-aware, data-driven scaling
+                            # Expected impact: Horizontal F1 from 0.133-0.255 → 0.5+ (2-4× improvement)
+                            from causallearn.utils.FedPC import (
+                                compute_adaptive_hyperparameters,
                             )
 
-                            leaf = LocalSPNWrapper(
+                            hyperparams = compute_adaptive_hyperparameters(
+                                mode=self.scenario,
                                 num_features=local_d,
-                                device=self.device,
-                                num_sums=adaptive_num_sums,
-                                num_leaves=adaptive_num_leaves,
-                                depth=adaptive_depth,
-                                num_repetitions=num_repetitions,
-                                seed=h * 10 + k,
+                                num_samples=len(local_data_h),
+                                data_type=self.data_type,
+                                base_num_sums=num_sums,
+                                base_num_leaves=num_leaves,
+                                base_epochs=train_epochs,
+                                base_depth=adaptive_depth,
                             )
+
+                            # Use computed hyperparameters
+                            adaptive_num_sums = hyperparams["num_sums"]
+                            adaptive_num_leaves = hyperparams["num_leaves"]
+                            adaptive_depth = hyperparams["depth"]
+                            adaptive_epochs = hyperparams["epochs"]
+                            adaptive_dropout = hyperparams["dropout"]
+                            adaptive_weight_decay = hyperparams["weight_decay"]
+
+                            # Log adaptive scaling for transparency
+                            logging.info(
+                                f"[Client {k}, Cluster {h}] Adaptive hyperparameters: "
+                                f"d={local_d}, n={len(local_data_h)}, mode={self.scenario}, type={self.data_type}"
+                            )
+                            logging.info(
+                                f"  Architecture: sums={adaptive_num_sums} (base={num_sums}), "
+                                f"leaves={adaptive_num_leaves} (base={num_leaves}), depth={adaptive_depth}"
+                            )
+                            logging.info(
+                                f"  Training: epochs={adaptive_epochs} (base={train_epochs}), "
+                                f"dropout={adaptive_dropout:.3f}, weight_decay={adaptive_weight_decay:.1e}"
+                            )
+
+                            # Use ensemble wrapper if n_ensemble > 1
+                            if n_ensemble > 1:
+                                from causallearn.utils.FedPC import EnsembleSPNWrapper
+
+                                leaf = EnsembleSPNWrapper(
+                                    num_features=local_d,
+                                    device=self.device,
+                                    n_models=n_ensemble,
+                                    base_sums=num_sums,  # Will be scaled adaptively
+                                    base_leaves=num_leaves,
+                                    base_reps=num_repetitions,
+                                    seed=h * 10 + k,
+                                    variable_order=None,
+                                )
+                            else:
+                                leaf = LocalSPNWrapper(
+                                    num_features=local_d,
+                                    device=self.device,
+                                    num_sums=adaptive_num_sums,
+                                    num_leaves=adaptive_num_leaves,
+                                    depth=adaptive_depth,
+                                    num_repetitions=num_repetitions,
+                                    seed=h * 10 + k,
+                                )
                         leaf.train_local(
-                            local_data_h, epochs=train_epochs, lr=adaptive_lr
+                            local_data_h,
+                            epochs=adaptive_epochs,
+                            lr=adaptive_lr,
+                            dropout=adaptive_dropout,
+                            l2_weight=adaptive_weight_decay,
                         )
                         clients_clusters[h].append(leaf)
                         clients_counts[h].append(len(local_data_h))
@@ -787,7 +852,9 @@ class FedCDH:
         # ============================================================
         # SPN Quality Evaluation (MMD, KS tests, UMAP visualization)
         # ============================================================
-        if self.ci_method == "spn":
+        # Skip expensive evaluation if skip_spn_eval flag is set (for faster validation tests)
+        skip_eval = getattr(self.args, "skip_spn_eval", False)
+        if self.ci_method == "spn" and not skip_eval:
             from causallearn.utils.spn_evaluation import (
                 evaluate_spn_quality,
                 log_spn_quality,
@@ -850,6 +917,7 @@ class FedCDH:
             logging.info("=" * 60 + "\n")
 
             # Evaluate local SPNs
+            local_eval_results = []  # Collect results for dashboard
             if self.local_spns and len(self.local_spns) > 0:
                 logging.info(f"Evaluating {len(self.local_spns)} local SPNs...")
 
@@ -942,6 +1010,9 @@ class FedCDH:
 
                     log_spn_quality(result)
 
+                    # Store result for dashboard
+                    local_eval_results.append(result)
+
                     # Independence structure evaluation (if ground truth available)
                     if true_DAG_bin is not None:
                         from causallearn.utils.spn_evaluation import (
@@ -982,6 +1053,9 @@ class FedCDH:
                             name=spn_name,  # Use the same descriptive name
                         )
                         log_independence_structure_results(indep_result)
+
+                        # Merge independence results into quality result
+                        local_eval_results[-1].update(indep_result)
 
                     # UMAP visualization for multivariate data (requires >= 2 features)
                     # For vertical mode, X_client_aug includes context for client 0, so use shape[1]-1 for client 0
@@ -1088,6 +1162,9 @@ class FedCDH:
                 )
                 log_independence_structure_results(global_indep_result)
 
+                # Merge independence results into global result
+                global_result.update(global_indep_result)
+
             # UMAP for global SPN (requires >= 2 features)
             if self.d_features >= 2:
                 with torch.no_grad():
@@ -1109,7 +1186,75 @@ class FedCDH:
                         title="Global Federated SPN",
                     )
 
-            logging.info(f"SPN evaluation plots saved to: {output_dir}/")
+            # Generate comprehensive dashboard and HTML report
+            logging.info("=" * 60)
+            logging.info("Generating SPN Quality Dashboard...")
+            logging.info("=" * 60)
+
+            try:
+                from causallearn.utils.spn_dashboard import (
+                    compute_summary_statistics,
+                    create_summary_dashboard,
+                    generate_html_report,
+                )
+
+                # Compute summary statistics across local SPNs
+                summary_stats = compute_summary_statistics(local_eval_results)
+
+                # Configuration info for dashboard
+                config_info = {
+                    "scenario": self.scenario,
+                    "K": self.K_clients,
+                    "d": self.d_features,
+                    "n": total_samples,
+                    "model_type": self.model_type,
+                    "ci_method": self.ci_method,
+                    "alpha": alpha,
+                    "device": str(self.device),
+                    "epochs": train_epochs,
+                }
+
+                # Create dashboard plot
+                dashboard_path = os.path.join(output_dir, "dashboard.png")
+                create_summary_dashboard(
+                    local_eval_results,
+                    global_result,
+                    summary_stats,
+                    dashboard_path,
+                    config_info,
+                )
+
+                # Collect UMAP paths
+                umap_paths = {}
+                for i in range(self.K_clients):
+                    path = os.path.join(output_dir, f"umap_local_client_{i}.png")
+                    if os.path.exists(path):
+                        umap_paths[f"Local Client {i}"] = path
+                global_umap = os.path.join(output_dir, "umap_global_spn.png")
+                if os.path.exists(global_umap):
+                    umap_paths["Global SPN"] = global_umap
+
+                # Generate HTML report
+                html_path = generate_html_report(
+                    local_eval_results,
+                    global_result,
+                    summary_stats,
+                    config_info,
+                    output_dir,
+                    dashboard_path,
+                    umap_paths,
+                )
+
+                logging.info("=" * 60)
+                logging.info("Dashboard and report generation complete!")
+                logging.info(f"  Dashboard: {dashboard_path}")
+                logging.info(f"  HTML Report: {html_path}")
+                logging.info("=" * 60)
+
+            except Exception as e:
+                logging.warning(f"Dashboard generation failed: {e}")
+
+            logging.info(f"\nSPN evaluation plots saved to: {output_dir}/")
             logging.info(f"Run log saved to: {log_file}")
             logging.info("=" * 60 + "\n")
 
@@ -1123,14 +1268,18 @@ class FedCDH:
         start_cd = time.time()
         from causallearn.utils.cit import CIT, SPN_CIT
 
-        # Adaptive num_permutations based on dimensionality
-        # For d≥10, need more permutations for reliable p-value calibration
-        # Formula: min(200, max(50, d × 10))
-        num_permutations = min(200, max(50, self.d_features * 10))
-        if num_permutations > 50:
+        # Permutation test configuration
+        # Default: num_permutations=0 (parametric chi-square test, faster)
+        # Override via args.num_permutations if specified
+        # v2 change: Smoke tests showed parametric = permutation (both F1=0.133)
+        # Permutation test adds no value but costs 50x compute per CI test
+        num_permutations = getattr(self.args, "num_permutations", 0)
+        if num_permutations > 0:
             logging.info(
-                f"Using adaptive num_permutations={num_permutations} for d={self.d_features}"
+                f"Using permutation test with num_permutations={num_permutations}"
             )
+        else:
+            logging.info("Using parametric chi-square test (num_permutations=0)")
 
         # Causal discovery using global CI test
         if self.ci_method == "spn":

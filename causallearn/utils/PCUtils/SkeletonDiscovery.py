@@ -34,6 +34,8 @@ def skeleton_discovery(
     verbose: bool = False,
     show_progress: bool = True,
     node_names: List[str] | None = None,
+    use_ranking: bool = False,
+    ranking_tracker=None,
 ) -> CausalGraph:
     """
     Perform skeleton discovery
@@ -262,6 +264,40 @@ def skeleton_discovery(
             edge1 = cg.G.get_edge(cg.G.nodes[x], cg.G.nodes[y])
             if edge1 is not None:
                 cg.G.remove_edge(edge1)
+
+    # Ranking phase: If using ranking mode, apply threshold-based edge removal
+    if use_ranking and ranking_tracker is not None:
+        if verbose:
+            print("\n=== Applying Ranking-Based Edge Removal ===")
+
+        threshold = ranking_tracker.compute_threshold()
+        stats = ranking_tracker.get_statistics()
+
+        if verbose:
+            print(f"Total CI tests: {stats['num_tests']}")
+            print(
+                f"CMI threshold (at {ranking_tracker.sparsity_percentile*100:.1f}%): {threshold:.4f}"
+            )
+            print(f"Edges to keep (dependent): {stats['num_dependent']}")
+            print(f"Edges to remove (independent): {stats['num_independent']}")
+
+        # Remove edges where CMI score is below threshold
+        independent_pairs = ranking_tracker.get_independent_pairs()
+        for x, y, S in independent_pairs:
+            if verbose:
+                print(f"Removing edge {x} -- {y} | {S}")
+
+            # Remove edge in both directions
+            edge1 = cg.G.get_edge(cg.G.nodes[x], cg.G.nodes[y])
+            if edge1 is not None:
+                cg.G.remove_edge(edge1)
+            edge2 = cg.G.get_edge(cg.G.nodes[y], cg.G.nodes[x])
+            if edge2 is not None:
+                cg.G.remove_edge(edge2)
+
+            # Add to separation set
+            append_value(cg.sepset, x, y, S)
+            append_value(cg.sepset, y, x, S)
 
     if flag == 1:
         f.close()

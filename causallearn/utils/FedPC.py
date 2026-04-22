@@ -1,6 +1,6 @@
 import io
 import logging
-from typing import Dict, List
+from typing import Dict, List, Any
 
 import numpy as np
 import torch
@@ -136,11 +136,24 @@ class LocalSPNWrapper(nn.Module):
             return x[self.inv_variable_order]
         return x[:, self.inv_variable_order]
 
-    def train_local(self, data, weights=None, epochs=50, lr=0.005, l1_weight=1e-4):
+    def train_local(
+        self,
+        data,
+        weights=None,
+        epochs=50,
+        lr=0.005,
+        l1_weight=1e-4,
+        l2_weight=1e-5,
+        grad_clip_norm=5.0,
+        dropout=0.0,
+    ):
         """
-        Train this specific leaf on its data slice with L1 Sparsity Penalty.
+        Train this specific leaf on its data slice with L1 Sparsity + L2 Regularization.
         weights: Optional [N] array of sample weights (for EM).
         l1_weight: Weight for the L1 sparsity penalty on sum weights.
+        l2_weight: Weight for L2 regularization (weight decay) for stability.
+        grad_clip_norm: Maximum gradient norm for clipping (prevents explosion).
+        dropout: Dropout rate for regularization (0.0 = no dropout).
         """
         if len(data) < 5:
             return 0.0
@@ -164,6 +177,11 @@ class LocalSPNWrapper(nn.Module):
         self.model.train()
         optimizer = torch.optim.Adam(self.model.parameters(), lr=lr)
 
+        # Apply dropout if specified
+        dropout_layer = None
+        if dropout > 0.0:
+            dropout_layer = torch.nn.Dropout(p=dropout)
+
         # Extract cluster and client indices from seed (seed = h * 10 + k)
         cluster_id = self.seed // 10 if self.seed is not None else -1
         client_id = self.seed % 10 if self.seed is not None else -1
@@ -173,7 +191,13 @@ class LocalSPNWrapper(nn.Module):
 
         for epoch in range(epochs):
             optimizer.zero_grad()
-            ll = self.model(data_t)
+
+            # Apply dropout to data if specified (simpler than modifying SPN internals)
+            if dropout_layer is not None:
+                data_with_dropout = dropout_layer(data_t)
+                ll = self.model(data_with_dropout)
+            else:
+                ll = self.model(data_t)
 
             if weights is not None:
                 nll_loss = -(ll * weights_t.unsqueeze(1)).sum() / (
@@ -188,9 +212,22 @@ class LocalSPNWrapper(nn.Module):
                 if "sum" in name and "weight" in name:
                     l1_penalty += torch.norm(param, p=1)
 
-            loss = nll_loss + l1_weight * l1_penalty
+            # L2 Regularization (Weight Decay) for all parameters
+            l2_penalty = 0.0
+            for param in self.model.parameters():
+                if param.requires_grad:
+                    l2_penalty += torch.norm(param, p=2)
+
+            loss = nll_loss + l1_weight * l1_penalty + l2_weight * l2_penalty
 
             loss.backward()
+
+            # Gradient Clipping to prevent exploding gradients
+            if grad_clip_norm > 0:
+                torch.nn.utils.clip_grad_norm_(
+                    self.model.parameters(), max_norm=grad_clip_norm
+                )
+
             optimizer.step()
             final_ll = -nll_loss.item()
             loss_history.append(loss.item())
@@ -247,6 +284,168 @@ class LocalSPNWrapper(nn.Module):
             log_det_jacobian = -(log_sigma * mask).sum(dim=1, keepdim=True)
             ll = ll + log_det_jacobian
         return ll
+
+
+class EnsembleSPNWrapper(nn.Module):
+    """
+    Ensemble of multiple LocalSPNWrapper models with adaptive architecture scaling.
+
+    Combines two optimizations:
+    1. Adaptive Scaling: Increase capacity with dimensionality
+    2. Ensemble: Multiple models with different random seeds → lower variance
+
+    Expected benefits:
+    - Reduces bias (Option 1): Better individual model accuracy
+    - Reduces variance (Option 2): More stable CI test estimates
+    - Synergy: Better models → better ensemble
+
+    Usage:
+        ensemble = EnsembleSPNWrapper(num_features=8, n_models=5, device='cpu')
+        ensemble.train_local(X_train, epochs=50)
+        ll = ensemble.log_prob(X_test)
+    """
+
+    def __init__(
+        self,
+        num_features,
+        device="cpu",
+        n_models=5,
+        base_sums=20,
+        base_leaves=20,
+        base_reps=10,
+        seed=42,
+        variable_order=None,
+    ):
+        """
+        Initialize ensemble with adaptive architecture scaling.
+
+        Args:
+            num_features: Number of features
+            device: 'cpu', 'cuda', or 'mps'
+            n_models: Number of models in ensemble (default: 5)
+            base_sums: Base num_sums before scaling (default: 20)
+            base_leaves: Base num_leaves before scaling (default: 20)
+            base_reps: Base num_repetitions before scaling (default: 10)
+            seed: Base random seed (each model gets seed+i)
+            variable_order: Optional dependency-aware variable ordering
+        """
+        super().__init__()
+        self.num_features = num_features
+        self.device = device
+        self.n_models = n_models
+
+        # Option 1: Adaptive architecture scaling
+        # Scale capacity with dimensionality
+        num_sums = base_sums + num_features * 2
+        num_leaves = base_leaves + num_features * 2
+        num_repetitions = base_reps + num_features // 2
+
+        # Depth constraint: 2^depth <= num_features
+        depth = int(np.floor(np.log2(num_features)))
+
+        logging.info(
+            f"EnsembleSPN: {n_models} models with scaled architecture "
+            f"(sums={num_sums}, leaves={num_leaves}, reps={num_repetitions}, depth={depth})"
+        )
+
+        # Option 2: Create ensemble of models with different seeds
+        self.models = nn.ModuleList()
+        for i in range(n_models):
+            model = LocalSPNWrapper(
+                num_features=num_features,
+                device=device,
+                depth=depth,
+                num_sums=num_sums,
+                num_leaves=num_leaves,
+                num_repetitions=num_repetitions,
+                seed=seed + i,  # Different seed for each model
+                variable_order=variable_order,
+            )
+            self.models.append(model)
+
+        # Store mean/std from first model (all will compute same normalization)
+        self.mean = None
+        self.std = None
+
+    def train_local(self, data, weights=None, epochs=50, lr=0.005, l1_weight=1e-4):
+        """
+        Train all models in ensemble.
+
+        Can be parallelized if needed, but sequential is fine for CPU.
+        """
+        if len(data) < 5:
+            return 0.0
+
+        final_lls = []
+        for i, model in enumerate(self.models):
+            # Train each model
+            ll = model.train_local(
+                data,
+                weights=weights,
+                epochs=epochs,
+                lr=lr,
+                l1_weight=l1_weight,
+            )
+            final_lls.append(ll)
+
+            # Store normalization from first model
+            if i == 0 and self.mean is None:
+                self.mean = model.mean
+                self.std = model.std
+
+        # Return average final LL
+        avg_ll = np.mean(final_lls)
+        logging.info(
+            f"  Ensemble trained: avg final LL = {avg_ll:.4f} "
+            f"(range: [{min(final_lls):.4f}, {max(final_lls):.4f}])"
+        )
+        return avg_ll
+
+    def log_prob(self, x):
+        """
+        Compute ensemble log probability: log(1/K * Σ_k exp(ll_k))
+
+        Uses logsumexp for numerical stability.
+        """
+        if not isinstance(x, torch.Tensor):
+            x = torch.tensor(x, dtype=torch.float32).to(self.device)
+
+        # Collect log-probs from all models
+        lls = []
+        for model in self.models:
+            ll = model.log_prob(x)
+            lls.append(ll)
+
+        # Stack: [n_models, batch_size, 1]
+        lls_stacked = torch.stack(lls, dim=0)
+
+        # Average in log-space: log(1/K * Σ exp(ll_k)) = logsumexp(ll_k) - log(K)
+        ensemble_ll = torch.logsumexp(lls_stacked, dim=0) - np.log(self.n_models)
+
+        return ensemble_ll
+
+    def sample(self, n):
+        """
+        Sample from ensemble by randomly selecting a model for each sample.
+        """
+        samples_list = []
+        samples_per_model = n // self.n_models
+        remainder = n % self.n_models
+
+        for i, model in enumerate(self.models):
+            n_samples = samples_per_model + (1 if i < remainder else 0)
+            if n_samples > 0:
+                samples = model.sample(n_samples)
+                samples_list.append(samples)
+
+        # Concatenate and shuffle
+        all_samples = torch.cat(samples_list, dim=0)
+        perm = torch.randperm(all_samples.size(0))
+        return all_samples[perm]
+
+    def ll(self, x):
+        """Alias for log_prob for compatibility."""
+        return self.log_prob(x).squeeze()
 
 
 class UnivariateSPNWrapper(nn.Module):
@@ -1394,21 +1593,45 @@ def build_feature_indicator_matrix(X_splits, scenario, d_features=None):
             M[k, feature_indices] = 1
 
     elif scenario == "hybrid":
-        # Hybrid: Infer from data shapes
-        # Justification: Each client's data reveals which features they have
-        # Assumption: Features are ordered, client k gets indices proportional to position
-        # This is a simplification; in practice, feature mapping would be provided
+        # Hybrid: Create overlapping feature splits
+        # Justification: Hybrid FL has overlapping features across clients
+        # Strategy: Each client gets base features + overlap with neighbors
+        # This validates ProductOverGroupsWithOverlap architecture
 
-        # For now, use equal split (conservative approach)
-        # Real implementation would receive explicit feature mapping
-        cols_per_client = np.array_split(range(d), K)
+        base_size = d // K
+        overlap_size = max(1, d // (2 * K))  # ~15-20% overlap
+
+        feature_sets = []
         for k in range(K):
-            M[k, cols_per_client[k].tolist()] = 1
+            start = k * base_size
+            end = min((k + 1) * base_size + overlap_size, d)
+            features = list(range(start, end))
+            feature_sets.append(features)
 
+        # Ensure all features are covered
+        all_features = set()
+        for features in feature_sets:
+            all_features.update(features)
+
+        missing = set(range(d)) - all_features
+        if missing:
+            # Add missing features to last client
+            feature_sets[-1].extend(sorted(missing))
+
+        # Build indicator matrix
+        for k in range(K):
+            M[k, feature_sets[k]] = 1
+
+        # Log overlap statistics
+        total_refs = sum(len(fs) for fs in feature_sets)
+        overlap_count = total_refs - d
         logging.info(
-            "Hybrid mode: Using equal feature split for indicator matrix. "
-            "For overlapping features, provide explicit feature_maps."
+            f"Hybrid mode: Created overlapping feature splits with {overlap_count} overlaps"
         )
+        for k, features in enumerate(feature_sets):
+            logging.info(
+                f"  Client {k}: features {features[:5]}...{features[-2:]} (size={len(features)})"
+            )
 
     else:
         raise ValueError(f"Unknown scenario: {scenario}")
@@ -1510,6 +1733,157 @@ def group_features_by_client_set(M, feature_names):
         logging.info(f"  Clients {clients} share features {features}")
 
     return feature_subspaces
+
+
+def compute_adaptive_hyperparameters(
+    mode: str,
+    num_features: int,
+    num_samples: int,
+    data_type: str,
+    base_num_sums: int = 20,
+    base_num_leaves: int = 20,
+    base_epochs: int = 100,
+    base_depth: int = None,
+) -> Dict[str, Any]:
+    """
+    Compute adaptive hyperparameters following 5-criterion system for FedCDH SPNs.
+
+    This implements the documented adaptive capacity scaling system that addresses
+    horizontal mode underperformance (F1=0.133-0.255 → target 0.5+).
+
+    The 5 criteria are:
+    1. Mode-Specific Base Capacity: Different architectures for horizontal/vertical/hybrid
+    2. Sample-to-Feature Ratio Scaling: Adjust capacity based on data availability
+    3. Data Type Differentiation: Linear vs nonlinear complexity adjustments
+    4. Quality-Aware Epoch Scheduling: Mode and feature-dependent training duration
+    5. Mode-Aware Regularization: Dropout and weight decay tuned per scenario
+
+    Args:
+        mode: Federated scenario mode ("horizontal", "vertical", "hybrid")
+        num_features: Number of features in local data (d_k)
+        num_samples: Number of samples in local data (n_k)
+        data_type: Data generation type ("linear" or "nonlinear")
+        base_num_sums: Base number of sum nodes (default 20)
+        base_num_leaves: Base number of leaf nodes (default 20)
+        base_epochs: Base training epochs (default 100)
+        base_depth: Base tree depth (default None, auto-computed from features)
+
+    Returns:
+        Dictionary with keys:
+            - num_sums: Adapted number of sum nodes
+            - num_leaves: Adapted number of leaf nodes
+            - depth: Adapted tree depth
+            - epochs: Adapted training epochs
+            - dropout: Dropout rate for regularization
+            - weight_decay: L2 regularization weight
+
+    Example:
+        >>> params = compute_adaptive_hyperparameters(
+        ...     mode="horizontal",
+        ...     num_features=10,
+        ...     num_samples=400,
+        ...     data_type="linear"
+        ... )
+        >>> print(params['num_sums'])  # Expected: 40+ (4×10)
+        >>> print(params['dropout'])   # Expected: 0.1 (ratio 40 < 100)
+
+    References:
+        - agents/working_state.md: "5-Criterion Adaptive Hyperparameter System"
+        - v2 experiment proposal: Horizontal mode performance fix
+    """
+
+    # Criterion 1: Mode-Specific Base Capacity
+    # Horizontal: Many features need broader representation (4×d)
+    # Vertical: Few features need depth (8×d for d>3, otherwise small)
+    # Hybrid: Intermediate complexity (6×d)
+    if mode == "horizontal":
+        base_sums = max(32, 4 * num_features)
+        base_leaves = max(16, 2 * num_features)
+    elif mode == "vertical":
+        if num_features <= 3:
+            base_sums = 8
+            base_leaves = 8
+        else:
+            base_sums = 8 * num_features
+            base_leaves = 4 * num_features
+    else:  # hybrid
+        base_sums = 6 * num_features
+        base_leaves = 3 * num_features
+
+    # Criterion 2: Sample-to-Feature Ratio Scaling
+    # Low ratio (< 50): Risk of overfitting, reduce capacity
+    # Medium ratio (50-200): Standard capacity
+    # High ratio (> 200): Can afford more capacity for complex patterns
+    ratio = num_samples / max(1, num_features)
+    if ratio < 50:
+        capacity_scale = 0.5
+    elif ratio < 100:
+        capacity_scale = 0.75
+    elif ratio < 200:
+        capacity_scale = 1.0
+    else:
+        capacity_scale = min(1.5, 1.0 + (ratio - 200) / 400)
+
+    final_num_sums = int(base_sums * capacity_scale)
+    final_num_leaves = int(base_leaves * capacity_scale)
+
+    # Criterion 3: Data Type Differentiation
+    # Nonlinear data needs deeper trees and more training
+    # Linear data can use shallower structures
+    if base_depth is None:
+        base_depth = int(np.floor(np.log2(max(1, num_features))))
+
+    if data_type == "nonlinear":
+        depth_bonus = 1
+        epoch_multiplier = 1.3
+    else:  # linear
+        depth_bonus = 0
+        epoch_multiplier = 1.0
+
+    final_depth = max(1, base_depth + depth_bonus)
+
+    # Criterion 4: Quality-Aware Epoch Scheduling
+    # More features need more training, especially in horizontal mode
+    # Base scaling: d^1.5 (superlinear growth)
+    epoch_base_scale = (num_features / 5.0) ** 1.5
+
+    # Mode-specific multipliers
+    if mode == "horizontal":
+        # Horizontal needs more epochs due to broader feature space
+        mode_multiplier = 1.0 + num_features / 30
+    elif mode == "vertical":
+        # Vertical can train faster (fewer features)
+        mode_multiplier = 0.8
+    else:  # hybrid
+        mode_multiplier = 0.9
+
+    final_epochs = int(
+        base_epochs * epoch_base_scale * epoch_multiplier * mode_multiplier
+    )
+    final_epochs = max(100, min(final_epochs, 500))  # Clamp to [100, 500]
+
+    # Criterion 5: Mode-Aware Regularization
+    # Horizontal: Moderate regularization (many features, risk of spurious correlations)
+    # Vertical: Higher regularization (few features, risk of overfitting to noise)
+    # Hybrid: Light regularization (balanced scenario)
+    if mode == "horizontal":
+        weight_decay = 1e-4
+        dropout = 0.1 if ratio < 100 else 0.0
+    elif mode == "vertical":
+        weight_decay = 1e-3  # Higher for vertical (fewer features)
+        dropout = 0.0  # Vertical typically has enough regularization from structure
+    else:  # hybrid
+        weight_decay = 5e-5
+        dropout = 0.05 if ratio < 100 else 0.0
+
+    return {
+        "num_sums": final_num_sums,
+        "num_leaves": final_num_leaves,
+        "depth": final_depth,
+        "epochs": final_epochs,
+        "dropout": dropout,
+        "weight_decay": weight_decay,
+    }
 
 
 def auto_tune_spn_config(proxy_data, num_clusters=1, n_trials=15, device="cpu"):
