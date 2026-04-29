@@ -298,6 +298,9 @@ def run_single_experiment(
     device="cuda",
     use_ci_ranking=False,
     sparsity_percentile=0.2,
+    force_clusters=None,
+    num_local_clusters=2,
+    skip_eval=False,
 ):
     """
     Run a single benchmark experiment (v2 with adaptive hyperparameters).
@@ -311,6 +314,8 @@ def run_single_experiment(
         device: Device to use
         use_ci_ranking: Enable CI ranking (experimental)
         sparsity_percentile: Sparsity for ranking (if enabled)
+        force_clusters: Force specific number of clusters (bypasses BIC)
+        num_local_clusters: Number of local clusters per client (v2 local clustering)
 
     Returns:
         Dictionary with results
@@ -391,12 +396,18 @@ def run_single_experiment(
         data_type=data_type,  # NEW: For adaptive hyperparameters
         use_ci_ranking=use_ci_ranking,  # NEW: Enable ranking (experimental)
         sparsity_percentile=sparsity_percentile,  # NEW: For ranking
+        force_num_clusters=force_clusters,  # NEW: Force specific K (bypasses BIC)
+        num_local_clusters=num_local_clusters,  # V2: LOCAL clustering per client (Seng 2025)
+        skip_spn_eval=skip_eval,  # NEW: Skip SPN quality evaluation for faster smoke tests
     )
 
     logging.info(f"  FedCDH args: d={d}, K={K}, n_per_client={n_per_client}")
     logging.info(
-        f"  v2 features: data_type={data_type}, use_ci_ranking={use_ci_ranking}"
+        f"  v2 features: data_type={data_type}, use_ci_ranking={use_ci_ranking}, "
+        f"num_local_clusters={num_local_clusters} (LOCAL clustering per client)"
     )
+    if force_clusters is not None:
+        logging.info(f"  Forcing K={force_clusters} clusters (bypassing BIC selection)")
 
     fedcdh = FedCDH(args)
 
@@ -457,6 +468,9 @@ def run_scenario_comparison(
     device=None,
     use_ci_ranking=False,
     sparsity_percentile=0.2,
+    force_clusters=None,
+    num_local_clusters=2,
+    skip_eval=False,
 ):
     """
     Benchmark: Compare 3 SPN scenarios (H/V/Hy) with v2 adaptive hyperparameters.
@@ -470,6 +484,7 @@ def run_scenario_comparison(
         device: Device to use (cuda/mps/cpu) or None for global DEVICE
         use_ci_ranking: Enable CI ranking (experimental)
         sparsity_percentile: Sparsity for ranking (if enabled)
+        force_clusters: Force specific number of clusters (bypasses BIC)
     """
     if seeds is None:
         seeds = SEEDS
@@ -510,6 +525,9 @@ def run_scenario_comparison(
                 device=active_device,
                 use_ci_ranking=use_ci_ranking,
                 sparsity_percentile=sparsity_percentile,
+                force_clusters=force_clusters,
+                num_local_clusters=num_local_clusters,
+                skip_eval=skip_eval,
             )
             results.append(result)
 
@@ -664,6 +682,9 @@ def main(
     seeds=None,
     use_ci_ranking=False,
     sparsity_percentile=0.2,
+    force_clusters=None,
+    num_local_clusters=2,
+    skip_eval=False,
 ):
     """
     Run v2 scenario comparison benchmark with adaptive hyperparameters.
@@ -675,6 +696,9 @@ def main(
         seeds: List of random seeds or None for default
         use_ci_ranking: Enable CI ranking (experimental)
         sparsity_percentile: Sparsity for ranking (if enabled)
+        force_clusters: Force specific number of clusters (bypasses BIC). Recommended: 2 for MEDIUM.
+        num_local_clusters: Number of local clusters per client (v2 local clustering)
+        skip_eval: Skip SPN quality evaluation for faster smoke tests
     """
     # Use provided device or global DEVICE
     active_device = device if device is not None else DEVICE
@@ -737,6 +761,9 @@ def main(
         device=active_device,
         use_ci_ranking=use_ci_ranking,
         sparsity_percentile=sparsity_percentile,
+        force_clusters=force_clusters,
+        num_local_clusters=num_local_clusters,
+        skip_eval=skip_eval,
     )
 
     overall_time = time.time() - overall_start
@@ -812,6 +839,23 @@ if __name__ == "__main__":
         default=0.2,
         help="Sparsity percentile for CI ranking (default: 0.2 = top 20%%)",
     )
+    parser.add_argument(
+        "--force-clusters",
+        type=int,
+        default=None,
+        help="Force specific number of clusters (bypasses BIC). Recommended: 2 for MEDIUM config to prevent data fragmentation.",
+    )
+    parser.add_argument(
+        "--num-local-clusters",
+        type=int,
+        default=2,
+        help="Number of local clusters per client (default: 2, range: 1-3). V2: Uses LOCAL clustering per client following Seng et al. (2025).",
+    )
+    parser.add_argument(
+        "--skip-eval",
+        action="store_true",
+        help="Skip expensive SPN quality evaluation (UMAP, independence tests, dashboards) for faster smoke tests. Only computes F1 scores.",
+    )
 
     args = parser.parse_args()
 
@@ -823,4 +867,7 @@ if __name__ == "__main__":
         seeds=args.seeds,
         use_ci_ranking=args.use_ci_ranking,
         sparsity_percentile=args.sparsity_percentile,
+        force_clusters=args.force_clusters,
+        num_local_clusters=args.num_local_clusters,
+        skip_eval=args.skip_eval,
     )

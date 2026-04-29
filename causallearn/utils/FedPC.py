@@ -268,22 +268,266 @@ class LocalSPNWrapper(nn.Module):
         return samples
 
     def log_prob(self, x):
+        """
+        Compute log P(x) with support for NaN marginalization.
+
+        NaN Marginalization (Phase 2):
+            When x contains NaN values, we compute P(X_obs) by marginalizing:
+                P(X_obs) = ∫ P(X_obs, X_miss) dX_miss
+
+            Key insight: ∫ P(X_miss | X_obs) dX_miss = 1
+            Therefore: log(∫ P(X_miss | X_obs) dX_miss) = log(1) = 0
+
+            This means NaN dimensions contribute 0 to log-likelihood, which is
+            automatically handled by the Jacobian correction (mask zeroes out missing dims).
+
+        Algorithm:
+            1. Normalize and permute input (preserve NaNs)
+            2. Forward pass through Einet (Einet handles NaN internally via marginalization)
+            3. Jacobian correction (only applied to observed dimensions via mask)
+
+        Args:
+            x (Tensor): [batch, d] feature matrix (may contain NaNs)
+
+        Returns:
+            ll (Tensor): [batch, 1] log P(X_obs) where X_obs are non-NaN dimensions
+
+        Reference: User insight + Seng et al. (2025) marginalization approach
+        """
+        # BUGFIX: Handle case when ALL features are NaN
+        # When marginalizing over all dimensions: P(∅) = ∫ P(X) dX = 1 → log(1) = 0
+        mask = (~torch.isnan(x)).float()
+        all_nan_mask = mask.sum(dim=1) == 0  # Rows where all features are NaN
+
+        if all_nan_mask.any():
+            # If any row has all NaN, return 0 (log probability of marginalizing everything)
+            batch_size = x.shape[0]
+            ll = torch.zeros(batch_size, 1, device=x.device, dtype=x.dtype)
+            ll[all_nan_mask] = 0.0  # log(1) = 0 for full marginalization
+
+            # For rows with at least one observed feature, compute normally
+            if (~all_nan_mask).any():
+                x_obs = x[~all_nan_mask]
+                x_norm = self._normalize(x_obs)
+                x_perm = self._permute(x_norm)
+                ll_obs = self.model(x_perm)
+
+                if self.std is not None:
+                    mask_obs = (~torch.isnan(x_obs)).float()
+                    log_sigma = torch.log(self.std + 1e-6)
+                    log_det_jacobian = -(log_sigma * mask_obs).sum(dim=1, keepdim=True)
+                    ll_obs = ll_obs + log_det_jacobian
+
+                ll[~all_nan_mask] = ll_obs
+
+            return ll
+
+        # Normal case: at least one feature is observed in all rows
         # 1. Normalize and Permute
         x_norm = self._normalize(x)
         x_perm = self._permute(x_norm)
 
         # 2. Forward pass through Einet
+        # Einet's marginalization: NaN dimensions are integrated out
         ll = self.model(x_perm)
 
         # 3. Log-Jacobian Correction
         if self.std is not None:
             # Jacobian is based on scale sigma.
             # Mask is based on ORIGINAL x (not permuted)
-            mask = (~torch.isnan(x)).float()
+            # NaN marginalization: mask zeroes out missing dims → no Jacobian contribution
             log_sigma = torch.log(self.std + 1e-6)
             log_det_jacobian = -(log_sigma * mask).sum(dim=1, keepdim=True)
             ll = ll + log_det_jacobian
         return ll
+
+
+class LocalClusterMixture(nn.Module):
+    """
+    Represents a client's local mixture of cluster SPNs: P_k(X) = Σ_h w_{k,h} × SPN_{k,h}(X)
+
+    This class implements Seng et al. (2025) client.py:383-397's local clustering approach.
+
+    Mathematical Form:
+        P_k(X) = Σ_{h=1}^{H_k} w_{k,h} × SPN_{k,h}(X)
+
+    Where:
+        - k: client index
+        - H_k: number of LOCAL clusters for client k
+        - w_{k,h}: mixture weight for cluster h in client k
+        - SPN_{k,h}: SPN trained on client k's cluster h data
+
+    Key Design Principles:
+        1. LOCAL clustering: K-means runs ONLY on this client's data
+        2. Sufficient data: Each cluster gets n_k / H_k samples (e.g., 400/2 = 200)
+        3. Foundation for H/V/Hy modes: This mixture becomes a child node in global structure
+
+    Reference: Seng et al. (2025), client.py lines 343-397 (_train_learned method)
+
+    Args:
+        cluster_spns (List[nn.Module]): H_k SPNs, one per local cluster
+        cluster_weights (np.ndarray or List[float]): [H_k] mixture weights (must sum to 1)
+        client_id (int): Client identifier (for logging/debugging)
+        device (str): 'cpu', 'cuda', or 'mps'
+
+    Example:
+        >>> # Client 0 has 400 samples, clusters locally into H=2
+        >>> spn_h0 = LocalSPNWrapper(num_features=8, device='cpu')
+        >>> spn_h1 = LocalSPNWrapper(num_features=8, device='cpu')
+        >>> # Train on 200 samples each...
+        >>> mixture = LocalClusterMixture([spn_h0, spn_h1], cluster_weights=[0.5, 0.5],
+        ...                               client_id=0, device='cpu')
+        >>> x = torch.randn(100, 8)
+        >>> log_p = mixture.log_prob(x)  # P_k(X) = 0.5 × P_{k,0}(X) + 0.5 × P_{k,1}(X)
+    """
+
+    def __init__(self, cluster_spns, cluster_weights, client_id, device="cpu"):
+        super().__init__()
+
+        # Store cluster SPNs as ModuleList for proper PyTorch registration
+        self.cluster_spns = nn.ModuleList(cluster_spns)
+
+        # Convert weights to tensor
+        if isinstance(cluster_weights, np.ndarray):
+            self.weights = torch.tensor(cluster_weights, dtype=torch.float32).to(device)
+        else:
+            self.weights = torch.tensor(list(cluster_weights), dtype=torch.float32).to(
+                device
+            )
+
+        self.client_id = client_id
+        self.device = device
+
+        # Validation checks
+        assert len(self.cluster_spns) > 0, "Must have at least one cluster SPN"
+        assert len(self.cluster_spns) == len(
+            self.weights
+        ), f"Mismatched SPNs ({len(self.cluster_spns)}) and weights ({len(self.weights)})"
+        assert (
+            abs(self.weights.sum().item() - 1.0) < 1e-5
+        ), f"Weights must sum to 1, got {self.weights.sum().item()}"
+
+    def log_prob(self, x):
+        """
+        Compute log P_k(X) = log Σ_h [w_{k,h} × SPN_{k,h}(X)]
+
+        Algorithm:
+            1. For each cluster h: compute log SPN_{k,h}(X)
+            2. Compute log Σ_h [w_{k,h} × SPN_{k,h}(X)] via logsumexp trick
+
+        Mathematical Detail:
+            log Σ_h [w_h × P_h] = logsumexp_h(log w_h + log P_h)
+
+        Args:
+            x (Tensor): [batch, d] feature matrix (may contain NaNs for marginalization)
+
+        Returns:
+            log_prob (Tensor): [batch, 1] log probabilities
+
+        Reference: Seng et al. (2025), client.py:383-397
+        """
+        # BUGFIX: Handle case when ALL features are NaN
+        # When marginalizing over all dimensions: P(∅) = 1 → log(1) = 0
+        mask = (~torch.isnan(x)).float()
+        all_nan_mask = mask.sum(dim=1) == 0
+
+        if all_nan_mask.any():
+            # Return 0 for rows with all NaN (full marginalization)
+            batch_size = x.shape[0]
+            log_prob = torch.zeros(batch_size, 1, device=x.device, dtype=x.dtype)
+
+            # For rows with at least one observed feature, compute normally
+            if (~all_nan_mask).any():
+                x_obs = x[~all_nan_mask]
+
+                cluster_lls = []
+                for spn in self.cluster_spns:
+                    ll = spn.log_prob(x_obs)
+                    cluster_lls.append(ll)
+
+                ll_stack = torch.cat(cluster_lls, dim=1)
+                log_weights = torch.log(self.weights + 1e-9).unsqueeze(0)
+                log_prob_obs = torch.logsumexp(
+                    ll_stack + log_weights, dim=1, keepdim=True
+                )
+
+                log_prob[~all_nan_mask] = log_prob_obs
+
+            return log_prob
+
+        # Normal case: at least one feature observed in all rows
+        # Step 1: Compute log-likelihoods from each cluster SPN
+        cluster_lls = []
+        for spn in self.cluster_spns:
+            ll = spn.log_prob(x)  # [batch, 1]
+            cluster_lls.append(ll)
+
+        # Step 2: Stack and compute weighted mixture via logsumexp
+        ll_stack = torch.cat(cluster_lls, dim=1)  # [batch, H_k]
+        log_weights = torch.log(self.weights + 1e-9).unsqueeze(0)  # [1, H_k]
+
+        # log Σ_h [w_h × P_h] = logsumexp(log w_h + log P_h)
+        log_prob = torch.logsumexp(ll_stack + log_weights, dim=1, keepdim=True)
+
+        return log_prob  # [batch, 1]
+
+    def sample(self, n):
+        """
+        Sample n data points from the local cluster mixture.
+
+        Algorithm:
+            1. For each sample: choose cluster h ~ Categorical(weights)
+            2. Sample from chosen cluster: x_i ~ SPN_{k,h}(X)
+
+        Args:
+            n (int): Number of samples to generate
+
+        Returns:
+            samples (Tensor): [n, d] samples from the mixture
+
+        Reference: Ancestral sampling in mixture models
+        """
+        if n <= 0:
+            return torch.tensor([], device=self.device)
+
+        # Step 1: Choose which cluster to sample from for each data point
+        comp_indices = torch.multinomial(self.weights, n, replacement=True)  # [n]
+
+        # Count samples per cluster for efficiency
+        unique_comps, counts = torch.unique(comp_indices, return_counts=True)
+
+        # Step 2: Sample from each cluster and concatenate
+        samples_list = []
+        for comp_idx, count in zip(unique_comps, counts):
+            spn = self.cluster_spns[comp_idx.item()]
+            comp_samples = spn.sample(count.item())  # [count, d]
+
+            # Ensure 2D shape
+            if comp_samples.ndim == 1:
+                # Infer d from first SPN's num_features
+                num_features = self.cluster_spns[0].config.num_features
+                comp_samples = comp_samples.view(-1, num_features)
+
+            samples_list.append(comp_samples)
+
+        # Concatenate all samples
+        samples = torch.cat(samples_list, dim=0)  # [n, d]
+
+        return samples
+
+    def get_size_bytes(self):
+        """
+        Estimate memory footprint of this local cluster mixture.
+
+        Returns:
+            int: Total size in bytes (sum of all cluster SPNs)
+        """
+        total_size = 0
+        for spn in self.cluster_spns:
+            buffer = io.BytesIO()
+            torch.save(spn.state_dict(), buffer)
+            total_size += buffer.tell()
+        return total_size
 
 
 class EnsembleSPNWrapper(nn.Module):
@@ -367,7 +611,17 @@ class EnsembleSPNWrapper(nn.Module):
         self.mean = None
         self.std = None
 
-    def train_local(self, data, weights=None, epochs=50, lr=0.005, l1_weight=1e-4):
+    def train_local(
+        self,
+        data,
+        weights=None,
+        epochs=50,
+        lr=0.005,
+        l1_weight=1e-4,
+        l2_weight=1e-5,
+        grad_clip_norm=5.0,
+        dropout=0.0,
+    ):
         """
         Train all models in ensemble.
 
@@ -385,6 +639,9 @@ class EnsembleSPNWrapper(nn.Module):
                 epochs=epochs,
                 lr=lr,
                 l1_weight=l1_weight,
+                l2_weight=l2_weight,
+                grad_clip_norm=grad_clip_norm,
+                dropout=dropout,
             )
             final_lls.append(ll)
 
@@ -682,16 +939,21 @@ class GroupMixture(nn.Module):
         """
         Compute log P(X_g) where X_g are the features in this group.
 
+        NaN Handling (Phase 3):
+            NaN marginalization is delegated to child SPNs (LocalSPNWrapper or LocalClusterMixture).
+            Each client's SPN handles NaN dimensions via marginalization (Phase 2).
+            This class simply aggregates the marginalized log-likelihoods via mixture.
+
         Algorithm:
-            1. Extract features: x_g = x[:, feature_indices]
-            2. For each client k: compute log P_k(x_g)
+            1. Extract features: x_g = x[:, feature_indices] (may contain NaNs)
+            2. For each client k: compute log P_k(x_g) (NaN handled by client SPN)
             3. Compute log Σ_k [w_k × P_k(x_g)] via logsumexp trick
 
         Mathematical Detail:
             log Σ_k [w_k × P_k] = logsumexp_k(log w_k + log P_k)
 
         Args:
-            x (Tensor): [batch, d_full] full feature matrix
+            x (Tensor): [batch, d_full] full feature matrix (may contain NaNs)
 
         Returns:
             log_prob (Tensor): [batch, 1] log probabilities for this group
@@ -702,11 +964,41 @@ class GroupMixture(nn.Module):
         # Justification: Each group only models its subset of features
         x_g = x[:, self.feature_indices]  # [batch, len(feature_indices)]
 
+        # BUGFIX: Handle case when ALL features in this group are NaN
+        # When marginalizing over all dimensions in this group: P(∅) = 1 → log(1) = 0
+        mask = (~torch.isnan(x_g)).float()
+        all_nan_mask = mask.sum(dim=1) == 0
+
+        if all_nan_mask.any():
+            # Return 0 for rows with all NaN (full marginalization for this group)
+            batch_size = x_g.shape[0]
+            log_prob = torch.zeros(batch_size, 1, device=x.device, dtype=x.dtype)
+
+            # For rows with at least one observed feature in this group, compute normally
+            if (~all_nan_mask).any():
+                x_g_obs = x_g[~all_nan_mask]
+
+                client_lls = []
+                for i, spn in enumerate(self.client_spns):
+                    ll = spn.log_prob(x_g_obs)  # [batch_obs, 1]
+                    client_lls.append(ll)
+
+                ll_stack = torch.cat(client_lls, dim=1)
+                log_weights = torch.log(self.weights + 1e-9).unsqueeze(0)
+                log_prob_obs = torch.logsumexp(
+                    ll_stack + log_weights, dim=1, keepdim=True
+                )
+
+                log_prob[~all_nan_mask] = log_prob_obs
+
+            return log_prob
+
         # Step 2: Compute log-likelihoods from each client SPN
         # Justification: Each client contributes its learned distribution
+        # NaN marginalization: Delegated to client SPNs (Phase 2)
         client_lls = []
         for spn in self.client_spns:
-            ll = spn.log_prob(x_g)  # [batch, 1]
+            ll = spn.log_prob(x_g)  # [batch, 1] - NaN handled internally
             client_lls.append(ll)
 
         # Step 3: Stack and compute weighted mixture via logsumexp
@@ -1884,6 +2176,189 @@ def compute_adaptive_hyperparameters(
         "dropout": dropout,
         "weight_decay": weight_decay,
     }
+
+
+class LocalClusterMixture(nn.Module):
+    """
+    Local mixture over K_local cluster SPNs for a single client.
+
+    This represents one client's learned model after local clustering and training.
+    Analogous to Seng's _build_cluster_mixture() in client.py.
+
+    Mathematical Form:
+        P_k(X) = Σ_{h=1}^{K_local} w_{k,h} × SPN_{k,h}(X)
+
+    Args:
+        cluster_spns (List[LocalSPNWrapper]): K_local SPNs for local clusters
+        cluster_weights (np.ndarray): [K_local] weights (cluster sizes / n_k)
+        client_id (int): Client identifier (for logging)
+        device (str): 'cpu', 'cuda', or 'mps'
+
+    Example:
+        >>> # Client 0 with 400 samples, 2 local clusters
+        >>> spn_0 = LocalSPNWrapper(...)  # Trained on 200 samples (cluster 0)
+        >>> spn_1 = LocalSPNWrapper(...)  # Trained on 200 samples (cluster 1)
+        >>> weights = [0.5, 0.5]  # Equal cluster sizes
+        >>> mixture = LocalClusterMixture([spn_0, spn_1], weights, client_id=0)
+        >>>
+        >>> # Evaluation
+        >>> x = torch.randn(100, 10)
+        >>> log_p = mixture.log_prob(x)  # [100, 1]
+
+    Reference:
+        Seng et al. (2025), Algorithm 1, Lines 13-14
+        - Line 13: cluster_local_data(OS(j), K)
+        - Line 14: Learn dedicated PC for each cluster
+    """
+
+    def __init__(self, cluster_spns, cluster_weights, client_id=None, device="cpu"):
+        super().__init__()
+
+        self.client_id = client_id
+        self.device = device
+        self.K_local = len(cluster_spns)
+
+        # Store cluster SPNs as ModuleList for proper PyTorch registration
+        self.cluster_spns = nn.ModuleList(cluster_spns)
+
+        # Convert weights to tensor
+        if isinstance(cluster_weights, np.ndarray):
+            self.weights = torch.tensor(cluster_weights, dtype=torch.float32).to(device)
+        else:
+            self.weights = torch.tensor(list(cluster_weights), dtype=torch.float32).to(
+                device
+            )
+
+        # Validation
+        assert len(self.cluster_spns) > 0, "Must have at least one cluster SPN"
+        assert len(self.cluster_spns) == len(
+            self.weights
+        ), f"Mismatched SPNs ({len(self.cluster_spns)}) and weights ({len(self.weights)})"
+        assert (
+            abs(self.weights.sum().item() - 1.0) < 1e-5
+        ), f"Weights must sum to 1, got {self.weights.sum().item()}"
+
+        logging.info(
+            f"[Client {client_id}] LocalClusterMixture created: "
+            f"K_local={self.K_local}, weights={self.weights.cpu().numpy()}"
+        )
+
+    def log_prob(self, x):
+        """
+        Compute log P_k(X) = log(Σ_h w_{k,h} × SPN_{k,h}(X)).
+
+        Algorithm:
+            1. For each local cluster h: compute log P_{k,h}(x)
+            2. Compute log(Σ_h w_h × P_h) via logsumexp trick
+
+        Args:
+            x (Tensor): [batch, d] input data
+
+        Returns:
+            log_prob (Tensor): [batch, 1] log probabilities
+        """
+        # Ensure tensor
+        if not isinstance(x, torch.Tensor):
+            x = torch.tensor(x, dtype=torch.float32).to(self.device)
+
+        # BUGFIX: Handle case when ALL features are NaN
+        # When marginalizing over all dimensions: P(∅) = 1 → log(1) = 0
+        mask = (~torch.isnan(x)).float()
+        all_nan_mask = mask.sum(dim=1) == 0
+
+        if all_nan_mask.any():
+            # Return 0 for rows with all NaN (full marginalization)
+            batch_size = x.shape[0]
+            log_prob = torch.zeros(batch_size, 1, device=x.device, dtype=x.dtype)
+
+            # For rows with at least one observed feature, compute normally
+            if (~all_nan_mask).any():
+                x_obs = x[~all_nan_mask]
+
+                cluster_lls = []
+                for spn in self.cluster_spns:
+                    ll = spn.log_prob(x_obs)
+                    cluster_lls.append(ll)
+
+                ll_stack = torch.cat(cluster_lls, dim=1)
+                log_weights = torch.log(self.weights + 1e-9).unsqueeze(0)
+                log_prob_obs = torch.logsumexp(
+                    ll_stack + log_weights, dim=1, keepdim=True
+                )
+
+                log_prob[~all_nan_mask] = log_prob_obs
+
+            return log_prob
+
+        # Normal case: at least one feature observed in all rows
+        # Compute log-prob from each local cluster SPN
+        cluster_lls = []
+        for spn in self.cluster_spns:
+            ll = spn.log_prob(x)  # [batch, 1]
+            cluster_lls.append(ll)
+
+        # Stack: [batch, K_local]
+        ll_stack = torch.cat(cluster_lls, dim=1)
+
+        # Log weights: [1, K_local]
+        log_weights = torch.log(self.weights + 1e-9).unsqueeze(0)
+
+        # Mixture via logsumexp: log(Σ_h w_h × P_h)
+        log_prob = torch.logsumexp(ll_stack + log_weights, dim=1, keepdim=True)
+
+        return log_prob  # [batch, 1]
+
+    def sample(self, n):
+        """
+        Sample n data points from the local mixture.
+
+        Algorithm:
+            1. For each sample: choose cluster h ~ Categorical(weights)
+            2. Sample from chosen cluster: x_i ~ SPN_{k,h}
+
+        Args:
+            n (int): Number of samples
+
+        Returns:
+            samples (Tensor): [n, d] generated samples
+        """
+        if n <= 0:
+            return torch.tensor([], device=self.device)
+
+        # Step 1: Choose which cluster to sample from for each data point
+        cluster_indices = torch.multinomial(self.weights, n, replacement=True)  # [n]
+
+        # Count samples per cluster for efficient batching
+        unique_clusters, counts = torch.unique(cluster_indices, return_counts=True)
+
+        # Step 2: Sample from each cluster
+        samples_list = []
+        for cluster_idx, count in zip(unique_clusters, counts):
+            spn = self.cluster_spns[cluster_idx.item()]
+            cluster_samples = spn.sample(count.item())  # [count, d]
+            samples_list.append(cluster_samples)
+
+        # Concatenate and shuffle
+        all_samples = torch.cat(samples_list, dim=0)  # [n, d]
+        perm = torch.randperm(all_samples.size(0))
+        return all_samples[perm]
+
+    def get_size_bytes(self):
+        """
+        Estimate memory footprint (sum of cluster SPNs).
+
+        Returns:
+            size_bytes (int): Total size in bytes
+        """
+        total_bytes = 0
+        for spn in self.cluster_spns:
+            if hasattr(spn, "get_size_bytes"):
+                total_bytes += spn.get_size_bytes()
+            else:
+                buffer = io.BytesIO()
+                torch.save(spn.state_dict(), buffer)
+                total_bytes += buffer.tell()
+        return total_bytes
 
 
 def auto_tune_spn_config(proxy_data, num_clusters=1, n_trials=15, device="cpu"):

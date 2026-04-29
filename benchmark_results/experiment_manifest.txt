@@ -1,0 +1,386 @@
+================================================================================
+EXPERIMENT MANIFEST
+================================================================================
+
+Total experiments: 15
+Generated: 2026-04-29 16:52:53
+
+
+================================================================================
+Experiment 1/15
+================================================================================
+Configuration:  quick
+Scenario:       horizontal
+Data Type:      linear
+Seed:           42
+Dimensions:     d=5, K=2, n_total=200, n_per_client=100
+Epochs:         20
+Device:         mps
+
+Performance:
+  Skeleton F1:  0.667
+  Skeleton SHD: 5.0
+  DAG F1:       0.133
+  Train Time:   121.6s
+
+Experiment Directory:
+  /Users/M279402/PycharmProjects/fl_spn_CDH/eval/20260429_164023_horizontal_2clients_5vars_200samples
+
+Generated Files:
+  - run.log (detailed training log)
+  - umap_local_client_*.png (UMAP visualizations for each local SPN)
+  - umap_global_spn.png (UMAP visualization for global SPN)
+
+================================================================================
+Experiment 2/15
+================================================================================
+Configuration:  quick
+Scenario:       horizontal
+Data Type:      linear
+Seed:           123
+Dimensions:     d=5, K=2, n_total=200, n_per_client=100
+Epochs:         20
+Device:         mps
+
+Performance:
+  Skeleton F1:  0.667
+  Skeleton SHD: 5.0
+  DAG F1:       0.267
+  Train Time:   108.0s
+
+Experiment Directory:
+  /Users/M279402/PycharmProjects/fl_spn_CDH/eval/20260429_164219_horizontal_2clients_5vars_200samples
+
+Generated Files:
+  - run.log (detailed training log)
+  - umap_local_client_*.png (UMAP visualizations for each local SPN)
+  - umap_global_spn.png (UMAP visualization for global SPN)
+
+================================================================================
+Experiment 3/15
+================================================================================
+Configuration:  quick
+Scenario:       horizontal
+Data Type:      linear
+Seed:           456
+Dimensions:     d=5, K=2, n_total=200, n_per_client=100
+Epochs:         20
+Device:         mps
+
+Performance:
+  Skeleton F1:  0.667
+  Skeleton SHD: 5.0
+  DAG F1:       0.667
+  Train Time:   106.9s
+
+Experiment Directory:
+  /Users/M279402/PycharmProjects/fl_spn_CDH/eval/20260429_164407_horizontal_2clients_5vars_200samples
+
+Generated Files:
+  - run.log (detailed training log)
+  - umap_local_client_*.png (UMAP visualizations for each local SPN)
+  - umap_global_spn.png (UMAP visualization for global SPN)
+
+================================================================================
+Experiment 4/15
+================================================================================
+Configuration:  quick
+Scenario:       horizontal
+Data Type:      linear
+Seed:           789
+Dimensions:     d=5, K=2, n_total=200, n_per_client=100
+Epochs:         20
+Device:         mps
+
+Performance:
+  Skeleton F1:  0.667
+  Skeleton SHD: 5.0
+  DAG F1:       0.133
+  Train Time:   107.7s
+
+Experiment Directory:
+  /Users/M279402/PycharmProjects/fl_spn_CDH/eval/20260429_164554_horizontal_2clients_5vars_200samples
+
+Generated Files:
+  - run.log (detailed training log)
+  - umap_local_client_*.png (UMAP visualizations for each local SPN)
+  - umap_global_spn.png (UMAP visualization for global SPN)
+
+================================================================================
+Experiment 5/15
+================================================================================
+Configuration:  quick
+Scenario:       horizontal
+Data Type:      linear
+Seed:           2024
+Dimensions:     d=5, K=2, n_total=200, n_per_client=100
+Epochs:         20
+Device:         mps
+
+Performance:
+  Skeleton F1:  0.667
+  Skeleton SHD: 5.0
+  DAG F1:       0.400
+  Train Time:   108.9s
+
+Experiment Directory:
+  /Users/M279402/PycharmProjects/fl_spn_CDH/eval/20260429_164742_horizontal_2clients_5vars_200samples
+
+Generated Files:
+  - run.log (detailed training log)
+  - umap_local_client_*.png (UMAP visualizations for each local SPN)
+  - umap_global_spn.png (UMAP visualization for global SPN)
+
+================================================================================
+Experiment 6/15
+================================================================================
+Configuration:  quick
+Scenario:       vertical
+Data Type:      linear
+Seed:           42
+Dimensions:     d=5, K=2, n_total=200, n_per_client=200
+Epochs:         20
+Device:         mps
+
+Performance:
+  Skeleton F1:  0.222
+  Skeleton SHD: 7.0
+  DAG F1:       0.000
+  Train Time:   25.2s
+
+Experiment Directory:
+  /Users/M279402/PycharmProjects/fl_spn_CDH/eval/20260429_164931_vertical_2clients_5vars_200samples
+
+Generated Files:
+  - run.log (detailed training log)
+  - umap_local_client_*.png (UMAP visualizations for each local SPN)
+  - umap_global_spn.png (UMAP visualization for global SPN)
+
+================================================================================
+Experiment 7/15
+================================================================================
+Configuration:  quick
+Scenario:       vertical
+Data Type:      linear
+Seed:           123
+Dimensions:     d=5, K=2, n_total=200, n_per_client=200
+Epochs:         20
+Device:         mps
+
+Performance:
+  Skeleton F1:  0.222
+  Skeleton SHD: 7.0
+  DAG F1:       0.000
+  Train Time:   26.6s
+
+Experiment Directory:
+  /Users/M279402/PycharmProjects/fl_spn_CDH/eval/20260429_164956_vertical_2clients_5vars_200samples
+
+Generated Files:
+  - run.log (detailed training log)
+  - umap_local_client_*.png (UMAP visualizations for each local SPN)
+  - umap_global_spn.png (UMAP visualization for global SPN)
+
+================================================================================
+Experiment 8/15
+================================================================================
+Configuration:  quick
+Scenario:       vertical
+Data Type:      linear
+Seed:           456
+Dimensions:     d=5, K=2, n_total=200, n_per_client=200
+Epochs:         20
+Device:         mps
+
+Performance:
+  Skeleton F1:  0.000
+  Skeleton SHD: 9.0
+  DAG F1:       0.000
+  Train Time:   25.4s
+
+Experiment Directory:
+  /Users/M279402/PycharmProjects/fl_spn_CDH/eval/20260429_165023_vertical_2clients_5vars_200samples
+
+Generated Files:
+  - run.log (detailed training log)
+  - umap_local_client_*.png (UMAP visualizations for each local SPN)
+  - umap_global_spn.png (UMAP visualization for global SPN)
+
+================================================================================
+Experiment 9/15
+================================================================================
+Configuration:  quick
+Scenario:       vertical
+Data Type:      linear
+Seed:           789
+Dimensions:     d=5, K=2, n_total=200, n_per_client=200
+Epochs:         20
+Device:         mps
+
+Performance:
+  Skeleton F1:  0.222
+  Skeleton SHD: 7.0
+  DAG F1:       0.222
+  Train Time:   25.2s
+
+Experiment Directory:
+  /Users/M279402/PycharmProjects/fl_spn_CDH/eval/20260429_165048_vertical_2clients_5vars_200samples
+
+Generated Files:
+  - run.log (detailed training log)
+  - umap_local_client_*.png (UMAP visualizations for each local SPN)
+  - umap_global_spn.png (UMAP visualization for global SPN)
+
+================================================================================
+Experiment 10/15
+================================================================================
+Configuration:  quick
+Scenario:       vertical
+Data Type:      linear
+Seed:           2024
+Dimensions:     d=5, K=2, n_total=200, n_per_client=200
+Epochs:         20
+Device:         mps
+
+Performance:
+  Skeleton F1:  0.667
+  Skeleton SHD: 3.0
+  DAG F1:       0.222
+  Train Time:   25.9s
+
+Experiment Directory:
+  /Users/M279402/PycharmProjects/fl_spn_CDH/eval/20260429_165113_vertical_2clients_5vars_200samples
+
+Generated Files:
+  - run.log (detailed training log)
+  - umap_local_client_*.png (UMAP visualizations for each local SPN)
+  - umap_global_spn.png (UMAP visualization for global SPN)
+
+================================================================================
+Experiment 11/15
+================================================================================
+Configuration:  quick
+Scenario:       hybrid
+Data Type:      linear
+Seed:           42
+Dimensions:     d=5, K=2, n_total=200, n_per_client=100
+Epochs:         20
+Device:         mps
+
+Performance:
+  Skeleton F1:  0.000
+  Skeleton SHD: 5.0
+  DAG F1:       0.000
+  Train Time:   15.1s
+
+Experiment Directory:
+  /Users/M279402/PycharmProjects/fl_spn_CDH/eval/20260429_165139_hybrid_2clients_5vars_200samples
+
+Generated Files:
+  - run.log (detailed training log)
+  - umap_local_client_*.png (UMAP visualizations for each local SPN)
+  - umap_global_spn.png (UMAP visualization for global SPN)
+
+================================================================================
+Experiment 12/15
+================================================================================
+Configuration:  quick
+Scenario:       hybrid
+Data Type:      linear
+Seed:           123
+Dimensions:     d=5, K=2, n_total=200, n_per_client=100
+Epochs:         20
+Device:         mps
+
+Performance:
+  Skeleton F1:  0.000
+  Skeleton SHD: 5.0
+  DAG F1:       0.000
+  Train Time:   15.7s
+
+Experiment Directory:
+  /Users/M279402/PycharmProjects/fl_spn_CDH/eval/20260429_165154_hybrid_2clients_5vars_200samples
+
+Generated Files:
+  - run.log (detailed training log)
+  - umap_local_client_*.png (UMAP visualizations for each local SPN)
+  - umap_global_spn.png (UMAP visualization for global SPN)
+
+================================================================================
+Experiment 13/15
+================================================================================
+Configuration:  quick
+Scenario:       hybrid
+Data Type:      linear
+Seed:           456
+Dimensions:     d=5, K=2, n_total=200, n_per_client=100
+Epochs:         20
+Device:         mps
+
+Performance:
+  Skeleton F1:  0.000
+  Skeleton SHD: 5.0
+  DAG F1:       0.000
+  Train Time:   15.0s
+
+Experiment Directory:
+  /Users/M279402/PycharmProjects/fl_spn_CDH/eval/20260429_165210_hybrid_2clients_5vars_200samples
+
+Generated Files:
+  - run.log (detailed training log)
+  - umap_local_client_*.png (UMAP visualizations for each local SPN)
+  - umap_global_spn.png (UMAP visualization for global SPN)
+
+================================================================================
+Experiment 14/15
+================================================================================
+Configuration:  quick
+Scenario:       hybrid
+Data Type:      linear
+Seed:           789
+Dimensions:     d=5, K=2, n_total=200, n_per_client=100
+Epochs:         20
+Device:         mps
+
+Performance:
+  Skeleton F1:  0.000
+  Skeleton SHD: 5.0
+  DAG F1:       0.000
+  Train Time:   14.9s
+
+Experiment Directory:
+  /Users/M279402/PycharmProjects/fl_spn_CDH/eval/20260429_165225_hybrid_2clients_5vars_200samples
+
+Generated Files:
+  - run.log (detailed training log)
+  - umap_local_client_*.png (UMAP visualizations for each local SPN)
+  - umap_global_spn.png (UMAP visualization for global SPN)
+
+================================================================================
+Experiment 15/15
+================================================================================
+Configuration:  quick
+Scenario:       hybrid
+Data Type:      linear
+Seed:           2024
+Dimensions:     d=5, K=2, n_total=200, n_per_client=100
+Epochs:         20
+Device:         mps
+
+Performance:
+  Skeleton F1:  0.000
+  Skeleton SHD: 5.0
+  DAG F1:       0.000
+  Train Time:   15.1s
+
+Experiment Directory:
+  /Users/M279402/PycharmProjects/fl_spn_CDH/eval/20260429_165240_hybrid_2clients_5vars_200samples
+
+Generated Files:
+  - run.log (detailed training log)
+  - umap_local_client_*.png (UMAP visualizations for each local SPN)
+  - umap_global_spn.png (UMAP visualization for global SPN)
+
+================================================================================
+END OF MANIFEST
+================================================================================

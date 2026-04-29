@@ -1,0 +1,10 @@
+usage: test_fedcdh_benchmark.py [-h]
+                                [--config {quick,small,medium,large,sachs}]
+                                [--data-type {linear,nonlinear}]
+                                [--device {cuda,mps,cpu}]
+                                [--seeds SEEDS [SEEDS ...]] [--use-ci-ranking]
+                                [--sparsity-percentile SPARSITY_PERCENTILE]
+                                [--force-clusters FORCE_CLUSTERS]
+                                [--num-local-clusters NUM_LOCAL_CLUSTERS]
+                                [--skip-eval]
+test_fedcdh_benchmark.py: error: argument --seeds: invalid int value: ''

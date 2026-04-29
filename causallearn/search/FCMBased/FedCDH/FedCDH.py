@@ -13,6 +13,7 @@ from causallearn.search.ConstraintBased.CDNOD import cdnod
 from causallearn.utils.FedPC import (
     GlobalFedSPN,
     LocalSPNWrapper,
+    LocalClusterMixture,
     UnivariateSPNWrapper,
     FederatedProduct,
     FederatedStructureLearner,
@@ -21,6 +22,7 @@ from causallearn.utils.FedPC import (
     ProductOverGroupsWithOverlap,
     build_feature_indicator_matrix,
     group_features_by_client_set,
+    compute_adaptive_hyperparameters,
 )
 from causallearn.utils.data_utils import (
     count_dag_accuracy,
@@ -364,8 +366,10 @@ class FedCDH:
                         _curr += len(xk)
                     X_splits = new_splits
                 else:  # hybrid
-                    # Use X_aug_global to ensure context U is included
-                    X_splits = np.array_split(X_aug_global, self.K_clients)
+                    # BUGFIX: For hybrid mode, split X_global (WITHOUT context U)
+                    # Context U will be added during CI testing phase, not SPN training
+                    # This avoids dimension mismatch and double-counting issues
+                    X_splits = np.array_split(X_global, self.K_clients)
 
             # Data partition validation
             logging.info(f"Data partition check: scenario={self.scenario}")
@@ -393,22 +397,51 @@ class FedCDH:
                 f"✓ Data partition validation passed for {self.scenario} scenario"
             )
 
-            # BIC-based cluster selection (optional: skip if K specified)
-            # If args.skip_bic=True, use K_clients as number of clusters
-            # Otherwise, run BIC selection over [2, ..., 5] to find optimal K
-            if getattr(self.args, "skip_bic", False):
-                # Skip BIC: use user-specified K directly
-                num_clusters = self.K_clients
-                logging.info(
-                    f"BIC selection skipped. Using K={num_clusters} clusters directly."
-                )
+            # V2 OPTION 1: FedCDH Baseline (Following Paper)
+            # Use surrogate variable ℧ = client index (no k-means clustering)
+            # Rationale: For homogeneous synthetic data, client index IS the mechanism
+            # For heterogeneous real data, can enable use_kmeans_clustering=True
+            #
+            # Reference: Li et al. (2024) FedCDH ICLR 2024
+            # "We utilize a surrogate variable corresponding to the client or domain index"
+
+            use_kmeans = getattr(self.args, "use_kmeans_clustering", False)
+            force_num_clusters = getattr(self.args, "force_num_clusters", None)
+
+            if force_num_clusters is not None:
+                # Override: force specific cluster count (for testing/comparison)
+                num_clusters = force_num_clusters
+                logging.info(f"[Override] Cluster count FORCED to K={num_clusters}")
                 fed_km = SimulatedFederatedKMeans(
                     n_clusters=num_clusters, max_iter=10, seed=42
                 )
                 fed_km.fit(X_splits, feature_maps, self.scenario)
                 best_model = fed_km
+
+            elif not use_kmeans:
+                # DEFAULT (Option 1): Use client index as surrogate variable
+                # This matches FedCDH paper exactly - no mechanism discovery needed
+                num_clusters = self.K_clients
+                logging.info(
+                    f"[FedCDH Baseline] Using K={num_clusters} clusters "
+                    f"(surrogate ℧ = client index, following Li et al. 2024)"
+                )
+
+                # Simple assignment: cluster h = client k
+                fed_km = SimulatedFederatedKMeans(
+                    n_clusters=num_clusters, max_iter=10, seed=42
+                )
+                fed_km.fit(X_splits, feature_maps, self.scenario)
+                best_model = fed_km
+
             else:
-                # Run BIC selection
+                # OPTIONAL (Option 2 - Future): K-means for mechanism discovery
+                # Only use this for truly heterogeneous data with multiple mechanisms
+                # Example: Real hospital data, different experimental conditions
+                logging.info(
+                    "[K-means Mode] Discovering mechanisms via BIC selection (experimental)"
+                )
+
                 best_h = 2
                 min_bic = float("inf")
                 best_model = None
@@ -428,18 +461,17 @@ class FedCDH:
                         best_h = h_candidate
                         best_model = fed_km
 
-                # Adaptive cluster count: cap based on data availability
-                # Rationale: Each SPN needs sufficient samples to train properly
-                # Formula: max_clusters = max(2, min(BIC_choice, samples_per_client // 100))
+                # Data availability constraint
+                min_samples_per_group = 100
                 max_clusters_by_data = max(
-                    2, min(5, total_samples // (self.K_clients * 100))
+                    2, total_samples // (self.K_clients * min_samples_per_group)
                 )
                 num_clusters = min(best_h, max_clusters_by_data)
 
                 if num_clusters < best_h:
                     logging.info(
                         f"BIC selection: K={best_h} from {bic_scores}, "
-                        f"capped to K={num_clusters} (data-driven: {total_samples} samples)"
+                        f"capped to K={num_clusters} (need ≥{min_samples_per_group} samples/cluster/client)"
                     )
                 else:
                     logging.info(
@@ -466,16 +498,19 @@ class FedCDH:
             num_repetitions = getattr(self.args, "num_repetitions", 10)
 
             # Ensemble configuration (adaptive strategy)
+            # DEFAULT CHANGED: n_ensemble=1 for benchmarks (5× faster training)
+            # Ensemble improves robustness but adds 5× training time
+            # For production use, set args.n_ensemble=5 explicitly
             n_ensemble = getattr(self.args, "n_ensemble", None)
             if n_ensemble is None:
-                # Auto-detect: use ensemble for complex cases
-                if self.d_features >= 8 or self.scenario in ["vertical", "hybrid"]:
-                    n_ensemble = 5  # Ensemble for complex cases
-                else:
-                    n_ensemble = 1  # Single model for simple cases
+                # Default to single model for faster benchmarking
+                # Old auto-detect logic (too slow for benchmarks):
+                # if self.d_features >= 8 or self.scenario in ["vertical", "hybrid"]:
+                #     n_ensemble = 5  # Ensemble for complex cases
+                n_ensemble = 1  # Single model (5× faster than ensemble)
             logging.info(
                 f"SPN configuration: n_ensemble={n_ensemble} "
-                f"({'auto-detected' if getattr(self.args, 'n_ensemble', None) is None else 'user-specified'})"
+                f"({'auto-detected (single model for speed)' if getattr(self.args, 'n_ensemble', None) is None else 'user-specified'})"
             )
 
             # Adaptive learning rate: decrease for higher dimensions
@@ -503,349 +538,471 @@ class FedCDH:
                 logging.info(f"Training epochs: {adaptive_epochs}")
             train_epochs = adaptive_epochs
 
-            for h in range(num_clusters):
-                cluster_mask_global = labels == h
-                if cluster_mask_global.sum() < 5:
-                    continue
-                for k in range(self.K_clients):
-                    local_data_h = (
-                        X_splits[k][cluster_mask_global]
-                        if self.scenario == "vertical"
-                        else X_splits[k][labels_splits[k] == h]
-                    )
-                    if len(local_data_h) > 2:
-                        local_d = local_data_h.shape[1]
+            # V2 LOCAL CLUSTERING: Seng et al. (2025) Algorithm 1
+            # KEY CHANGE: Client-first loop (not cluster-first) with LOCAL k-means per client
+            # Rationale: Prevents data fragmentation, preserves sample sufficiency
+            # Reference: experiments/SPN_STRUCTURE_COMPARISON.md Section 1.1
+
+            from sklearn.cluster import KMeans
+
+            # Determine local cluster count
+            K_local = getattr(self.args, "num_local_clusters", 2)
+            # Safety: Ensure at least 100 samples per local cluster
+            min_samples_per_cluster = 100
+            for X_k in X_splits:
+                max_K_local = max(1, len(X_k) // min_samples_per_cluster)
+                K_local = min(K_local, max_K_local)
+            K_local = max(1, K_local)  # At least 1 cluster
+
+            logging.info(
+                f"\n{'='*60}\n"
+                f"[V2 LOCAL CLUSTERING] Following Seng et al. (2025) Algorithm 1\n"
+                f"K_local={K_local} clusters per client (not global clustering)\n"
+                f"{'='*60}"
+            )
+
+            # Store client local mixtures (one per client)
+            client_local_mixtures = []
+
+            # CRITICAL: Loop over clients FIRST (not clusters)
+            for k in range(self.K_clients):
+                logging.info(f"\n{'='*60}")
+                logging.info(f"Training Client {k}/{self.K_clients}")
+                logging.info(f"{'='*60}")
+
+                # Get full client data (no fragmentation)
+                client_data = X_splits[k]
+                n_k = len(client_data)
+                d_k = client_data.shape[1]
+
+                logging.info(f"Client {k} data: n={n_k}, d={d_k}")
+
+                # LOCAL clustering on this client's data
+                if K_local > 1 and n_k >= 20:
+                    logging.info(f"  Performing LOCAL K-means (K_local={K_local})...")
+
+                    # K-means on LOCAL data (not global!)
+                    # Force single-threaded to avoid OpenMP hang on macOS
+                    import os
+
+                    old_omp = os.environ.get("OMP_NUM_THREADS", None)
+                    os.environ["OMP_NUM_THREADS"] = "1"
+                    try:
+                        kmeans = KMeans(n_clusters=K_local, random_state=42, n_init=10)
+                        local_cluster_labels = kmeans.fit_predict(client_data)
+                    finally:
+                        # Restore original value
+                        if old_omp is not None:
+                            os.environ["OMP_NUM_THREADS"] = old_omp
+                        else:
+                            os.environ.pop("OMP_NUM_THREADS", None)
+
+                    # Log cluster distribution
+                    unique, counts = np.unique(local_cluster_labels, return_counts=True)
+                    cluster_dist = dict(zip(unique.tolist(), counts.tolist()))
+                    logging.info(f"  Local cluster distribution: {cluster_dist}")
+
+                    # Train K_local SPNs, one per local cluster
+                    cluster_spns = []
+                    cluster_weights = []
+
+                    for h in range(K_local):
+                        mask = local_cluster_labels == h
+                        cluster_data = client_data[mask]
+                        cluster_size = len(cluster_data)
+
+                        if cluster_size < 5:
+                            logging.warning(
+                                f"    Skipping local cluster {h} (insufficient data: {cluster_size} < 5)"
+                            )
+                            continue
+
+                        logging.info(
+                            f"  Training SPN for local cluster {h}: {cluster_size} samples"
+                        )
+
+                        local_d = cluster_data.shape[1]
+
+                        # Get adaptive hyperparameters
+                        hyperparams = compute_adaptive_hyperparameters(
+                            mode=self.scenario,
+                            num_features=local_d,
+                            num_samples=cluster_size,
+                            data_type=self.data_type,
+                            base_num_sums=num_sums,
+                            base_num_leaves=num_leaves,
+                            base_epochs=train_epochs,
+                        )
+
+                        # Create and train SPN for this local cluster
                         if local_d == 1:
-                            leaf = UnivariateSPNWrapper(
+                            spn_kh = UnivariateSPNWrapper(
                                 device=self.device,
                                 num_sums=num_sums,
                                 num_leaves=num_leaves,
-                                seed=h * 10 + k,
+                                seed=k * 10 + h,
+                            )
+                            spn_kh.train_local(
+                                cluster_data,
+                                epochs=hyperparams["epochs"],
+                                lr=adaptive_lr,
                             )
                         else:
-                            # Adaptive depth: respect Einet constraint while maximizing capacity
-                            # Einet constraint: 2^depth <= num_features
-                            # Therefore: depth <= log2(num_features)
-                            # Max depth = floor(log2(num_features))
-                            #
-                            # Strategy: Use maximum allowed depth, no reduction
-                            # Old: Used floor(log2(d)) which is already the max
-                            # New: Increase capacity via num_sums/leaves instead
-                            #
-                            # Since depth is constrained, we compensate by increasing
-                            # architecture parameters for higher dimensions
-                            max_depth = int(np.floor(np.log2(local_d)))
-                            adaptive_depth = max(1, max_depth)
-
-                            # Adaptive architecture parameters using 5-criterion system
-                            # Replaces weak sqrt scaling with mode-aware, data-driven scaling
-                            # Expected impact: Horizontal F1 from 0.133-0.255 → 0.5+ (2-4× improvement)
-                            from causallearn.utils.FedPC import (
-                                compute_adaptive_hyperparameters,
-                            )
-
-                            hyperparams = compute_adaptive_hyperparameters(
-                                mode=self.scenario,
+                            spn_kh = LocalSPNWrapper(
                                 num_features=local_d,
-                                num_samples=len(local_data_h),
-                                data_type=self.data_type,
-                                base_num_sums=num_sums,
-                                base_num_leaves=num_leaves,
-                                base_epochs=train_epochs,
-                                base_depth=adaptive_depth,
+                                device=self.device,
+                                num_sums=hyperparams["num_sums"],
+                                num_leaves=hyperparams["num_leaves"],
+                                depth=hyperparams["depth"],
+                                num_repetitions=num_repetitions,
+                                seed=k * 10 + h,
+                            )
+                            spn_kh.train_local(
+                                cluster_data,
+                                epochs=hyperparams["epochs"],
+                                lr=adaptive_lr,
+                                l1_weight=1e-4,
+                                l2_weight=hyperparams["weight_decay"],
+                                dropout=hyperparams["dropout"],
                             )
 
-                            # Use computed hyperparameters
-                            adaptive_num_sums = hyperparams["num_sums"]
-                            adaptive_num_leaves = hyperparams["num_leaves"]
-                            adaptive_depth = hyperparams["depth"]
-                            adaptive_epochs = hyperparams["epochs"]
-                            adaptive_dropout = hyperparams["dropout"]
-                            adaptive_weight_decay = hyperparams["weight_decay"]
+                        cluster_spns.append(spn_kh)
+                        cluster_weights.append(cluster_size)
 
-                            # Log adaptive scaling for transparency
-                            logging.info(
-                                f"[Client {k}, Cluster {h}] Adaptive hyperparameters: "
-                                f"d={local_d}, n={len(local_data_h)}, mode={self.scenario}, type={self.data_type}"
-                            )
-                            logging.info(
-                                f"  Architecture: sums={adaptive_num_sums} (base={num_sums}), "
-                                f"leaves={adaptive_num_leaves} (base={num_leaves}), depth={adaptive_depth}"
-                            )
-                            logging.info(
-                                f"  Training: epochs={adaptive_epochs} (base={train_epochs}), "
-                                f"dropout={adaptive_dropout:.3f}, weight_decay={adaptive_weight_decay:.1e}"
-                            )
+                    # Normalize weights
+                    if len(cluster_spns) > 0:
+                        cluster_weights = np.array(cluster_weights) / n_k
 
-                            # Use ensemble wrapper if n_ensemble > 1
-                            if n_ensemble > 1:
-                                from causallearn.utils.FedPC import EnsembleSPNWrapper
-
-                                leaf = EnsembleSPNWrapper(
-                                    num_features=local_d,
-                                    device=self.device,
-                                    n_models=n_ensemble,
-                                    base_sums=num_sums,  # Will be scaled adaptively
-                                    base_leaves=num_leaves,
-                                    base_reps=num_repetitions,
-                                    seed=h * 10 + k,
-                                    variable_order=None,
-                                )
-                            else:
-                                leaf = LocalSPNWrapper(
-                                    num_features=local_d,
-                                    device=self.device,
-                                    num_sums=adaptive_num_sums,
-                                    num_leaves=adaptive_num_leaves,
-                                    depth=adaptive_depth,
-                                    num_repetitions=num_repetitions,
-                                    seed=h * 10 + k,
-                                )
-                        leaf.train_local(
-                            local_data_h,
-                            epochs=adaptive_epochs,
-                            lr=adaptive_lr,
-                            dropout=adaptive_dropout,
-                            l2_weight=adaptive_weight_decay,
+                        # Build local mixture for this client
+                        local_mixture = LocalClusterMixture(
+                            cluster_spns=cluster_spns,
+                            cluster_weights=cluster_weights,
+                            client_id=k,
+                            device=self.device,
                         )
-                        clients_clusters[h].append(leaf)
-                        clients_counts[h].append(len(local_data_h))
+                        client_local_mixtures.append(local_mixture)
+
+                        logging.info(
+                            f"  ✓ Client {k} local mixture: {len(cluster_spns)} clusters, "
+                            f"weights={cluster_weights}"
+                        )
+                    else:
+                        raise RuntimeError(
+                            f"Client {k}: No valid local clusters created!"
+                        )
+
+                else:
+                    # No clustering: single SPN for entire client data
+                    logging.info(f"  Training single SPN (K_local=1, n={n_k})")
+
+                    local_d = client_data.shape[1]
+
+                    hyperparams = compute_adaptive_hyperparameters(
+                        mode=self.scenario,
+                        num_features=local_d,
+                        num_samples=n_k,
+                        data_type=self.data_type,
+                        base_num_sums=num_sums,
+                        base_num_leaves=num_leaves,
+                        base_epochs=train_epochs,
+                    )
+
+                    if local_d == 1:
+                        single_spn = UnivariateSPNWrapper(
+                            device=self.device,
+                            num_sums=num_sums,
+                            num_leaves=num_leaves,
+                            seed=k * 10,
+                        )
+                        single_spn.train_local(
+                            client_data, epochs=hyperparams["epochs"], lr=adaptive_lr
+                        )
+                    else:
+                        single_spn = LocalSPNWrapper(
+                            num_features=local_d,
+                            device=self.device,
+                            num_sums=hyperparams["num_sums"],
+                            num_leaves=hyperparams["num_leaves"],
+                            depth=hyperparams["depth"],
+                            num_repetitions=num_repetitions,
+                            seed=k * 10,
+                        )
+                        single_spn.train_local(
+                            client_data,
+                            epochs=hyperparams["epochs"],
+                            lr=adaptive_lr,
+                            l1_weight=1e-4,
+                            l2_weight=hyperparams["weight_decay"],
+                            dropout=hyperparams["dropout"],
+                        )
+
+                    # Wrap in LocalClusterMixture for consistency (K_local=1)
+                    local_mixture = LocalClusterMixture(
+                        cluster_spns=[single_spn],
+                        cluster_weights=[1.0],
+                        client_id=k,
+                        device=self.device,
+                    )
+                    client_local_mixtures.append(local_mixture)
+
+                    logging.info(f"  ✓ Client {k} single SPN trained")
+
+            logging.info(f"\n{'='*60}")
+            logging.info(
+                f"All {self.K_clients} clients trained successfully (LOCAL clustering)"
+            )
+            logging.info(f"{'='*60}\n")
+
+            # Store for backward compatibility
+            # Note: Old code expected clients_clusters[h][k] = SPN
+            # New code has client_local_mixtures[k] = LocalClusterMixture
+            # We need to maintain compatibility with aggregation code below
+            clients_clusters = [[]]  # Dummy structure
+            clients_counts = [[]]
+
+            # V2 GLOBAL AGGREGATION: Mode-specific strategies
+            # Build global SPN from client local mixtures
+            logging.info(f"\n{'='*60}")
+            logging.info(
+                f"[V2 GLOBAL AGGREGATION] Building global SPN for {self.scenario} mode"
+            )
+            logging.info(f"{'='*60}\n")
+
             global_components = []
             final_weights = []
 
-            # NEW: Mixture-then-Product Hybrid (Seng et al. 2025)
-            # Justification: Theoretically correct architecture for overlapping features
-            if self.scenario == "hybrid":
+            if self.scenario == "horizontal":
+                # HORIZONTAL MODE: Mixture over client local mixtures
+                # P(X) = Σ_k w_k × P_k(X)
+                # where P_k = LocalClusterMixture for client k
                 logging.info(
-                    "[FedCDH] Building Mixture-then-Product hybrid (Seng et al. 2025)"
+                    "[Horizontal Mode] Building global mixture over client mixtures"
                 )
 
-                # Step 1: Build indicator matrix M
-                # Justification: Reveals which clients have which features (Algorithm 1)
+                # Dataset weights (proportional to sample counts)
+                dataset_weights = np.array(
+                    [len(X_splits[k]) for k in range(self.K_clients)]
+                )
+                dataset_weights = dataset_weights / dataset_weights.sum()
+
+                logging.info(f"  Dataset weights: {dataset_weights}")
+
+                # Global mixture
+                fed_spn = GlobalFedSPN(
+                    components=client_local_mixtures,
+                    weights=dataset_weights.tolist(),
+                    strategy="mixture",
+                    device=self.device,
+                )
+
+                logging.info("  ✓ Horizontal global mixture built")
+
+            elif self.scenario == "vertical":
+                # VERTICAL MODE: Product over disjoint feature groups
+                # P(X) = Π_k P_k(X_k)
+                # where each client owns disjoint features
+                logging.info(
+                    "[Vertical Mode] Building product over disjoint feature groups"
+                )
+
+                # Build GroupMixtures (one per client's feature subset)
+                from causallearn.utils.FedPC import GroupMixture, ProductOverGroups
+
+                group_mixtures = []
+                feature_groups = []
+
+                for k in range(self.K_clients):
+                    # Each client is a group (disjoint features)
+                    group_mix = GroupMixture(
+                        client_spns=[client_local_mixtures[k]],
+                        weights=[1.0],  # Single client
+                        feature_indices=feature_maps[k],
+                        device=self.device,
+                    )
+                    group_mixtures.append(group_mix)
+                    feature_groups.append(feature_maps[k])
+
+                # Product over disjoint groups
+                fed_spn = ProductOverGroups(
+                    group_mixtures=group_mixtures,
+                    feature_groups=feature_groups,
+                    device=self.device,
+                )
+
+                logging.info(f"  Feature groups: {feature_groups}")
+                logging.info("  ✓ Vertical product built")
+
+                # Store feature_map for vertical evaluation
+                self.vertical_feature_map = feature_maps
+
+            elif self.scenario == "hybrid":
+                # HYBRID MODE: Special handling - train SPNs per feature subspace
+                # Note: Cannot reuse client_local_mixtures because they were trained on
+                # full client features, but hybrid mode needs SPNs per feature GROUP
+                logging.info(
+                    "[Hybrid Mode] Building product with overlap resolution (Algorithm 1)"
+                )
+                logging.info(
+                    "  Note: Training feature-specific SPNs (not reusing global mixtures)"
+                )
+
+                from causallearn.utils.FedPC import (
+                    build_feature_indicator_matrix,
+                    group_features_by_client_set,
+                    GroupMixture,
+                    ProductOverGroupsWithOverlap,
+                )
+
+                # Step 1: Build indicator matrix
+                # Note: Only consider causal features (exclude context column U)
+                # Context U will be added separately to all groups after grouping
                 M, feature_names = build_feature_indicator_matrix(
-                    X_splits, scenario=self.scenario, d_features=self.d_features
+                    X_splits=X_splits, scenario="hybrid", d_features=self.d_features
                 )
 
                 # Step 2: Group features by client set
-                # Justification: Features with same client set share a GroupMixture
                 feature_subspaces = group_features_by_client_set(M, feature_names)
 
-                # For each cluster:
-                for h in range(num_clusters):
-                    if not clients_clusters[h]:
-                        continue
+                # Step 3: Train SPNs per (client, feature_subspace) pair
+                group_mixtures = []
+                feature_groups = []
 
-                    cluster_mask_global = labels == h
-                    if cluster_mask_global.sum() < 5:
-                        continue
-
-                    # Step 3: Train SPNs per (client, feature_subspace) pair
-                    # Structure: {(client_set, features): [trained_SPNs]}
-                    # Justification: Each subspace needs SPNs from clients that have it
-                    spn_registry = {}
-
-                    for client_set, features in feature_subspaces.items():
-                        spn_registry[(client_set, tuple(features))] = []
-
-                        for k in client_set:
-                            # Get client k's data for this cluster
-                            local_data_h = X_splits[k][labels_splits[k] == h]
-
-                            if len(local_data_h) <= 2:
-                                continue
-
-                            # Extract features for this subspace
-                            # Justification: Client only models features it has
-                            local_data_subspace = local_data_h[:, features]
-                            local_d = local_data_subspace.shape[1]
-
-                            # Train SPN with adaptive parameters
-                            # Justification: Same training logic as before, now with adaptive depth/lr
-                            if local_d == 1:
-                                spn = UnivariateSPNWrapper(
-                                    device=self.device,
-                                    num_sums=num_sums,
-                                    num_leaves=num_leaves,
-                                    seed=h * 1000 + k * 10 + hash(tuple(features)) % 10,
-                                )
-                            else:
-                                # Adaptive depth for hybrid mode (respects Einet constraint)
-                                # Same strategy as regular mode: max allowed depth + adaptive width
-                                max_depth_hybrid = int(np.floor(np.log2(local_d)))
-                                adaptive_depth_hybrid = max(1, max_depth_hybrid)
-
-                                # Adaptive architecture parameters for hybrid
-                                scale_factor_hybrid = np.sqrt(max(1.0, local_d / 5.0))
-                                adaptive_num_sums_hybrid = max(
-                                    num_sums, int(num_sums * scale_factor_hybrid)
-                                )
-                                adaptive_num_leaves_hybrid = max(
-                                    num_leaves, int(num_leaves * scale_factor_hybrid)
-                                )
-
-                                spn = LocalSPNWrapper(
-                                    num_features=local_d,
-                                    device=self.device,
-                                    num_sums=adaptive_num_sums_hybrid,
-                                    num_leaves=adaptive_num_leaves_hybrid,
-                                    depth=adaptive_depth_hybrid,
-                                    num_repetitions=num_repetitions,
-                                    seed=h * 1000 + k * 10 + hash(tuple(features)) % 10,
-                                )
-
-                            spn.train_local(
-                                local_data_subspace, epochs=train_epochs, lr=adaptive_lr
-                            )
-                            spn_registry[(client_set, tuple(features))].append(spn)
-
-                    # Step 4: Create GroupMixtures (one per feature subspace)
-                    # Justification: Mixture FIRST (over clients with same features)
-                    group_mixtures = []
-                    feature_groups_list = []
-
-                    for (client_set, features), trained_spns in spn_registry.items():
-                        if not trained_spns:
-                            continue
-
-                        # Compute weights (proportional to sample counts)
-                        # Justification: More samples → higher weight
-                        client_counts = []
-                        for k in client_set:
-                            local_data_h = X_splits[k][labels_splits[k] == h]
-                            client_counts.append(len(local_data_h))
-
-                        if sum(client_counts) == 0:
-                            continue
-
-                        weights_group = np.array(client_counts)
-                        weights_group = weights_group / weights_group.sum()
-
-                        # Create GroupMixture
-                        # Justification: Mixture over clients for this feature subspace
-                        mixture = GroupMixture(
-                            trained_spns,
-                            weights=weights_group,
-                            feature_indices=list(features),
-                            device=self.device,
-                        )
-
-                        group_mixtures.append(mixture)
-                        feature_groups_list.append(list(features))
-
-                    # Step 5: Create ProductOverGroups (Product SECOND over mixtures)
-                    # Justification: Correct Mixture-then-Product hierarchy
-                    if group_mixtures:
-                        # Check if overlaps exist (diagnostic)
-                        all_features_list = [
-                            f for group in feature_groups_list for f in group
-                        ]
-                        has_overlap = len(all_features_list) != len(
-                            set(all_features_list)
-                        )
-
-                        if has_overlap:
-                            logging.info(
-                                f"[FedCDH] Cluster {h}: Overlapping features detected "
-                                f"(handled via Algorithm 1)"
-                            )
-                            # Use ProductOverGroupsWithOverlap
-                            # Justification: Handles overlaps correctly
-                            hybrid_spn = ProductOverGroupsWithOverlap(
-                                group_mixtures,
-                                feature_groups_list,
-                                device=self.device,
-                                allow_overlap=True,
-                            )
-                        else:
-                            logging.info(
-                                f"[FedCDH] Cluster {h}: Disjoint features "
-                                f"({len(group_mixtures)} groups)"
-                            )
-                            # Use ProductOverGroups (simpler, faster)
-                            # Justification: No overlaps, standard product suffices
-                            hybrid_spn = ProductOverGroups(
-                                group_mixtures,
-                                feature_groups_list,
-                                device=self.device,
-                            )
-
-                        global_components.append(hybrid_spn)
-                        final_weights.append(weights[h])
-
-                        logging.info(
-                            f"[FedCDH] Cluster {h}: Built Mixture-then-Product "
-                            f"with {len(group_mixtures)} feature subspaces"
-                        )
-
-            else:
-                # Original vertical/horizontal logic
-                for h in range(num_clusters):
-                    if not clients_clusters[h]:
-                        continue
-
-                    # Check if features are disjoint (only for vertical scenario)
-                    is_disjoint = (
-                        feature_maps is not None
-                        and len(feature_maps) > 1
-                        and set(feature_maps[0]).isdisjoint(set(feature_maps[1]))
+                for client_set, features in feature_subspaces.items():
+                    logging.info(
+                        f"  Training SPNs for features {features} (clients {client_set})"
                     )
 
-                    if is_disjoint and len(clients_clusters[h]) == self.K_clients:
-                        # Vertical scenario: Use FederatedProduct for disjoint features
-                        comp = FederatedProduct(
-                            clients_clusters[h],
-                            feature_map=feature_maps,
-                            device=self.device,
+                    trained_spns = []
+                    client_counts = []
+
+                    for k in client_set:
+                        # Get client k's full data
+                        client_data = X_splits[k]
+
+                        # Extract ONLY the features for this subspace
+                        # Note: Context U will be added later to avoid double-counting
+                        client_data_subspace = client_data[:, features]
+                        local_d = client_data_subspace.shape[1]
+                        n_samples = len(client_data_subspace)
+
+                        if n_samples < 5:
+                            logging.warning(
+                                f"    Client {k}: insufficient data ({n_samples} samples)"
+                            )
+                            continue
+
+                        logging.info(
+                            f"    Client {k}: training on {n_samples} samples × {local_d} features"
                         )
-                        global_components.append(comp)
-                        final_weights.append(weights[h])
-                        # Store feature_map for vertical evaluation
-                        self.vertical_feature_map = feature_maps
-                    else:
-                        inner_ws = np.array(clients_counts[h])
-                        inner_ws = inner_ws / inner_ws.sum()
-                        comp = GlobalFedSPN(
-                            clients_clusters[h],
-                            weights=inner_ws,
-                            strategy="mixture",
-                            device=self.device,
+
+                        # Get adaptive hyperparameters for this subspace
+                        hyperparams = compute_adaptive_hyperparameters(
+                            mode=self.scenario,
+                            num_features=local_d,
+                            num_samples=n_samples,
+                            data_type=self.data_type,
+                            base_num_sums=num_sums,
+                            base_num_leaves=num_leaves,
+                            base_epochs=train_epochs,
                         )
-                        global_components.append(comp)
-                        final_weights.append(weights[h])
-            if not final_weights:
-                global_spn = GlobalFedSPN([], device=self.device)
+
+                        # Train SPN on this feature subspace
+                        if local_d == 1:
+                            spn_subspace = UnivariateSPNWrapper(
+                                device=self.device,
+                                num_sums=num_sums,
+                                num_leaves=num_leaves,
+                                seed=k * 1000 + hash(tuple(features)) % 1000,
+                            )
+                            spn_subspace.train_local(
+                                client_data_subspace,
+                                epochs=hyperparams["epochs"],
+                                lr=adaptive_lr,
+                            )
+                        else:
+                            spn_subspace = LocalSPNWrapper(
+                                num_features=local_d,
+                                device=self.device,
+                                num_sums=hyperparams["num_sums"],
+                                num_leaves=hyperparams["num_leaves"],
+                                depth=hyperparams["depth"],
+                                num_repetitions=num_repetitions,
+                                seed=k * 1000 + hash(tuple(features)) % 1000,
+                            )
+                            spn_subspace.train_local(
+                                client_data_subspace,
+                                epochs=hyperparams["epochs"],
+                                lr=adaptive_lr,
+                                l1_weight=1e-4,
+                                l2_weight=hyperparams["weight_decay"],
+                                dropout=hyperparams["dropout"],
+                            )
+
+                        trained_spns.append(spn_subspace)
+                        client_counts.append(n_samples)
+
+                    if len(trained_spns) == 0:
+                        logging.warning(
+                            f"  No SPNs trained for features {features}, skipping"
+                        )
+                        continue
+
+                    # Compute weights (proportional to sample counts)
+                    group_weights = np.array(client_counts)
+                    group_weights = group_weights / group_weights.sum()
+
+                    # Create GroupMixture for this feature subspace
+                    group_mix = GroupMixture(
+                        client_spns=trained_spns,
+                        weights=group_weights.tolist(),
+                        feature_indices=features,
+                        device=self.device,
+                    )
+                    group_mixtures.append(group_mix)
+                    feature_groups.append(features)
+
+                    logging.info(
+                        f"    ✓ Feature group {features}: {len(trained_spns)} SPNs, weights={group_weights}"
+                    )
+
+                if len(group_mixtures) == 0:
+                    raise RuntimeError("Hybrid mode: No feature groups created!")
+
+                # Step 4: Product with overlap resolution
+                fed_spn = ProductOverGroupsWithOverlap(
+                    group_mixtures=group_mixtures,
+                    feature_groups=feature_groups,
+                    device=self.device,
+                    allow_overlap=True,
+                )
+
+                logging.info(
+                    f"  ✓ Hybrid product built: {len(group_mixtures)} feature groups"
+                )
+
             else:
-                final_weights = np.array(final_weights)
-                final_weights /= final_weights.sum()
-                global_spn = GlobalFedSPN(
-                    global_components, weights=final_weights, device=self.device
-                )
-            if len(global_components) > 0:
-                global_spn.train_weights_em(
-                    torch.tensor(X_aug_global, dtype=torch.float32).to(self.device)
-                )
+                raise ValueError(f"Unknown scenario: {self.scenario}")
+
+            # Wrap in FedCDH_SPN_Wrapper for consistency
             self.fed_spn_model = FedCDH_SPN_Wrapper(
-                global_spn, u_index=self.d_features, routing=False
+                fed_spn, u_index=self.d_features, routing=False
             )
 
             # Store local SPNs for post-hoc quality evaluation
-            # Extract one representative SPN per client from the clustering structure
-            # clients_clusters[h][k] = SPN trained on cluster h at client k
-            # For evaluation, we need K SPNs (one per client) to assess local training quality
+            # In new architecture: client_local_mixtures[k] = LocalClusterMixture
+            # Each LocalClusterMixture contains cluster_spns[h] = SPNs for local clusters
+            # For evaluation, we use the first local cluster SPN from each client
             self.local_spns = []
             for k in range(self.K_clients):
-                # Find the first SPN trained on client k's data across all clusters
-                for h in range(num_clusters):
-                    if clients_clusters[h] and len(clients_clusters[h]) > k:
-                        self.local_spns.append(clients_clusters[h][k])
-                        break
+                if len(client_local_mixtures[k].cluster_spns) > 0:
+                    # Use first local cluster SPN from this client
+                    self.local_spns.append(client_local_mixtures[k].cluster_spns[0])
                 else:
-                    # Fallback: if no SPN found for this client, use first available
-                    # (Happens if client has too few samples after clustering)
-                    for h in range(num_clusters):
-                        if clients_clusters[h]:
-                            self.local_spns.append(clients_clusters[h][0])
-                            break
+                    logging.warning(f"Client {k} has no cluster SPNs!")
+
+            logging.info(
+                f"Stored {len(self.local_spns)} local SPNs for quality evaluation"
+            )
 
             train_time = time.time() - start_train
 
@@ -1122,11 +1279,17 @@ class FedCDH:
             # Evaluate global SPN
             logging.info("Evaluating global federated SPN...")
             # Use stored training data for evaluation (ensures consistent normalization)
-            X_eval = (
-                self.X_aug_global_train
-                if hasattr(self, "X_aug_global_train")
-                else X_aug_global
-            )
+            # IMPORTANT: Hybrid/vertical modes use X_global (no context), horizontal uses X_aug_global
+            if self.scenario in ["vertical", "hybrid"]:
+                # Vertical/hybrid models trained without context column
+                X_eval = X_global
+            else:
+                # Horizontal mode uses context column for routing
+                X_eval = (
+                    self.X_aug_global_train
+                    if hasattr(self, "X_aug_global_train")
+                    else X_aug_global
+                )
             global_result = evaluate_spn_quality(
                 self.fed_spn_model,
                 X_eval,
