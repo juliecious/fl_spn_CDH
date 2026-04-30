@@ -977,6 +977,13 @@ class GroupMixture(nn.Module):
 
         Reference: Seng et al. (2025), Definition 1 (Horizontal FL mixture)
         """
+        # BUGFIX: Handle context column if present
+        # In hybrid mode with horizontal-style context column, input may be [batch, d+1]
+        # where last column is context. Strip it before processing.
+        if self.full_d is not None and x.shape[1] > self.full_d:
+            # Context column detected (e.g., x is [batch, 9] but full_d=8)
+            x = x[:, : self.full_d]  # Strip context column → [batch, 8]
+
         # Step 1: Extract features for this group
         # Justification: Each group only models its subset of features
         # If full_d is set, use NaN masking instead of extraction
