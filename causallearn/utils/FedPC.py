@@ -1080,7 +1080,20 @@ class GroupMixture(nn.Module):
         samples_list = []
         for comp_idx, count in zip(unique_comps, counts):
             spn = self.client_spns[comp_idx.item()]
-            comp_samples = spn.sample(count.item())  # [count, len(feature_indices)]
+            comp_samples = spn.sample(
+                count.item()
+            )  # May be [count, d_full] if full SPN
+
+            # BUGFIX: If SPN returns full-dimensional samples, extract only relevant features
+            # This happens in vertical mode where SPNs are trained on feature subsets
+            # but still represent full d-dimensional distribution
+            if self.full_d is not None and comp_samples.shape[1] > len(
+                self.feature_indices
+            ):
+                # Extract only the features for this group
+                comp_samples = comp_samples[
+                    :, self.feature_indices
+                ]  # [count, len(feature_indices)]
 
             # Ensure 2D shape
             if comp_samples.ndim == 1:
@@ -1288,11 +1301,45 @@ class ProductOverGroups(nn.Module):
         # Justification: Product means groups are independent
         for g, mixture_g in enumerate(self.group_mixtures):
             # Sample from this group's mixture
-            group_samples = mixture_g.sample(n)  # [n, d_g]
+            group_samples = mixture_g.sample(n)  # Should be [n, len(indices)]
 
             # Place samples in correct feature positions
             # Justification: Each group models specific features (stored in feature_groups)
             indices = self.feature_groups[g]
+
+            # BUGFIX: Double-check dimensions and extract if needed (defense in depth)
+            # This handles cases where GroupMixture.sample() doesn't properly extract features
+            expected_cols = len(indices)
+            if group_samples.ndim == 1:
+                group_samples = group_samples.view(n, 1)
+
+            actual_cols = group_samples.shape[1]
+
+            if actual_cols != expected_cols:
+                # Shape mismatch - try to fix it
+                if actual_cols > expected_cols:
+                    # Too many columns - extract only the ones we need
+                    # This happens if GroupMixture returns full-dimensional samples
+                    if actual_cols == self.num_features:
+                        # Full-dimensional samples - extract using indices
+                        group_samples = group_samples[:, indices]
+                    else:
+                        # Partial but wrong size - take first N columns as fallback
+                        group_samples = group_samples[:, :expected_cols]
+                else:
+                    # Too few columns - this is a real error
+                    raise ValueError(
+                        f"ProductOverGroups.sample(): Group {g} returned {actual_cols} columns "
+                        f"but expected {expected_cols} for indices {indices}. "
+                        f"group_samples shape={group_samples.shape}, indices={indices}"
+                    )
+
+            # Validate dimensions one more time before assignment
+            assert group_samples.shape == (
+                n,
+                expected_cols,
+            ), f"Shape mismatch after extraction: {group_samples.shape} != ({n}, {expected_cols})"
+
             samples[:, indices] = group_samples
 
         return samples  # [n, d]

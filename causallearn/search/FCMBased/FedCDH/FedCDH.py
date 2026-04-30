@@ -993,6 +993,61 @@ class FedCDH:
             train_time = time.time() - start_train
 
         # ============================================================
+        # Create Experiment Directory & Logging (ALWAYS)
+        # ============================================================
+        import os
+        from datetime import datetime
+
+        # Create unique output directory for this run (ALWAYS, even if skipping eval)
+        if hasattr(self.args, "spn_eval_dir") and self.args.spn_eval_dir:
+            output_dir = self.args.spn_eval_dir
+        else:
+            # Auto-generate: eval/{timestamp}_{scenario}_{K}clients_{d}vars_{n}samples/
+            timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
+            run_id = f"{timestamp}_{self.scenario}_{self.K_clients}clients_{self.d_features}vars_{total_samples}samples"
+
+            # Get project root (3 levels up from FedCDH.py)
+            current_file = os.path.abspath(__file__)
+            project_root = os.path.dirname(
+                os.path.dirname(
+                    os.path.dirname(os.path.dirname(os.path.dirname(current_file)))
+                )
+            )
+            output_dir = os.path.join(project_root, "eval", run_id)
+
+        os.makedirs(output_dir, exist_ok=True)
+        self.spn_eval_dir = output_dir  # Store for access after fit()
+
+        # Setup file logging for this run
+        log_file = os.path.join(output_dir, "run.log")
+        file_handler = logging.FileHandler(log_file, mode="w")
+        file_handler.setLevel(logging.INFO)
+        file_handler.setFormatter(
+            logging.Formatter("%(asctime)s - %(levelname)s - %(message)s")
+        )
+
+        # Get root logger and add file handler
+        root_logger = logging.getLogger()
+        root_logger.addHandler(file_handler)
+        self._log_file_handler = file_handler  # Store to remove later
+
+        # Log run metadata
+        logging.info("=" * 60)
+        logging.info("FedCDH Run Configuration")
+        logging.info("=" * 60)
+        logging.info(f"Scenario: {self.scenario}")
+        logging.info(f"Clients (K): {self.K_clients}")
+        logging.info(f"Features (d): {self.d_features}")
+        logging.info(f"Total samples: {total_samples}")
+        logging.info(f"CI method: {self.ci_method}")
+        logging.info(f"Alpha: {getattr(self.args, 'alpha', 0.05)}")
+        logging.info(f"Device: {self.device}")
+        logging.info(f"Model type: {self.model_type}")
+        logging.info(f"SPN epochs: {getattr(self.args, 'epochs', 'N/A')}")
+        logging.info(f"Output directory: {output_dir}")
+        logging.info("=" * 60 + "\n")
+
+        # ============================================================
         # SPN Quality Evaluation (MMD, KS tests, UMAP visualization)
         # ============================================================
         # Skip expensive evaluation if skip_spn_eval flag is set (for faster validation tests)
@@ -1003,61 +1058,10 @@ class FedCDH:
                 log_spn_quality,
                 create_umap_visualization,
             )
-            import os
-            from datetime import datetime
 
             logging.info("\n" + "=" * 60)
             logging.info("SPN Quality Evaluation")
             logging.info("=" * 60)
-
-            # Create unique output directory for this run
-            if hasattr(self.args, "spn_eval_dir") and self.args.spn_eval_dir:
-                output_dir = self.args.spn_eval_dir
-            else:
-                # Auto-generate: eval/{timestamp}_{scenario}_{K}clients_{d}vars_{n}samples/
-                timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
-                run_id = f"{timestamp}_{self.scenario}_{self.K_clients}clients_{self.d_features}vars_{total_samples}samples"
-
-                # Get project root (3 levels up from FedCDH.py)
-                current_file = os.path.abspath(__file__)
-                project_root = os.path.dirname(
-                    os.path.dirname(
-                        os.path.dirname(os.path.dirname(os.path.dirname(current_file)))
-                    )
-                )
-                output_dir = os.path.join(project_root, "eval", run_id)
-
-            os.makedirs(output_dir, exist_ok=True)
-            self.spn_eval_dir = output_dir  # Store for access after fit()
-
-            # Setup file logging for this run
-            log_file = os.path.join(output_dir, "run.log")
-            file_handler = logging.FileHandler(log_file, mode="w")
-            file_handler.setLevel(logging.INFO)
-            file_handler.setFormatter(
-                logging.Formatter("%(asctime)s - %(levelname)s - %(message)s")
-            )
-
-            # Get root logger and add file handler
-            root_logger = logging.getLogger()
-            root_logger.addHandler(file_handler)
-            self._log_file_handler = file_handler  # Store to remove later
-
-            # Log run metadata
-            logging.info("=" * 60)
-            logging.info("FedCDH Run Configuration")
-            logging.info("=" * 60)
-            logging.info(f"Scenario: {self.scenario}")
-            logging.info(f"Clients (K): {self.K_clients}")
-            logging.info(f"Features (d): {self.d_features}")
-            logging.info(f"Total samples: {total_samples}")
-            logging.info(f"CI method: {self.ci_method}")
-            logging.info(f"Alpha: {getattr(self.args, 'alpha', 0.05)}")
-            logging.info(f"Device: {self.device}")
-            logging.info(f"Model type: {self.model_type}")
-            logging.info(f"SPN epochs: {getattr(self.args, 'epochs', 'N/A')}")
-            logging.info(f"Output directory: {output_dir}")
-            logging.info("=" * 60 + "\n")
 
             # Evaluate local SPNs
             local_eval_results = []  # Collect results for dashboard

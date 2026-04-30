@@ -842,6 +842,24 @@ class SPN_CIT(CIT_Base):
         score_obs = np.mean(np.maximum(0.0, ll_xyz - (ll_xz + ll_yz - ll_z)))
         stat_obs = 2.0 * self._n_samples * score_obs
 
+        # DEBUG: Log first few CI tests to understand what's happening
+        if not hasattr(self, "_debug_logged_ci_tests"):
+            self._debug_logged_ci_tests = 0
+        if self._debug_logged_ci_tests < 5:
+            import logging
+
+            logging.info(
+                f"[DEBUG CI Test #{self._debug_logged_ci_tests}] X={X}, Y={Y}, Z={Z}"
+            )
+            logging.info(
+                f"  ll_xyz mean={np.mean(ll_xyz):.3f}, ll_xz mean={np.mean(ll_xz):.3f}"
+            )
+            logging.info(
+                f"  ll_yz mean={np.mean(ll_yz):.3f}, ll_z mean={np.mean(ll_z):.3f}"
+            )
+            logging.info(f"  score_obs={score_obs:.6f}, stat_obs={stat_obs:.3f}")
+            self._debug_logged_ci_tests += 1
+
         # 2. Permutation Test (Correct way to calculate p-value for SPN)
         if self.num_permutations > 0:
             null_stats = []
@@ -882,6 +900,18 @@ class SPN_CIT(CIT_Base):
             # Fallback to analytic Chi2 (Only if user explicitly sets perms=0)
             # Warning: df=1 is often incorrect for continuous/mixed SPNs
             p_value = chi2.sf(max(0.0, stat_obs), df=1)
+
+        # DEBUG: Log p-value for first few tests
+        if hasattr(self, "_debug_logged_ci_tests") and self._debug_logged_ci_tests <= 5:
+            import logging
+
+            logging.info(
+                f"  p_value={p_value:.6f}, reject H0 (dependent)={p_value < 0.05}"
+            )
+            if p_value < 0.05:
+                logging.info(f"  → DEPENDENT: {X} ⊥̸ {Y} | {Z}")
+            else:
+                logging.info(f"  → INDEPENDENT: {X} ⊥ {Y} | {Z}")
 
         # If using ranking mode, collect result for later percentile-based decision
         if self.use_ranking and self.ranking_tracker is not None:
