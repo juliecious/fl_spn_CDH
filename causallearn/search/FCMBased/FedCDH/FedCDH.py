@@ -836,14 +836,13 @@ class FedCDH:
                 self.vertical_feature_map = feature_maps
 
             elif self.scenario == "hybrid":
-                # HYBRID MODE: Special handling - train SPNs per feature subspace
-                # Note: Cannot reuse client_local_mixtures because they were trained on
-                # full client features, but hybrid mode needs SPNs per feature GROUP
+                # HYBRID MODE: Sum-over-products with cluster combinations
+                # Implements Seng's fix: "sum nodes on top of the products that group these clusters"
                 logging.info(
-                    "[Hybrid Mode] Building product with overlap resolution (Algorithm 1)"
+                    "[Hybrid Mode] Building sum-over-products with cluster combinations (Seng fix)"
                 )
                 logging.info(
-                    "  Note: Training feature-specific SPNs (not reusing global mixtures)"
+                    "  Note: Reusing local cluster SPNs (K_local clusters per client)"
                 )
 
                 from causallearn.utils.FedPC import (
@@ -851,133 +850,118 @@ class FedCDH:
                     group_features_by_client_set,
                     GroupMixture,
                     ProductOverGroupsWithOverlap,
+                    GlobalSumOfProducts,
+                    sample_cluster_combinations,
                 )
 
-                # Step 1: Build indicator matrix
-                # Note: Only consider causal features (exclude context column U)
-                # Context U will be added separately to all groups after grouping
+                # Step 1: Sample cluster combinations
+                # For K=3, K_local=2 → 8 combinations (will enumerate all)
+                combinations, combo_weights = sample_cluster_combinations(
+                    K_clients=self.K_clients,
+                    K_local=K_local,
+                    num_samples=10,  # Will be ignored if enumerating all
+                    seed=42,
+                )
+
+                logging.info(
+                    f"  Building {len(combinations)} products for cluster combinations"
+                )
+
+                # Step 2: Build feature indicator matrix
                 M, feature_names = build_feature_indicator_matrix(
                     X_splits=X_splits, scenario="hybrid", d_features=self.d_features
                 )
 
-                # Step 2: Group features by client set
+                # Step 3: Group features by client set
                 feature_subspaces = group_features_by_client_set(M, feature_names)
 
-                # Step 3: Train SPNs per (client, feature_subspace) pair
-                group_mixtures = []
-                feature_groups = []
+                # Step 4: For each combination, build a product
+                products = []
 
-                for client_set, features in feature_subspaces.items():
+                for combo_idx, cluster_config in enumerate(combinations):
                     logging.info(
-                        f"  Training SPNs for features {features} (clients {client_set})"
+                        f"  Product {combo_idx + 1}/{len(combinations)}: "
+                        f"cluster config={cluster_config}"
                     )
 
-                    trained_spns = []
-                    client_counts = []
+                    # For this cluster configuration, build feature groups
+                    group_mixtures = []
+                    feature_groups = []
 
-                    for k in client_set:
-                        # Get client k's full data
-                        client_data = X_splits[k]
+                    for client_set, features in feature_subspaces.items():
+                        # Collect SPNs from selected clusters for this feature group
+                        cluster_spns_for_group = []
 
-                        # Extract ONLY the features for this subspace
-                        # Note: Context U will be added later to avoid double-counting
-                        client_data_subspace = client_data[:, features]
-                        local_d = client_data_subspace.shape[1]
-                        n_samples = len(client_data_subspace)
+                        for k in client_set:
+                            # Get which cluster to use for client k in this configuration
+                            cluster_idx = cluster_config[k]
 
-                        if n_samples < 5:
+                            # Extract the cluster SPN from LocalClusterMixture
+                            # Note: client_local_mixtures[k] is a LocalClusterMixture
+                            # with K_local cluster SPNs
+                            cluster_spn = client_local_mixtures[k].cluster_spns[
+                                cluster_idx
+                            ]
+
+                            # NOTE: cluster_spn was trained on ALL features for client k
+                            # We rely on NaN masking during inference to handle feature subspaces
+                            # (SPNs already marginalize NaN features correctly via all-NaN detection)
+
+                            cluster_spns_for_group.append(cluster_spn)
+
+                        if len(cluster_spns_for_group) == 0:
                             logging.warning(
-                                f"    Client {k}: insufficient data ({n_samples} samples)"
+                                f"    No SPNs for features {features} in combo {combo_idx}, skipping"
                             )
                             continue
 
-                        logging.info(
-                            f"    Client {k}: training on {n_samples} samples × {local_d} features"
+                        # Uniform weights within group
+                        # Justification: Equal contribution from each client in the group
+                        group_weights = np.ones(len(cluster_spns_for_group))
+                        group_weights = group_weights / group_weights.sum()
+
+                        # Create GroupMixture for this feature subspace
+                        # NOTE: cluster SPNs are full-dimensional (trained on all 8 features)
+                        # so we pass full_d to enable NaN masking
+                        group_mix = GroupMixture(
+                            client_spns=cluster_spns_for_group,
+                            weights=group_weights.tolist(),
+                            feature_indices=features,
+                            device=self.device,
+                            full_d=self.d_features,  # Enable NaN masking for full-d SPNs
+                        )
+                        group_mixtures.append(group_mix)
+                        feature_groups.append(features)
+
+                    if len(group_mixtures) == 0:
+                        raise RuntimeError(
+                            f"Combo {combo_idx}: No feature groups created!"
                         )
 
-                        # Get adaptive hyperparameters for this subspace
-                        hyperparams = compute_adaptive_hyperparameters(
-                            mode=self.scenario,
-                            num_features=local_d,
-                            num_samples=n_samples,
-                            data_type=self.data_type,
-                            base_num_sums=num_sums,
-                            base_num_leaves=num_leaves,
-                            base_epochs=train_epochs,
-                        )
-
-                        # Train SPN on this feature subspace
-                        if local_d == 1:
-                            spn_subspace = UnivariateSPNWrapper(
-                                device=self.device,
-                                num_sums=num_sums,
-                                num_leaves=num_leaves,
-                                seed=k * 1000 + hash(tuple(features)) % 1000,
-                            )
-                            spn_subspace.train_local(
-                                client_data_subspace,
-                                epochs=hyperparams["epochs"],
-                                lr=adaptive_lr,
-                            )
-                        else:
-                            spn_subspace = LocalSPNWrapper(
-                                num_features=local_d,
-                                device=self.device,
-                                num_sums=hyperparams["num_sums"],
-                                num_leaves=hyperparams["num_leaves"],
-                                depth=hyperparams["depth"],
-                                num_repetitions=num_repetitions,
-                                seed=k * 1000 + hash(tuple(features)) % 1000,
-                            )
-                            spn_subspace.train_local(
-                                client_data_subspace,
-                                epochs=hyperparams["epochs"],
-                                lr=adaptive_lr,
-                                l1_weight=1e-4,
-                                l2_weight=hyperparams["weight_decay"],
-                                dropout=hyperparams["dropout"],
-                            )
-
-                        trained_spns.append(spn_subspace)
-                        client_counts.append(n_samples)
-
-                    if len(trained_spns) == 0:
-                        logging.warning(
-                            f"  No SPNs trained for features {features}, skipping"
-                        )
-                        continue
-
-                    # Compute weights (proportional to sample counts)
-                    group_weights = np.array(client_counts)
-                    group_weights = group_weights / group_weights.sum()
-
-                    # Create GroupMixture for this feature subspace
-                    group_mix = GroupMixture(
-                        client_spns=trained_spns,
-                        weights=group_weights.tolist(),
-                        feature_indices=features,
+                    # Build product for this cluster configuration
+                    product = ProductOverGroupsWithOverlap(
+                        group_mixtures=group_mixtures,
+                        feature_groups=feature_groups,
                         device=self.device,
+                        allow_overlap=True,
                     )
-                    group_mixtures.append(group_mix)
-                    feature_groups.append(features)
+                    products.append(product)
 
                     logging.info(
-                        f"    ✓ Feature group {features}: {len(trained_spns)} SPNs, weights={group_weights}"
+                        f"    ✓ Product {combo_idx + 1}: {len(group_mixtures)} feature groups"
                     )
 
-                if len(group_mixtures) == 0:
-                    raise RuntimeError("Hybrid mode: No feature groups created!")
-
-                # Step 4: Product with overlap resolution
-                fed_spn = ProductOverGroupsWithOverlap(
-                    group_mixtures=group_mixtures,
-                    feature_groups=feature_groups,
+                # Step 5: Create global sum over products
+                # This is the KEY FIX: sum breaks independence between feature groups!
+                fed_spn = GlobalSumOfProducts(
+                    products=products,
+                    weights=combo_weights,
                     device=self.device,
-                    allow_overlap=True,
                 )
 
                 logging.info(
-                    f"  ✓ Hybrid product built: {len(group_mixtures)} feature groups"
+                    f"  ✓ Hybrid sum-over-products built: {len(products)} products, "
+                    f"{len(feature_groups)} groups per product"
                 )
 
             else:

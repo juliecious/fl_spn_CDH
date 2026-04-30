@@ -897,6 +897,8 @@ class GroupMixture(nn.Module):
         weights (np.ndarray or List[float]): [K] mixture weights, must sum to 1
         feature_indices (List[int]): Which features (columns) this group models
         device (str): 'cpu' or 'cuda'
+        full_d (int, optional): If SPNs are trained on full dimensionality (not just subspace),
+            pass full_d to enable NaN masking. Default None (SPNs match feature_indices)
 
     Example:
         >>> # Two clients share features [0, 1, 2]
@@ -909,7 +911,9 @@ class GroupMixture(nn.Module):
         >>> log_p = mixture.log_prob(x)  # Extracts x[:, [0,1,2]] internally
     """
 
-    def __init__(self, client_spns, weights, feature_indices, device="cpu"):
+    def __init__(
+        self, client_spns, weights, feature_indices, device="cpu", full_d=None
+    ):
         super().__init__()
 
         # Store client SPNs as ModuleList for proper PyTorch registration
@@ -924,6 +928,7 @@ class GroupMixture(nn.Module):
         # Store feature indices and device
         self.feature_indices = list(feature_indices)
         self.device = device
+        self.full_d = full_d  # If not None, SPNs expect full_d dimensions
 
         # Validation checks
         assert len(self.client_spns) > 0, "Must have at least one client SPN"
@@ -962,7 +967,17 @@ class GroupMixture(nn.Module):
         """
         # Step 1: Extract features for this group
         # Justification: Each group only models its subset of features
-        x_g = x[:, self.feature_indices]  # [batch, len(feature_indices)]
+        # If full_d is set, use NaN masking instead of extraction
+        if self.full_d is not None:
+            # SPNs are trained on full dimensionality - use NaN masking
+            # Create masked version: keep feature_indices, mask others as NaN
+            x_g = torch.full(
+                (x.shape[0], self.full_d), float("nan"), device=x.device, dtype=x.dtype
+            )
+            x_g[:, self.feature_indices] = x[:, self.feature_indices]
+        else:
+            # SPNs trained on subspace - extract features
+            x_g = x[:, self.feature_indices]  # [batch, len(feature_indices)]
 
         # BUGFIX: Handle case when ALL features in this group are NaN
         # When marginalizing over all dimensions in this group: P(∅) = 1 → log(1) = 0
@@ -1535,6 +1550,187 @@ class ProductOverGroupsWithOverlap(nn.Module):
         return total_bytes
 
 
+class GlobalSumOfProducts(nn.Module):
+    """
+    Global sum over multiple product SPNs (sum-over-cluster-combinations).
+
+    Implements Seng's critical structure: "sum nodes on top of the products
+    that group these clusters" (Seng feedback, April 29, 2026).
+
+    Mathematical Form:
+        P(X) = Σ_c w_c × Product_c(X)
+        where Product_c(X) = ∏_g P(X_g | cluster_config_c)
+
+    Key Insight - Why This Breaks Independence:
+        Without sum (current): P(X) = ∏_g P(X_g) → I(X_g1; X_g2) = 0 (always!)
+        With sum (correct):    P(X) = Σ_c w_c × ∏_g P_c(X_g)
+                              → I(X_g1; X_g2) ≠ 0 (can model dependencies!)
+
+        The sum "couples" feature groups through shared cluster assignments:
+        If X_g1 belongs to cluster A, X_g2 is more likely in cluster A too.
+
+    Mathematical Proof of Dependency:
+        P(X, Y) = w1×P(X|A)×P(Y|A) + w2×P(X|B)×P(Y|B)
+        P(X) = w1×P(X|A) + w2×P(X|B)
+        P(Y) = w1×P(Y|A) + w2×P(Y|B)
+
+        P(X)×P(Y) = w1²P(X|A)P(Y|A) + w1w2[P(X|A)P(Y|B) + P(X|B)P(Y|A)] + w2²P(X|B)P(Y|B)
+
+        This differs from P(X,Y) → I(X;Y) ≠ 0
+
+    Analogy to Mixture of Gaussians:
+        - Each Gaussian has diagonal covariance (assumes independence)
+        - But mixture of Gaussians can model correlations!
+        - Same principle: mixture of products can model dependencies
+
+    Args:
+        products (List[ProductOverGroupsWithOverlap]): Multiple product SPNs,
+            each representing a different cluster configuration
+        weights (List[float] or np.ndarray): Mixture weights (must sum to 1)
+        device (str): 'cpu', 'cuda', or 'mps'
+
+    Example:
+        >>> # 3 cluster configurations for K=3 clients, K_local=2
+        >>> # Config 1: (0,0,0) - all clients use cluster 0
+        >>> prod1 = ProductOverGroupsWithOverlap(...)
+        >>> # Config 2: (0,1,1) - client 0 uses cluster 0, others use cluster 1
+        >>> prod2 = ProductOverGroupsWithOverlap(...)
+        >>> # Config 3: (1,0,1)
+        >>> prod3 = ProductOverGroupsWithOverlap(...)
+        >>>
+        >>> # Combine with sum
+        >>> global_sum = GlobalSumOfProducts(
+        ...     products=[prod1, prod2, prod3],
+        ...     weights=[0.4, 0.35, 0.25],
+        ...     device='cpu'
+        ... )
+        >>>
+        >>> # Now cross-group dependencies can be detected!
+        >>> x = torch.randn(100, 8)
+        >>> log_p = global_sum.log_prob(x)
+
+    Reference:
+        Seng feedback (April 29, 2026): "sum nodes on top of the products
+        that group these clusters"
+    """
+
+    def __init__(self, products, weights, device="cpu"):
+        super().__init__()
+
+        self.device = device
+        self.num_products = len(products)
+
+        # Store products as ModuleList for proper PyTorch registration
+        self.products = nn.ModuleList(products)
+
+        # Convert weights to tensor
+        if isinstance(weights, np.ndarray):
+            self.weights = torch.tensor(weights, dtype=torch.float32).to(device)
+        else:
+            self.weights = torch.tensor(list(weights), dtype=torch.float32).to(device)
+
+        # Validation
+        assert len(self.products) > 0, "Must have at least one product"
+        assert len(self.products) == len(
+            self.weights
+        ), f"Mismatched products ({len(self.products)}) and weights ({len(self.weights)})"
+        assert (
+            abs(self.weights.sum().item() - 1.0) < 1e-5
+        ), f"Weights must sum to 1, got {self.weights.sum().item()}"
+
+        logging.info(
+            f"[GlobalSumOfProducts] Created with {self.num_products} products, "
+            f"weights={self.weights.cpu().numpy()}"
+        )
+
+    def log_prob(self, x):
+        """
+        Compute log P(X) = log(Σ_c w_c × Product_c(X)).
+
+        Algorithm:
+            1. For each product c: compute log Product_c(x)
+            2. Combine via logsumexp: log(Σ_c w_c × exp(log Product_c))
+
+        Args:
+            x (Tensor): [batch, d] input data
+
+        Returns:
+            log_prob (Tensor): [batch, 1] log probabilities
+        """
+        # Ensure tensor
+        if not isinstance(x, torch.Tensor):
+            x = torch.tensor(x, dtype=torch.float32).to(self.device)
+
+        # Compute log prob for each product
+        product_lls = []
+        for product in self.products:
+            ll = product.log_prob(x)  # [batch, 1]
+            product_lls.append(ll)
+
+        # Stack: [batch, num_products]
+        ll_stack = torch.cat(product_lls, dim=1)
+
+        # Add log weights: [1, num_products]
+        log_weights = torch.log(self.weights + 1e-9).unsqueeze(0)
+
+        # LogSumExp: log(Σ_c w_c × exp(ll_c))
+        log_prob = torch.logsumexp(ll_stack + log_weights, dim=1, keepdim=True)
+
+        return log_prob
+
+    def sample(self, n_samples):
+        """
+        Sample from the mixture by:
+        1. Sampling which product to use (according to weights)
+        2. Sampling from that product
+
+        Args:
+            n_samples (int): Number of samples to generate
+
+        Returns:
+            samples (Tensor): [n_samples, d] sampled data
+        """
+        with torch.no_grad():
+            # Sample product indices according to mixture weights
+            product_indices = torch.multinomial(
+                self.weights, n_samples, replacement=True
+            )
+
+            # Sample from each product (batched for efficiency)
+            samples = []
+            for idx in range(self.num_products):
+                n_from_this = (product_indices == idx).sum().item()
+                if n_from_this > 0:
+                    samples_from_product = self.products[idx].sample(n_from_this)
+                    samples.append(samples_from_product)
+
+            # Concatenate all samples
+            all_samples = torch.cat(samples, dim=0)
+
+            # Reshuffle to match original sampling order
+            shuffle_back = torch.argsort(torch.argsort(product_indices))
+            all_samples = all_samples[shuffle_back]
+
+            return all_samples
+
+    def get_size_bytes(self):
+        """
+        Estimate memory footprint (sum of all products).
+
+        Returns:
+            size_bytes (int): Total size in bytes
+        """
+        total_bytes = 0
+        for product in self.products:
+            if hasattr(product, "get_size_bytes"):
+                total_bytes += product.get_size_bytes()
+            else:
+                buffer = io.BytesIO()
+                torch.save(product.state_dict(), buffer)
+                total_bytes += buffer.tell()
+        return total_bytes
+
+
 class FederatedProduct(nn.Module):
     """
     Vertical Federated SPN Component.
@@ -2025,6 +2221,86 @@ def group_features_by_client_set(M, feature_names):
         logging.info(f"  Clients {clients} share features {features}")
 
     return feature_subspaces
+
+
+def sample_cluster_combinations(K_clients, K_local, num_samples=10, seed=42):
+    """
+    Sample cluster combinations for sum-over-products in hybrid mode.
+
+    Following Seng's guidance: "combine these clusters 'randomly' (since pairing
+    each cluster from client i with each cluster from client j is too demanding)"
+
+    Strategy:
+        - If K_local^K_clients ≤ 20: Enumerate all combinations (exact)
+        - Otherwise: Randomly sample num_samples combinations (approximate)
+
+    Mathematical Context:
+        Each combination represents a different "factorization" of the data:
+        - Combination (0,0,0): All clients use cluster 0
+        - Combination (0,1,1): Client 0 uses cluster 0, others use cluster 1
+        - etc.
+
+        The sum over these combinations breaks independence between feature groups!
+
+    Args:
+        K_clients (int): Number of clients
+        K_local (int): Number of local clusters per client
+        num_samples (int): How many combinations to sample if not enumerating all
+        seed (int): Random seed for reproducibility
+
+    Returns:
+        combinations (List[Tuple[int]]): List of cluster configurations
+            Each tuple has K_clients elements, specifying which cluster
+            each client contributes to this product
+        weights (np.ndarray): Uniform weights for each combination (sum to 1)
+
+    Example:
+        >>> # For K=3 clients, K_local=2 clusters per client
+        >>> combos, weights = sample_cluster_combinations(3, 2)
+        >>> # Output: 8 combinations (enumerate all since 2^3 = 8 ≤ 20)
+        >>> combos
+        [(0,0,0), (0,0,1), (0,1,0), (0,1,1), (1,0,0), (1,0,1), (1,1,0), (1,1,1)]
+        >>> weights
+        array([0.125, 0.125, 0.125, 0.125, 0.125, 0.125, 0.125, 0.125])
+
+    Reference:
+        Seng feedback (April 29, 2026): "combine these clusters 'randomly'"
+    """
+    np.random.seed(seed)
+
+    max_combinations = K_local**K_clients
+
+    # Decision: Enumerate if small enough, sample if too large
+    if max_combinations <= 20:
+        # Enumerate all combinations
+        import itertools
+
+        combinations = list(itertools.product(range(K_local), repeat=K_clients))
+        logging.info(
+            f"[ClusterCombinations] Enumerating all {len(combinations)} combinations "
+            f"(K_clients={K_clients}, K_local={K_local})"
+        )
+    else:
+        # Random sampling without replacement
+        num_samples = min(num_samples, max_combinations)
+        combinations = set()
+
+        # Sample unique combinations
+        while len(combinations) < num_samples:
+            config = tuple(np.random.randint(0, K_local) for _ in range(K_clients))
+            combinations.add(config)
+
+        combinations = list(combinations)
+        logging.info(
+            f"[ClusterCombinations] Sampled {len(combinations)}/{max_combinations} combinations "
+            f"(K_clients={K_clients}, K_local={K_local})"
+        )
+
+    # Uniform weights (all combinations equally likely)
+    # Justification: Seng mentions "randomly", no principled weighting yet
+    weights = np.ones(len(combinations)) / len(combinations)
+
+    return combinations, weights
 
 
 def compute_adaptive_hyperparameters(
