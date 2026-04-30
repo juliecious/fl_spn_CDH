@@ -1126,6 +1126,10 @@ class FedCDH:
                         pass
                     elif self.scenario == "vertical" and k > 0:
                         X_client_aug = X_client  # No context for clients other than 0
+                    elif self.scenario == "hybrid":
+                        # BUGFIX: Hybrid mode local cluster SPNs don't use context column
+                        # They are trained on raw features only (no context)
+                        X_client_aug = X_client  # No context column
                     else:
                         X_client_aug = np.concatenate([X_client, c_client], axis=1)
 
