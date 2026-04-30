@@ -890,6 +890,8 @@ class FedCDH:
 
                     for client_set, features in feature_subspaces.items():
                         # Collect SPNs from selected clusters for this feature group
+                        # Performance: Pre-allocate list with known size
+                        num_clients_in_group = len(client_set)
                         cluster_spns_for_group = []
 
                         for k in client_set:
@@ -915,17 +917,17 @@ class FedCDH:
                             )
                             continue
 
-                        # Uniform weights within group
+                        # Performance: Uniform weights - compute directly instead of ones/sum
                         # Justification: Equal contribution from each client in the group
-                        group_weights = np.ones(len(cluster_spns_for_group))
-                        group_weights = group_weights / group_weights.sum()
+                        weight_value = 1.0 / num_clients_in_group
+                        group_weights = [weight_value] * num_clients_in_group
 
                         # Create GroupMixture for this feature subspace
                         # NOTE: cluster SPNs are full-dimensional (trained on all 8 features)
                         # so we pass full_d to enable NaN masking
                         group_mix = GroupMixture(
                             client_spns=cluster_spns_for_group,
-                            weights=group_weights.tolist(),
+                            weights=group_weights,  # Already a list, no need to convert
                             feature_indices=features,
                             device=self.device,
                             full_d=self.d_features,  # Enable NaN masking for full-d SPNs

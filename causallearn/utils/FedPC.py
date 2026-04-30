@@ -930,6 +930,18 @@ class GroupMixture(nn.Module):
         self.device = device
         self.full_d = full_d  # If not None, SPNs expect full_d dimensions
 
+        # Performance optimization: Pre-compute log weights (called in every forward pass)
+        self.log_weights = torch.log(self.weights + 1e-9).unsqueeze(0)  # [1, K]
+
+        # Performance optimization: Pre-compute feature mask for NaN tensor creation
+        # This avoids creating the mask on every forward pass
+        if self.full_d is not None:
+            # Create a boolean mask for features NOT in this group
+            self.nan_mask = torch.ones(self.full_d, dtype=torch.bool, device=device)
+            self.nan_mask[self.feature_indices] = False
+        else:
+            self.nan_mask = None
+
         # Validation checks
         assert len(self.client_spns) > 0, "Must have at least one client SPN"
         assert len(self.client_spns) == len(
@@ -969,12 +981,10 @@ class GroupMixture(nn.Module):
         # Justification: Each group only models its subset of features
         # If full_d is set, use NaN masking instead of extraction
         if self.full_d is not None:
-            # SPNs are trained on full dimensionality - use NaN masking
-            # Create masked version: keep feature_indices, mask others as NaN
-            x_g = torch.full(
-                (x.shape[0], self.full_d), float("nan"), device=x.device, dtype=x.dtype
-            )
-            x_g[:, self.feature_indices] = x[:, self.feature_indices]
+            # Performance optimization: Clone and mask instead of full + copy
+            # This is faster for small feature groups (typical case)
+            x_g = x.clone()  # [batch, d]
+            x_g[:, self.nan_mask] = float("nan")  # Mask features not in this group
         else:
             # SPNs trained on subspace - extract features
             x_g = x[:, self.feature_indices]  # [batch, len(feature_indices)]
@@ -993,15 +1003,19 @@ class GroupMixture(nn.Module):
             if (~all_nan_mask).any():
                 x_g_obs = x_g[~all_nan_mask]
 
-                client_lls = []
+                # Performance: Pre-allocate tensor instead of list append
+                ll_stack = torch.empty(
+                    x_g_obs.shape[0],
+                    len(self.client_spns),
+                    device=x.device,
+                    dtype=x.dtype,
+                )
                 for i, spn in enumerate(self.client_spns):
-                    ll = spn.log_prob(x_g_obs)  # [batch_obs, 1]
-                    client_lls.append(ll)
+                    ll_stack[:, i : i + 1] = spn.log_prob(x_g_obs)  # [batch_obs, 1]
 
-                ll_stack = torch.cat(client_lls, dim=1)
-                log_weights = torch.log(self.weights + 1e-9).unsqueeze(0)
+                # Use pre-computed log_weights
                 log_prob_obs = torch.logsumexp(
-                    ll_stack + log_weights, dim=1, keepdim=True
+                    ll_stack + self.log_weights, dim=1, keepdim=True
                 )
 
                 log_prob[~all_nan_mask] = log_prob_obs
@@ -1011,18 +1025,18 @@ class GroupMixture(nn.Module):
         # Step 2: Compute log-likelihoods from each client SPN
         # Justification: Each client contributes its learned distribution
         # NaN marginalization: Delegated to client SPNs (Phase 2)
-        client_lls = []
-        for spn in self.client_spns:
-            ll = spn.log_prob(x_g)  # [batch, 1] - NaN handled internally
-            client_lls.append(ll)
+        # Performance: Pre-allocate tensor instead of list append + cat
+        ll_stack = torch.empty(
+            x_g.shape[0], len(self.client_spns), device=x.device, dtype=x.dtype
+        )
+        for i, spn in enumerate(self.client_spns):
+            ll_stack[:, i : i + 1] = spn.log_prob(x_g)  # [batch, 1]
 
         # Step 3: Stack and compute weighted mixture via logsumexp
         # Justification: Numerically stable computation of log(Σ exp(...))
-        ll_stack = torch.cat(client_lls, dim=1)  # [batch, K]
-        log_weights = torch.log(self.weights + 1e-9).unsqueeze(0)  # [1, K]
-
+        # Performance: Use pre-computed log_weights from __init__
         # log Σ_k [w_k × P_k] = logsumexp(log w_k + log P_k)
-        log_prob = torch.logsumexp(ll_stack + log_weights, dim=1, keepdim=True)
+        log_prob = torch.logsumexp(ll_stack + self.log_weights, dim=1, keepdim=True)
 
         return log_prob  # [batch, 1]
 
@@ -1638,6 +1652,11 @@ class GlobalSumOfProducts(nn.Module):
             abs(self.weights.sum().item() - 1.0) < 1e-5
         ), f"Weights must sum to 1, got {self.weights.sum().item()}"
 
+        # Performance optimization: Pre-compute log weights (used in every forward pass)
+        self.log_weights = torch.log(self.weights + 1e-9).unsqueeze(
+            0
+        )  # [1, num_products]
+
         logging.info(
             f"[GlobalSumOfProducts] Created with {self.num_products} products, "
             f"weights={self.weights.cpu().numpy()}"
@@ -1661,20 +1680,16 @@ class GlobalSumOfProducts(nn.Module):
         if not isinstance(x, torch.Tensor):
             x = torch.tensor(x, dtype=torch.float32).to(self.device)
 
-        # Compute log prob for each product
-        product_lls = []
-        for product in self.products:
-            ll = product.log_prob(x)  # [batch, 1]
-            product_lls.append(ll)
-
-        # Stack: [batch, num_products]
-        ll_stack = torch.cat(product_lls, dim=1)
-
-        # Add log weights: [1, num_products]
-        log_weights = torch.log(self.weights + 1e-9).unsqueeze(0)
+        # Performance: Pre-allocate tensor instead of list append + cat
+        ll_stack = torch.empty(
+            x.shape[0], self.num_products, device=x.device, dtype=x.dtype
+        )
+        for i, product in enumerate(self.products):
+            ll_stack[:, i : i + 1] = product.log_prob(x)  # [batch, 1]
 
         # LogSumExp: log(Σ_c w_c × exp(ll_c))
-        log_prob = torch.logsumexp(ll_stack + log_weights, dim=1, keepdim=True)
+        # Performance: Use pre-computed log_weights from __init__
+        log_prob = torch.logsumexp(ll_stack + self.log_weights, dim=1, keepdim=True)
 
         return log_prob
 
