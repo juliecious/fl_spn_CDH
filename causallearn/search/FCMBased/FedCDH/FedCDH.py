@@ -1293,13 +1293,14 @@ class FedCDH:
             # Evaluate global SPN
             logging.info("Evaluating global federated SPN...")
             # Use stored training data for evaluation (ensures consistent normalization)
-            # IMPORTANT: Hybrid/vertical modes use X_global (no context), horizontal uses X_aug_global
-            if self.scenario in ["vertical", "hybrid"]:
-                # Vertical/hybrid models trained without context column
+            # IMPORTANT: Hybrid mode uses X_global (no context), Horizontal/Vertical use X_aug_global
+            if self.scenario == "hybrid":
+                # Hybrid models trained without context column
                 X_eval = X_global
                 has_context = False  # No context column in data or samples
             else:
-                # Horizontal mode uses context column for routing
+                # Horizontal and Vertical modes use context column
+                # Note: In vertical mode, client 0 SPN is trained with context column U
                 X_eval = (
                     self.X_aug_global_train
                     if hasattr(self, "X_aug_global_train")

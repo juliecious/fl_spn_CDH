@@ -1,4 +1,4 @@
 config,scenario,data_type,seed,d,K,n_total,n_per_client,epochs,device,use_ci_ranking,sparsity_percentile,v2_adaptive,skeleton_f1,skeleton_precision,skeleton_recall,skeleton_shd,dag_f1,dag_precision,dag_recall,dag_shd,train_time,total_time,comm_cost,eval_dir
-small,horizontal,linear,42,8,3,900,300,50,mps,False,,True,0.4444444444444444,0.2857142857142857,1.0,20.0,0.16666666666666666,0.10714285714285714,0.375,25.0,553.3089001178741,553.3160130977631,68.0859375,
-small,vertical,linear,42,8,3,900,900,50,mps,False,,True,0.13333333333333333,0.1428571428571429,0.125,13.0,0.13333333333333333,0.14285714285714285,0.125,13.0,26.782290935516357,26.78432607650757,484.5703125,
-small,hybrid,linear,42,8,3,900,300,50,mps,False,,True,0.0,0.0,0.0,12.0,0.0,0.0,0.0,12.0,58.22769594192505,58.22905111312866,67.3828125,
+quick,horizontal,linear,42,5,2,200,100,20,cpu,False,,True,0.6666666666666666,0.5,1.0,5.0,0.13333333333333333,0.1,0.2,9.0,113.92659282684326,113.93663573265076,41.265625,/Users/M279402/PycharmProjects/fl_spn_CDH/eval/20260501_112329_horizontal_2clients_5vars_200samples
+quick,vertical,linear,42,5,2,200,200,20,cpu,False,,True,0.2222222222222222,0.25,0.2,7.0,0.0,0.0,0.0,8.0,24.443256855010986,24.44438099861145,73.09375,/Users/M279402/PycharmProjects/fl_spn_CDH/eval/20260501_112522_vertical_2clients_5vars_200samples
+quick,hybrid,linear,42,5,2,200,100,20,cpu,False,,True,0.0,0.0,0.0,7.0,0.0,0.0,0.0,7.0,102.32855010032654,102.32963609695435,40.875,/Users/M279402/PycharmProjects/fl_spn_CDH/eval/20260501_112546_hybrid_2clients_5vars_200samples
