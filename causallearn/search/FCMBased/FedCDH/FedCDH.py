@@ -813,11 +813,16 @@ class FedCDH:
 
                 for k in range(self.K_clients):
                     # Each client is a group (disjoint features)
+                    # BUGFIX: Pass full_d to enable feature extraction in GroupMixture.sample()
+                    # In vertical mode, LocalClusterMixture SPNs are trained with NaN masking
+                    # on full d-dimensional space, so they return [n, d] samples
+                    # GroupMixture needs full_d to extract only relevant features
                     group_mix = GroupMixture(
                         client_spns=[client_local_mixtures[k]],
                         weights=[1.0],  # Single client
                         feature_indices=feature_maps[k],
                         device=self.device,
+                        full_d=self.d_features,  # Enable feature extraction for vertical mode
                     )
                     group_mixtures.append(group_mix)
                     feature_groups.append(feature_maps[k])

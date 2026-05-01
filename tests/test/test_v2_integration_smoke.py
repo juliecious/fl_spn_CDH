@@ -14,7 +14,7 @@ import sys
 import os
 
 # Ensure we import from the local codebase
-sys.path.insert(0, os.path.abspath(os.path.join(os.path.dirname(__file__), "..")))
+sys.path.insert(0, os.path.abspath(os.path.join(os.path.dirname(__file__), "../..")))
 
 import numpy as np
 import logging

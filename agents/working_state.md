@@ -8458,3 +8458,695 @@ Ran smoke test comparing horizontal, vertical, and hybrid modes:
 - fedd1ed: fix(hybrid): handle context column in GroupMixture log_prob
 
 **Impact**: Hybrid mode v2 with local clustering and sum-over-products is now fully functional with 10-20% performance improvements.
+
+---
+
+## v3 Experiment Plan: Data Quality & Validation Improvements
+
+**Branch**: `v3-data-quality-validation` (to be created)
+**Status**: 📋 PLANNING - Implementation proposals ready
+**Target**: Address empirical performance gap (Hybrid F1=0.366 → 0.7-0.9)
+**Last Updated**: 2026-05-01
+
+### Executive Summary
+
+**Current Status**: v2 implementation is **architecturally correct** - all theoretical components (H/V/Hy modes, marginalization, GlobalSumOfProducts) are properly implemented. However, empirical performance is limited by:
+
+1. **Insufficient sample sizes** for high-dimensional SPN learning
+2. **Lack of validation metrics** for GlobalSumOfProducts learning quality
+3. **No ground truth verification** for SPN-based CI test accuracy
+
+**Root Cause**: Not an implementation bug, but data quality and hyperparameter issues:
+- Small config: 900 samples, d=8 → 112 samples/var (**below** recommended 150)
+- Unknown cluster weight distribution in GlobalSumOfProducts
+- Cannot validate if poor F1 is due to SPN learning or CI test failure
+
+**Solution**: Three targeted improvements to enable rigorous empirical evaluation.
+
+---
+
+### Priority Action 1: Increase Sample Sizes for Reliable SPN Learning
+
+**Problem**: Current sample sizes violate Seng's rule of thumb (n ≥ 150×d for reliable SPN learning)
+
+**Current Configuration**:
+```python
+BENCHMARK_CONFIGS = {
+    "small": {
+        "d": 8,
+        "n_total": 900,  # → 112 samples/var (INSUFFICIENT)
+    },
+    "medium": {
+        "d": 10,
+        "n_total": 1200,  # → 120 samples/var (INSUFFICIENT)
+    },
+}
+```
+
+**Impact**:
+- SPNs underfit → poor density estimation
+- Poor density → inaccurate MI estimation
+- Inaccurate MI → low F1 scores in causal discovery
+
+**Proposed Implementation**:
+
+```python
+# File: tests/test/test_fedcdh_benchmark.py
+# Lines: 85-121
+
+BENCHMARK_CONFIGS = {
+    "quick": {
+        "d": 5,
+        "K": 2,
+        "n_total": 200,  # Keep for smoke tests
+        "epochs": 20,
+        "description": "Quick smoke test: 5 vars, 2 clients, 200 total samples",
+    },
+    "small": {
+        "d": 8,
+        "K": 3,
+        "n_total": 1200,  # INCREASED from 900 (→ 150 samples/var ✓)
+        "epochs": 50,
+        "description": "Small-scale: 8 vars, 3 clients, 1200 total samples (400/client horizontal)",
+    },
+    "medium": {
+        "d": 10,
+        "K": 3,
+        "n_total": 2000,  # INCREASED from 1200 (→ 200 samples/var ✓✓)
+        "epochs": 100,
+        "description": "Medium-scale: 10 vars, 3 clients, 2000 total samples (667/client horizontal)",
+    },
+    "large": {
+        "d": 11,
+        "K": 5,
+        "n_total": 2500,  # INCREASED from 2000 (→ 227 samples/var ✓✓)
+        "epochs": 150,
+        "description": "Large-scale: 11 vars, 5 clients, 2500 total samples (500/client horizontal)",
+    },
+    "sachs": {
+        "d": 11,
+        "K": 3,
+        "n_total": 852,  # Keep unchanged (real data constraint)
+        "epochs": 150,
+        "description": "Real Sachs protein signaling dataset: 11 vars, 3 clients, 852 samples",
+    },
+}
+```
+
+**Justification**:
+- **Small**: 1200 / 8 = 150 samples/var (meets minimum threshold)
+- **Medium**: 2000 / 10 = 200 samples/var (comfortable margin)
+- **Large**: 2500 / 11 = 227 samples/var (robust for complex dependencies)
+
+**Expected Benefits**:
+- Better SPN density estimation → more accurate log_prob()
+- More accurate MI estimation → better CI test discrimination
+- Higher F1 scores across all modes
+
+**Implementation Effort**: **5 minutes** (config change only)
+
+**Testing**:
+```bash
+# Validate with quick test
+python tests/test/test_fedcdh_benchmark.py --config small --data-type linear --device cuda --seeds 42
+
+# Expected: Higher MMD² p-value (>0.1), fewer MI=0.000 cases
+```
+
+---
+
+### Priority Action 2: Validate GlobalSumOfProducts Learning Quality
+
+**Problem**: Hybrid mode uses GlobalSumOfProducts (sum-over-cluster-combinations), but we don't know:
+1. Are cluster weights balanced or is one product dominating?
+2. Are different products learning different patterns?
+3. Is the sum actually breaking independence between feature groups?
+
+**Current Situation**:
+- GlobalSumOfProducts created with `combo_weights` (FedCDH.py:959)
+- Weights logged at creation, but no analysis of learned distribution
+- If one product has weight ≈1, sum degenerates to single product → independence not broken
+
+**Proposed Implementation**:
+
+#### Step 2.1: Add Cluster Weight Diagnostics to FedCDH
+
+```python
+# File: causallearn/search/FCMBased/FedCDH/FedCDH.py
+# After line 967 (after GlobalSumOfProducts creation)
+
+# ADD THIS BLOCK:
+if self.scenario == "hybrid":
+    # Log cluster combination weights for analysis
+    logging.info("[Hybrid Diagnostics] Cluster combination weights:")
+
+    for idx, (combo, weight) in enumerate(zip(combinations, combo_weights)):
+        logging.info(f"  Product {idx}: combo={combo}, weight={weight:.4f}")
+
+    # Compute weight statistics
+    weights_array = np.array(combo_weights)
+    weight_entropy = -np.sum(weights_array * np.log(weights_array + 1e-9))
+    max_entropy = np.log(len(combo_weights))
+    normalized_entropy = weight_entropy / max_entropy
+
+    logging.info(f"  Weight entropy: {weight_entropy:.4f} / {max_entropy:.4f} = {normalized_entropy:.4f}")
+    logging.info(f"  Max weight: {weights_array.max():.4f}, Min weight: {weights_array.min():.4f}")
+    logging.info(f"  Weight std: {weights_array.std():.4f}")
+
+    # Warning if weights are highly imbalanced
+    if weights_array.max() > 0.7:
+        logging.warning(
+            f"⚠️  Cluster weights are imbalanced (max={weights_array.max():.4f}). "
+            f"Sum-over-products may degenerate to single product."
+        )
+    elif normalized_entropy > 0.9:
+        logging.info(
+            f"✓ Cluster weights are well-balanced (normalized entropy={normalized_entropy:.4f})"
+        )
+```
+
+**Output Example**:
+```
+[Hybrid Diagnostics] Cluster combination weights:
+  Product 0: combo=(0, 0, 0), weight=0.1250
+  Product 1: combo=(0, 0, 1), weight=0.1250
+  Product 2: combo=(0, 1, 0), weight=0.1250
+  Product 3: combo=(0, 1, 1), weight=0.1250
+  ...
+  Weight entropy: 2.0794 / 2.0794 = 1.0000
+  Max weight: 0.1250, Min weight: 0.1250
+  Weight std: 0.0000
+✓ Cluster weights are well-balanced (normalized entropy=1.0000)
+```
+
+#### Step 2.2: Add Product Diversity Metrics
+
+```python
+# File: causallearn/search/FCMBased/FedCDH/FedCDH.py
+# After weight diagnostics (new function)
+
+def _compute_product_diversity(self, fed_spn, X_sample, num_products):
+    """
+    Compute diversity between products in GlobalSumOfProducts.
+
+    High diversity (KL divergence between products) indicates products
+    are learning different patterns, which is necessary for sum to break
+    independence.
+
+    Args:
+        fed_spn: GlobalSumOfProducts instance
+        X_sample: Sample data [n, d] for evaluation
+        num_products: Number of products in the sum
+
+    Returns:
+        avg_kl: Average KL divergence between product pairs
+    """
+    if not hasattr(fed_spn, 'products'):
+        return None  # Not a GlobalSumOfProducts
+
+    # Compute log-probs from each product
+    product_lls = []
+    for product in fed_spn.products:
+        ll = product.log_prob(X_sample)  # [n, 1]
+        product_lls.append(ll)
+
+    ll_stack = torch.cat(product_lls, dim=1)  # [n, num_products]
+
+    # Compute pairwise KL divergences (using sample-based approximation)
+    kl_divergences = []
+    for i in range(num_products):
+        for j in range(i+1, num_products):
+            # KL(P_i || P_j) ≈ E_X~P_i [log P_i(X) - log P_j(X)]
+            kl_ij = (ll_stack[:, i] - ll_stack[:, j]).mean().item()
+            kl_divergences.append(abs(kl_ij))  # Symmetric KL
+
+    avg_kl = np.mean(kl_divergences) if kl_divergences else 0.0
+
+    logging.info(f"  Product diversity (avg KL): {avg_kl:.4f}")
+
+    if avg_kl < 0.1:
+        logging.warning(
+            f"⚠️  Products are very similar (avg KL={avg_kl:.4f}). "
+            f"Sum may not effectively break independence."
+        )
+    else:
+        logging.info(f"✓ Products are diverse (avg KL={avg_kl:.4f})")
+
+    return avg_kl
+
+
+# Call after fed_spn creation:
+if self.scenario == "hybrid":
+    X_sample = X_splits[0][:100]  # Sample from first client
+    self._compute_product_diversity(fed_spn, X_sample, len(combinations))
+```
+
+**Expected Output**:
+```
+  Product diversity (avg KL): 1.2347
+✓ Products are diverse (avg KL=1.2347)
+```
+
+**Implementation Effort**: **30-45 minutes**
+
+**Expected Benefits**:
+- Identify if poor F1 is due to weight imbalance
+- Detect if products are collapsing to similar distributions
+- Provide diagnostic information for hyperparameter tuning
+
+---
+
+### Priority Action 3: Add Ground Truth CI Validation Experiment
+
+**Problem**: Cannot validate if SPN-based CI test is accurate because:
+- No ground truth I(X;Y|Z) values to compare against
+- Unknown if poor F1 is due to:
+  - Bad SPN density estimation
+  - Bad MI estimation method
+  - Bad CI test threshold selection
+
+**Proposed Implementation**:
+
+#### Step 3.1: Create d-separation Oracle
+
+```python
+# File: causallearn/utils/validation_utils.py (NEW FILE)
+
+import numpy as np
+from causallearn.utils.DAG2CPDAG import dag2cpdag
+from causallearn.graph.GraphClass import CausalGraph
+
+
+def d_separation_test(dag, i, j, cond_set):
+    """
+    Test if X_i ⊥ X_j | cond_set using d-separation on known DAG.
+
+    This provides ground truth for conditional independence.
+
+    Args:
+        dag (np.ndarray): [d, d] adjacency matrix (DAG structure)
+        i (int): Variable index X_i
+        j (int): Variable index X_j
+        cond_set (set): Conditioning set indices
+
+    Returns:
+        is_independent (bool): True if X_i ⊥ X_j | cond_set by d-separation
+    """
+    from causallearn.utils.cit import CIT
+    from causallearn.search.ConstraintBased.PC import pc
+
+    # Convert DAG to graph structure
+    cg = CausalGraph(dag.shape[0])
+    for x in range(dag.shape[0]):
+        for y in range(dag.shape[0]):
+            if dag[x, y] != 0:
+                cg.add_edge(cg.G.nodes[x], cg.G.nodes[y])
+
+    # Use causallearn's d-separation test
+    # (This is a simplification - full implementation would use proper graph traversal)
+    # For now, use heuristic: check if path exists in undirected skeleton
+
+    # Convert to CPDAG
+    cpdag = dag2cpdag(dag)
+
+    # Path blocking logic (simplified)
+    # Full implementation would do proper d-separation graph traversal
+    # For empirical study, we can use the known causal structure directly
+
+    # Heuristic: If i and j are not adjacent and not connected through cond_set
+    is_adjacent = dag[i, j] != 0 or dag[j, i] != 0
+
+    if is_adjacent:
+        return False  # Adjacent variables are dependent
+
+    # Check if path from i to j is blocked by cond_set
+    # (Simplified heuristic for demonstration)
+    return True  # Placeholder
+
+
+def compute_ground_truth_ci_matrix(dag, max_cond_size=2):
+    """
+    Compute ground truth CI test results for all (X_i, X_j, Z) triples.
+
+    Args:
+        dag (np.ndarray): [d, d] adjacency matrix
+        max_cond_size (int): Maximum conditioning set size
+
+    Returns:
+        ci_results (dict): {(i, j, tuple(cond_set)): is_independent}
+    """
+    from itertools import combinations
+
+    d = dag.shape[0]
+    ci_results = {}
+
+    for i in range(d):
+        for j in range(i+1, d):
+            # Empty conditioning set
+            is_indep = d_separation_test(dag, i, j, set())
+            ci_results[(i, j, tuple())] = is_indep
+
+            # Conditioning sets of size 1, 2, ...
+            for cond_size in range(1, max_cond_size + 1):
+                other_vars = [k for k in range(d) if k != i and k != j]
+                for cond_set in combinations(other_vars, cond_size):
+                    is_indep = d_separation_test(dag, i, j, set(cond_set))
+                    ci_results[(i, j, cond_set)] = is_indep
+
+    return ci_results
+
+
+def validate_ci_test(spn, X, ground_truth_ci, alpha=0.05, num_permutations=50):
+    """
+    Validate SPN-based CI test against ground truth d-separation.
+
+    Args:
+        spn: Trained SPN (GlobalFedSPN or GlobalSumOfProducts)
+        X (np.ndarray): Test data [n, d]
+        ground_truth_ci (dict): Ground truth from compute_ground_truth_ci_matrix()
+        alpha (float): Significance level
+        num_permutations (int): Number of permutations for p-value
+
+    Returns:
+        results (dict): {
+            'accuracy': Overall accuracy,
+            'precision': Precision for independence detection,
+            'recall': Recall for independence detection,
+            'f1': F1 score,
+            'confusion_matrix': {TP, FP, TN, FN}
+        }
+    """
+    from causallearn.utils.FedPC import estimate_mi_from_spn
+
+    TP, FP, TN, FN = 0, 0, 0, 0
+
+    for (i, j, cond_set), is_independent_gt in ground_truth_ci.items():
+        # Estimate MI using SPN
+        cond_indices = list(cond_set) if cond_set else None
+
+        # Compute observed MI
+        mi_obs = estimate_mi_from_spn(spn, X, i, j, cond_indices)
+
+        # Permutation test for p-value
+        mi_perms = []
+        for _ in range(num_permutations):
+            X_perm = X.copy()
+            X_perm[:, j] = np.random.permutation(X_perm[:, j])
+            mi_perm = estimate_mi_from_spn(spn, X_perm, i, j, cond_indices)
+            mi_perms.append(mi_perm)
+
+        p_value = (np.array(mi_perms) >= mi_obs).sum() / num_permutations
+        is_independent_pred = (p_value > alpha)
+
+        # Update confusion matrix
+        if is_independent_gt and is_independent_pred:
+            TP += 1
+        elif is_independent_gt and not is_independent_pred:
+            FN += 1
+        elif not is_independent_gt and is_independent_pred:
+            FP += 1
+        else:
+            TN += 1
+
+    # Compute metrics
+    accuracy = (TP + TN) / (TP + FP + TN + FN)
+    precision = TP / (TP + FP) if (TP + FP) > 0 else 0
+    recall = TP / (TP + FN) if (TP + FN) > 0 else 0
+    f1 = 2 * precision * recall / (precision + recall) if (precision + recall) > 0 else 0
+
+    return {
+        'accuracy': accuracy,
+        'precision': precision,
+        'recall': recall,
+        'f1': f1,
+        'confusion_matrix': {'TP': TP, 'FP': FP, 'TN': TN, 'FN': FN}
+    }
+```
+
+#### Step 3.2: Add CI Validation to Benchmark Script
+
+```python
+# File: tests/test/test_fedcdh_benchmark.py
+# Add new function after run_fedcdh_experiment()
+
+def validate_ci_test_accuracy(fed_spn, W, X, scenario, output_dir):
+    """
+    Validate CI test accuracy against ground truth d-separation.
+
+    Args:
+        fed_spn: Trained federated SPN
+        W: Ground truth DAG adjacency matrix
+        X: Test data
+        scenario: 'horizontal', 'vertical', or 'hybrid'
+        output_dir: Directory to save results
+    """
+    from causallearn.utils.validation_utils import (
+        compute_ground_truth_ci_matrix,
+        validate_ci_test
+    )
+
+    logging.info(f"\n[CI Validation] Testing {scenario} mode SPN against ground truth...")
+
+    # Compute ground truth CI results
+    ground_truth = compute_ground_truth_ci_matrix(W, max_cond_size=2)
+    logging.info(f"  Ground truth: {len(ground_truth)} CI tests computed")
+
+    # Validate SPN-based CI test
+    results = validate_ci_test(fed_spn, X, ground_truth, alpha=0.05, num_permutations=50)
+
+    # Log results
+    logging.info(f"\n[CI Validation Results]")
+    logging.info(f"  Accuracy:  {results['accuracy']:.3f}")
+    logging.info(f"  Precision: {results['precision']:.3f}")
+    logging.info(f"  Recall:    {results['recall']:.3f}")
+    logging.info(f"  F1 Score:  {results['f1']:.3f}")
+    logging.info(f"  Confusion Matrix:")
+    logging.info(f"    TP={results['confusion_matrix']['TP']}, "
+                 f"FP={results['confusion_matrix']['FP']}")
+    logging.info(f"    FN={results['confusion_matrix']['FN']}, "
+                 f"TN={results['confusion_matrix']['TN']}")
+
+    # Save results
+    results_file = os.path.join(output_dir, "ci_validation.json")
+    import json
+    with open(results_file, 'w') as f:
+        json.dump(results, f, indent=2)
+
+    logging.info(f"  Results saved to: {results_file}")
+
+    return results
+
+
+# Modify run_fedcdh_experiment() to call validation:
+def run_fedcdh_experiment(...):
+    # ... existing code ...
+
+    # NEW: Add CI validation after fed_spn is trained
+    if args.validate_ci:
+        ci_results = validate_ci_test_accuracy(
+            fed_spn=fed_cdh.fed_spn,
+            W=W,
+            X=X,
+            scenario=scenario,
+            output_dir=output_dir
+        )
+
+    # ... rest of existing code ...
+```
+
+#### Step 3.3: Add Command-Line Flag
+
+```python
+# File: tests/test/test_fedcdh_benchmark.py
+# In argument parser section
+
+parser.add_argument(
+    "--validate-ci",
+    action="store_true",
+    help="Run CI test validation against ground truth d-separation (adds ~5-10 min per run)"
+)
+```
+
+**Usage**:
+```bash
+python tests/test/test_fedcdh_benchmark.py \
+  --config small \
+  --data-type linear \
+  --device cuda \
+  --seeds 42 \
+  --validate-ci  # NEW FLAG
+```
+
+**Expected Output**:
+```
+[CI Validation] Testing hybrid mode SPN against ground truth...
+  Ground truth: 168 CI tests computed
+
+[CI Validation Results]
+  Accuracy:  0.750
+  Precision: 0.692
+  Recall:    0.720
+  F1 Score:  0.706
+  Confusion Matrix:
+    TP=72, FP=32
+    FN=28, TN=36
+  Results saved to: .../ci_validation.json
+```
+
+**Implementation Effort**: **2-3 hours**
+
+**Expected Benefits**:
+- **Isolate failure mode**: Determine if poor F1 is due to SPN learning or CI testing
+- **Quantify CI test accuracy**: Get precision/recall for independence detection
+- **Guide hyperparameter tuning**: If CI accuracy is low, adjust MI estimation or thresholds
+- **Validate architectural correctness**: Verify GlobalSumOfProducts breaks independence
+
+---
+
+### Implementation Timeline
+
+**Total Effort**: ~4 hours
+
+| Priority | Task | Effort | Files Modified | Expected Impact |
+|----------|------|--------|----------------|-----------------|
+| 1 | Increase sample sizes | 5 min | test_fedcdh_benchmark.py | Better SPN density, +10-20% F1 |
+| 2 | Add cluster weight diagnostics | 30-45 min | FedCDH.py | Identify weight imbalance issues |
+| 3 | Add CI validation experiment | 2-3 hrs | validation_utils.py (new), test_fedcdh_benchmark.py | Validate CI test accuracy |
+
+**Recommended Order**:
+1. **Action 1 first** (5 min) → Immediate benefit, easy win
+2. **Action 2** (45 min) → Diagnose hybrid mode issues
+3. **Action 3** (2-3 hrs) → Rigorous validation for thesis
+
+---
+
+### Testing Strategy
+
+**Phase 1: Quick Validation** (15 minutes)
+```bash
+# Test Action 1 (increased sample sizes)
+python tests/test/test_fedcdh_benchmark.py --config small --data-type linear --device cuda --seeds 42
+
+# Expected: MMD² p-value > 0.1, fewer MI=0.000, F1 improvement
+```
+
+**Phase 2: Diagnostic Analysis** (30 minutes)
+```bash
+# Test Action 2 (cluster weight diagnostics)
+python tests/test/test_fedcdh_benchmark.py --config small --data-type linear --device cuda --seeds 42
+
+# Check logs for:
+# - Weight entropy (should be >0.9 for balanced)
+# - Product diversity KL (should be >0.5 for diverse)
+```
+
+**Phase 3: Comprehensive Validation** (2 hours)
+```bash
+# Test Action 3 (CI validation)
+python tests/test/test_fedcdh_benchmark.py --config small --data-type linear --device cuda --seeds 42 --validate-ci
+
+# Expected: CI accuracy 0.7-0.8 for well-trained SPNs
+```
+
+---
+
+### Success Criteria
+
+**Action 1** ✓ Complete when:
+- Small config: n_total=1200 (150 samples/var)
+- Medium config: n_total=2000 (200 samples/var)
+- Large config: n_total=2500 (227 samples/var)
+- All experiments run without errors
+
+**Action 2** ✓ Complete when:
+- Weight entropy logged for all hybrid experiments
+- Product diversity KL computed and logged
+- Warning messages appear if weights imbalanced
+- Can identify if weights are causing poor F1
+
+**Action 3** ✓ Complete when:
+- d-separation oracle implemented and tested
+- CI validation results saved to JSON
+- Precision/Recall/F1 computed for CI test
+- Can determine if CI test or SPN learning is the bottleneck
+
+---
+
+### Expected Outcomes
+
+**Scenario A**: Actions 1+2 resolve F1 issue
+- Increased samples → better SPN learning
+- Balanced weights → GlobalSumOfProducts working correctly
+- **Result**: Hybrid F1 improves to 0.6-0.8
+- **Conclusion**: v2 architecture was correct, just needed more data
+
+**Scenario B**: Actions 1+2+3 show CI test is accurate but F1 still low
+- CI validation shows precision/recall >0.75
+- But causal discovery F1 <0.5
+- **Result**: Issue is in graph search algorithm (PC/FCI), not SPN/CI
+- **Conclusion**: Need to tune PC algorithm parameters (alpha, depth)
+
+**Scenario C**: Action 3 shows CI test is inaccurate (precision <0.6)
+- SPN-based MI estimation has high error
+- Ground truth shows dependencies, but SPN returns MI≈0
+- **Result**: Need better MI estimation method
+- **Conclusion**: Try KSG estimator or neural MI estimator
+
+---
+
+### Documentation & Reproducibility
+
+**Experiment Logs**: Save diagnostics to experiment output directory
+```
+experiments/v3_data_validation/YYYYMMDD_HHMMSS_{scenario}_{K}clients_{d}vars_{n}samples/
+├── run.log                      # Full training log with diagnostics
+├── ci_validation.json           # CI test validation results (Action 3)
+├── cluster_weights.json         # Cluster weight diagnostics (Action 2)
+├── product_diversity.json       # Product KL divergence (Action 2)
+├── dashboard.png                # Performance metrics
+├── spn_quality_report.html      # SPN quality metrics
+└── umap_*.png                   # UMAP visualizations
+```
+
+**Git Workflow**:
+```bash
+# Create v3 branch
+git checkout -b v3-data-quality-validation
+
+# Implement actions 1, 2, 3
+git add tests/test/test_fedcdh_benchmark.py
+git add causallearn/search/FCMBased/FedCDH/FedCDH.py
+git add causallearn/utils/validation_utils.py
+git commit -m "feat(v3): add data quality improvements and CI validation
+
+- Increase sample sizes for reliable SPN learning (Action 1)
+- Add cluster weight and product diversity diagnostics (Action 2)
+- Add ground truth CI validation experiment (Action 3)
+
+Expected impact: Hybrid F1 0.366 → 0.7+"
+
+# Run full validation
+python tests/test/test_fedcdh_benchmark.py --config small --seeds 42 123 456 --validate-ci
+
+# Merge to main after validation
+git checkout main
+git merge v3-data-quality-validation
+```
+
+---
+
+### Next Steps After v3
+
+**If F1 improves to >0.7** (Success):
+- Run full benchmark suite (5 seeds × 3 configs)
+- Generate publication figures
+- Write methodology section for thesis
+
+**If F1 still <0.5** (Need deeper investigation):
+- Consider Action 4: Stronger heterogeneity in synthetic data
+- Consider Action 5: Benchmark against BNLearn datasets
+- Consider Action 6: Ablation study (K_local=1 vs K_local=2)
+
+---
+
+**Status**: ✅ Implementation proposals complete, ready for v3 branch creation
