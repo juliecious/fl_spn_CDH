@@ -1153,6 +1153,20 @@ class FedCDH:
                     else:
                         spn_name = f"Local SPN Client {k}"
 
+                    # Determine if X_client_aug has context column
+                    # Vertical: Only client 0 has context (if using context at all)
+                    # Hybrid: No context in local SPNs
+                    # Horizontal: All clients have context
+                    if self.scenario == "vertical":
+                        # Client 0 has context, others don't
+                        local_has_context = k == 0
+                    elif self.scenario == "hybrid":
+                        # Hybrid local SPNs trained without context
+                        local_has_context = False
+                    else:  # horizontal
+                        # Horizontal local SPNs have context
+                        local_has_context = True
+
                     # Evaluate quality
                     result = evaluate_spn_quality(
                         local_spn,
@@ -1162,6 +1176,7 @@ class FedCDH:
                         compute_mmd=True,
                         compute_ks=True,
                         name=spn_name,
+                        has_context_column=local_has_context,
                     )
 
                     log_spn_quality(result)
