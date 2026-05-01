@@ -142,6 +142,7 @@ def evaluate_spn_quality(
     compute_mmd=True,
     compute_ks=True,
     name="SPN",
+    has_context_column=True,
 ):
     """
     Evaluate SPN quality with MMD and KS tests.
@@ -154,6 +155,7 @@ def evaluate_spn_quality(
         compute_mmd: Whether to compute MMD
         compute_ks: Whether to compute KS test
         name: Name for logging
+        has_context_column: If True, removes last column as context (default: True)
 
     Returns:
         Dictionary with metrics
@@ -171,9 +173,15 @@ def evaluate_spn_quality(
         with torch.no_grad():
             samples = spn_model.sample(n_samples).cpu().numpy()
 
-        # Remove context column (last column) from both
-        X_features = X_data[:, :-1] if X_data.shape[1] > 1 else X_data
-        samples_features = samples[:, :-1] if samples.shape[1] > 1 else samples
+        # Remove context column (last column) from both if present
+        # BUGFIX: Only remove context column if has_context_column=True
+        # In vertical/hybrid modes, global SPN doesn't have context column
+        if has_context_column:
+            X_features = X_data[:, :-1] if X_data.shape[1] > 1 else X_data
+            samples_features = samples[:, :-1] if samples.shape[1] > 1 else samples
+        else:
+            X_features = X_data
+            samples_features = samples
 
         # Ensure dimensions match
         if X_features.shape[1] != samples_features.shape[1]:

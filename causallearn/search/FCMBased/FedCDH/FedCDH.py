@@ -813,16 +813,16 @@ class FedCDH:
 
                 for k in range(self.K_clients):
                     # Each client is a group (disjoint features)
-                    # BUGFIX: Pass full_d to enable feature extraction in GroupMixture.sample()
-                    # In vertical mode, LocalClusterMixture SPNs are trained with NaN masking
-                    # on full d-dimensional space, so they return [n, d] samples
-                    # GroupMixture needs full_d to extract only relevant features
+                    # NOTE: In vertical mode, SPNs are trained ONLY on feature subsets
+                    # (e.g., client 0 trains on features [0,1,2], returns [n, 3] samples)
+                    # So we do NOT pass full_d (which would expect [n, d_full] samples)
+                    # This is different from hybrid mode where SPNs are full-dimensional
                     group_mix = GroupMixture(
                         client_spns=[client_local_mixtures[k]],
                         weights=[1.0],  # Single client
                         feature_indices=feature_maps[k],
                         device=self.device,
-                        full_d=self.d_features,  # Enable feature extraction for vertical mode
+                        # full_d NOT passed - SPNs return [n, len(feature_indices)]
                     )
                     group_mixtures.append(group_mix)
                     feature_groups.append(feature_maps[k])
@@ -1282,6 +1282,7 @@ class FedCDH:
             if self.scenario in ["vertical", "hybrid"]:
                 # Vertical/hybrid models trained without context column
                 X_eval = X_global
+                has_context = False  # No context column in data or samples
             else:
                 # Horizontal mode uses context column for routing
                 X_eval = (
@@ -1289,6 +1290,7 @@ class FedCDH:
                     if hasattr(self, "X_aug_global_train")
                     else X_aug_global
                 )
+                has_context = True  # Context column present
             global_result = evaluate_spn_quality(
                 self.fed_spn_model,
                 X_eval,
@@ -1297,6 +1299,7 @@ class FedCDH:
                 compute_mmd=True,
                 compute_ks=True,
                 name="Global Federated SPN",
+                has_context_column=has_context,  # Tell evaluation about context
             )
 
             log_spn_quality(global_result)
