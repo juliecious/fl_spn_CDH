@@ -9892,3 +9892,1308 @@ All information preserved, organized in logical sections.
 **Last Updated**: 2026-05-01
 **Status**: Ready for GPU server deployment
 **Next Step**: Run full benchmark on CUDA with `--config small --seeds 42 123 456 789 2024`
+
+---
+
+# V3: COMPREHENSIVE FIXES, DATASETS & ABLATIONS
+
+**Branch**: `v3-comprehensive-fixes`
+**Status**: 🚀 PLANNING COMPLETE - Ready for Implementation
+**Created**: 2026-05-02
+**Last Updated**: 2026-05-02
+
+---
+
+## V3.1 Executive Summary
+
+### Objectives
+
+V3 addresses critical bugs from V2 while adding comprehensive evaluation with real-world datasets, baseline comparisons, and systematic ablation studies.
+
+**Three Core Components**:
+1. **Critical Fixes** (from V2 analysis and author feedback)
+2. **Datasets & Baselines** (real-world validation + comparative evaluation)
+3. **Ablation Studies** (systematic analysis of key factors)
+
+### Scope Decision: FULL PLAN
+
+- **Timeline**: 3-4 weeks (66-92 hours)
+- **Datasets**: All three (Sachs, Law School, HyperPC)
+- **Baselines**: Search existing implementations (causal-learn + GitHub)
+- **Ablations**: All three dimensions (n, d, K)
+
+---
+
+## V3.2 Critical Fixes (from V2 Analysis)
+
+### Fix #1: Hybrid Mode Sum-over-Products (CRITICAL)
+
+**Issue**: Missing top-level sum over cluster combinations (Seng's feedback)
+
+**Current Implementation (WRONG)**:
+```python
+# Enforces independence between feature groups
+P(X) = P(X_g1) × P(X_g2) × P(X_g3)
+→ I(X_g1; X_g2) = 0 mathematically guaranteed
+```
+
+**Correct Implementation**:
+```python
+# Breaks independence via shared cluster assignments
+P(X) = Σ_c w_c × ∏_g P(X_g | cluster_config_c)
+→ Can model cross-group dependencies
+```
+
+**Implementation**:
+- Create `GlobalSumOfProducts` class in `causallearn/utils/FedPC.py`
+- Create `sample_cluster_combinations` helper
+- Modify hybrid mode in `causallearn/search/FCMBased/FedCDH/FedCDH.py`
+- Reuse local cluster SPNs (don't train new ones)
+
+**Expected Impact**:
+- Cross-group F1: 0.000 → 0.3-0.7
+- Dense-local F1: maintain 0.8-1.0
+
+**Time Estimate**: 4-6 hours
+
+**Priority**: 🔴 CRITICAL (author-identified bug)
+
+**Testing**:
+- [ ] Run `tests/run_hybrid_ci_ranking_test.py`
+- [ ] Verify cross-group F1 > 0.3
+- [ ] Verify CI tests return p < 1.0
+- [ ] Maintain dense-local F1 ~ 1.0
+
+---
+
+### Fix #2: Horizontal Mode F1 Dilution (CRITICAL)
+
+**Issue**: Global F1=0.000 despite local F1=0.26-0.57
+
+**Evidence from V2**:
+- Linear SMALL Horizontal:
+  - Local Client 0: F1=0.571, Acc=0.845
+  - Local Client 1: F1=0.381, Acc=0.776
+  - Local Client 2: F1=0.261, Acc=0.707
+  - Global: F1=0.000, Acc=0.731 ❌
+
+**Root Cause**: GroupMixture aggregation dilutes dependency structure
+
+**Proposed Solutions**:
+
+**Option A: Majority Voting on Edges**
+```python
+# Extract local dependency graphs
+# Vote on each edge (include if >50% clients detect it)
+# Build global SPN with voted structure
+```
+
+**Option B: Log-Likelihood Weighted Mixing**
+```python
+# Weight clients by train LL quality
+# Better SPNs get higher influence in aggregation
+```
+
+**Option C: Cluster-Aware Mixing**
+```python
+# Use cluster assignments to group similar clients
+# Preserve within-cluster structures
+```
+
+**Implementation**:
+- Add `aggregation_mode` parameter to horizontal mode
+- Options: "uniform" (V2), "majority_vote", "ll_weighted", "cluster_aware"
+- Modify `GroupMixture` in `causallearn/utils/FedPC.py`
+
+**Expected Impact**:
+- Global F1: 0.000 → 0.3+
+- Maintain local F1 > 0.3
+
+**Time Estimate**: 3-4 hours
+
+**Priority**: 🔴 CRITICAL (thesis blocker)
+
+**Testing**:
+- [ ] Test on Linear SMALL Horizontal
+- [ ] Compare all aggregation options
+- [ ] Select best performing method
+- [ ] Verify local SPNs maintain performance
+
+---
+
+### Fix #3: Vertical Feature Constraints (MEDIUM)
+
+**Issue**: Some clients have only 1-2 test edges (high variance)
+
+**Evidence from V2**:
+- Vertical LARGE: Some local SPNs test only 1-2 feature pairs
+- With 2 features: Only 1 pairwise test (0-1)
+- Results in unreliable metrics (one edge swings F1 from 0 to 1)
+
+**Root Cause**: When d=11, K=5 → some clients get only 2-3 features
+
+**Solution**:
+- Add minimum feature validation: min_features_per_client = 4
+- Warn if any client has < 4 features
+- Optional: 10-20% feature overlap between clients
+
+**Implementation**:
+- Add validation in vertical partitioning
+- Add `min_features_per_client` parameter
+- Add `feature_overlap_pct` parameter (optional)
+- Log feature distribution per client
+
+**Expected Impact**:
+- Minimum tests/client: 1-2 → 6+
+- Reduce metric variance
+
+**Time Estimate**: 2 hours
+
+**Priority**: 🟡 MEDIUM (quality improvement)
+
+**Testing**:
+- [ ] Test on Vertical LARGE (d=11, K=5)
+- [ ] Verify each client has ≥10 pairwise tests
+- [ ] Check confusion matrix totals (TP+FP+FN+TN ≥ 10)
+
+---
+
+## V3.3 Datasets for Evaluation
+
+### Dataset #1: Sachs Protein Network (CRITICAL)
+
+**Status**: ✅ Already available
+
+**Details**:
+- Source: `tests/data/sachs.interventional.txt.gz`
+- Variables: d=11 (protein expression levels)
+- Samples: n=7,466
+- Ground Truth: Known protein signaling network
+
+**Federated Splits**:
+- Horizontal: K=3, ~2,500 samples each
+- Vertical: K=3, 3-4 features each
+- Hybrid: K=3, both partitions
+
+**Priority**: 🔴 CRITICAL (baseline benchmark)
+
+**Implementation**:
+- [x] Data already available
+- [ ] Decompress sachs.interventional.txt.gz
+- [ ] Load ground truth adjacency matrix
+- [ ] Create federated splits (H/V/Hy)
+- [ ] Run all modes with V3 fixes
+- [ ] Compare against ground truth (SHD, F1, Precision, Recall)
+
+**Metrics to Report**:
+- Skeleton F1 Score
+- Structural Hamming Distance (SHD)
+- Precision / Recall (edges)
+- CI Test Accuracy
+- Train/Test Log-Likelihood
+
+**Time Estimate**: 4-6 hours
+
+---
+
+### Dataset #2: Law School Admissions (MEDIUM)
+
+**Source**: arXiv:2506.06039v1 (Do-PFN paper)
+
+**Details**:
+- Origin: 1998 LSAC National Longitudinal Bar Passage Study
+- Variables: Race (protected), first-year-average (FYA), other factors
+- Ground Truth: Established causal graph (Kusner et al. 2017)
+- Use Case: Causal fairness, interventional prediction
+
+**Federated Splits**:
+- Horizontal: K=3, split samples
+- Vertical: K=3, split features
+- Hybrid: K=3, both partitions
+
+**Priority**: 🟡 MEDIUM (real-world validation)
+
+**Implementation**:
+- [ ] Download from LSAC or DoWhy examples
+- [ ] Preprocess: Extract causal variables
+- [ ] Load ground truth DAG
+- [ ] Create federated splits (H/V/Hy)
+- [ ] Run experiments
+- [ ] Compare performance
+
+**Time Estimate**: 6-8 hours (includes data acquisition)
+
+---
+
+### Dataset #3: HyperPC Benchmarks (MEDIUM)
+
+**Source**: `/Users/M279402/PycharmProjects/fl_spn_CDH/experiments/v2_adaptive_hyperparams/v3_data/hyperpc-main/`
+
+**Status**: ✅ Extracted
+
+**Details**:
+- Type: Synthetic data generator
+- Features: Transformer-based hypernetwork, probabilistic circuits
+- Capability: Generate datasets with varying d, n, K
+- Use Case: Controlled ablation studies
+
+**Priority**: 🟡 MEDIUM (synthetic benchmarks)
+
+**Implementation**:
+- [x] Extracted from zip
+- [ ] Explore `src/hyperpc/prior/` for data generation
+- [ ] Generate synthetic datasets:
+  - Vary d ∈ {8, 12, 20}
+  - Vary n ∈ {500, 1000, 2000}
+  - Known ground truth DAGs
+- [ ] Create federated splits
+- [ ] Run experiments
+
+**Time Estimate**: 6-8 hours
+
+---
+
+### Dataset #4: V2 Synthetic (CRITICAL)
+
+**Source**: Existing V2 generators
+
+**Details**:
+- Linear and Nonlinear data
+- Configurable: d, n, K, edge density
+- Known ground truth
+
+**Priority**: 🔴 CRITICAL (control baseline)
+
+**Implementation**:
+- [x] Already implemented
+- [ ] Extend with ablation study configs
+- [ ] Generate datasets for n, d, K ablations
+
+**Time Estimate**: 2-3 hours (extension only)
+
+---
+
+## V3.4 Baselines for Comparison
+
+### Strategy: Search Existing Implementations
+
+**Repositories to Search**:
+1. ✅ `causallearn` (our repo) - PC, FCI, GES already available
+2. ⬜ GitHub - federated causal discovery implementations
+3. ⬜ Published papers with code repositories
+
+---
+
+### Baseline #1: Centralized Methods (CRITICAL)
+
+**Purpose**: Upper bound on performance (pooled data)
+
+**Algorithms**:
+- PC (Constraint-based)
+- GES (Score-based)
+- FCI (Handles latent confounders)
+
+**Implementation**:
+- Source: `causallearn/search/ConstraintBased/PC.py`
+- Source: `causallearn/search/ScoreBased/GES.py`
+- Source: `causallearn/search/ConstraintBased/FCI.py`
+
+**Priority**: 🔴 CRITICAL (need upper bound)
+
+**Tasks**:
+- [ ] Extract PC from causal-learn
+- [ ] Extract GES from causal-learn
+- [ ] Extract FCI from causal-learn
+- [ ] Run on pooled datasets (all clients combined)
+- [ ] Compare: How much does federation hurt performance?
+
+**Metrics**:
+- Skeleton F1, SHD, Precision, Recall
+- Runtime, Memory usage
+
+**Time Estimate**: 2-3 hours
+
+---
+
+### Baseline #2: Original FedCDH (Horizontal Only) (CRITICAL)
+
+**Source**: `fedcdh_code.zip` in Downloads
+
+**Details**:
+- Original FedCDH paper implementation
+- Horizontal federated learning only
+- PC algorithm with federated CI tests
+- Uses basic SPN without clustering
+
+**Priority**: 🔴 CRITICAL (direct comparison)
+
+**Tasks**:
+- [ ] Extract from `/Users/M279402/Downloads/fedcdh_code.zip`
+- [ ] Understand API and requirements
+- [ ] Run on same datasets as V3
+- [ ] Compare: Original FedCDH vs FedCDH-SPN (V2) vs FedCDH-SPN (V3)
+
+**Comparison Table**:
+| Method | Mode | F1 | SHD | CI Acc | Time |
+|--------|------|-----|-----|---------|------|
+| Original FedCDH | H | - | - | - | - |
+| FedCDH-SPN (V2) | H | 0.000 | - | - | - |
+| FedCDH-SPN (V3) | H | ? | - | - | - |
+
+**Time Estimate**: 3-4 hours
+
+---
+
+### Baseline #3: Other Federated Methods (MEDIUM)
+
+**Strategy**: Search GitHub for implementations
+
+**Search Terms**:
+- "federated causal discovery"
+- "federated PC"
+- "federated constraint-based"
+- "privacy-preserving causal discovery"
+- "distributed causal discovery"
+
+**Potential Candidates** (research needed):
+1. Federated PC variants
+2. Federated GES/GIES
+3. Privacy-preserving methods (differential privacy)
+4. Vertical federated learning + causal discovery
+
+**Priority**: 🟡 MEDIUM (comparative analysis)
+
+**Tasks**:
+- [ ] Search GitHub repositories (2023-2026)
+- [ ] Identify 2-3 comparable methods with code
+- [ ] Check code availability and license
+- [ ] Implement adapters if needed
+- [ ] Run on same test suite
+
+**Time Estimate**: 6-8 hours (research + implementation)
+
+---
+
+### Baseline #4: Vertical/Hybrid Methods (OPTIONAL)
+
+**Strategy**: Literature review + GitHub search
+
+**Search Focus**:
+- Vertical federated learning with causality
+- Hybrid federated approaches
+- Split learning + causal discovery
+
+**Priority**: 🟢 LOW (optional enhancement)
+
+**Tasks**:
+- [ ] Literature review: vertical FL + causality
+- [ ] Identify 1-2 comparable methods
+- [ ] Implement or adapt existing code
+
+**Time Estimate**: 6-8 hours (if pursued)
+
+---
+
+## V3.5 Ablation Studies
+
+### Ablation #1: Sample Size → Performance (CRITICAL)
+
+**Research Question**: How does sample size affect causal discovery accuracy?
+
+**Experimental Design**:
+```
+Fixed: d=10, K=3
+Vary:  n ∈ {300, 600, 900, 1200, 1800, 2400, 3600}
+Modes: Horizontal, Vertical, Hybrid
+Data:  Linear, Nonlinear
+Total: 7 × 3 × 2 = 42 experiments
+```
+
+**Per-Client Allocation**:
+- Horizontal: n_local = n / K
+- Vertical: All samples, different features
+- Hybrid: n_local = n / K, different features
+
+**Metrics to Track**:
+- Skeleton F1 Score ⭐
+- Structural Hamming Distance (SHD)
+- CI Test Accuracy
+- Train Log-Likelihood
+- Runtime (seconds)
+
+**Expected Results**:
+- F1 increases with n (more data → better CI tests)
+- Horizontal plateaus earlier (duplicated features)
+- Vertical benefits more from larger n (more tests per pair)
+- Hybrid: middle ground
+
+**Priority**: 🔴 CRITICAL (core ablation)
+
+**Implementation**:
+```python
+# scripts/run_ablation_sample_size.py
+for n in [300, 600, 900, 1200, 1800, 2400, 3600]:
+    for mode in ['horizontal', 'vertical', 'hybrid']:
+        for data_type in ['linear', 'nonlinear']:
+            run_experiment(d=10, K=3, n=n, mode=mode, data_type=data_type)
+            record_metrics(f'ablations/sample_size/{data_type}_{mode}_n{n}.json')
+```
+
+**Visualization**:
+- Line plot: n (x-axis) vs F1 (y-axis)
+- Separate lines for H/V/Hy
+- Separate plots for linear/nonlinear
+- Identify plateau points
+
+**Time Estimate**: 8-10 hours (runtime + analysis)
+
+**Tasks**:
+- [ ] Generate datasets for all n values
+- [ ] Run 42 experiments (~10-15 min each)
+- [ ] Collect metrics
+- [ ] Generate line plots
+- [ ] Analyze plateau behavior
+- [ ] Document findings
+
+---
+
+### Ablation #2: Dimensionality → Performance (CRITICAL)
+
+**Research Question**: How does number of variables affect causal discovery?
+
+**Experimental Design**:
+```
+Fixed: n=1200, K=3
+Vary:  d ∈ {5, 8, 10, 12, 15, 20, 25, 30}
+Modes: Horizontal, Vertical*, Hybrid
+       (*Vertical skipped if d < 12 due to min feature constraint)
+Data:  Linear, Nonlinear
+Total: 8 × ~2.5 × 2 ≈ 40 experiments
+```
+
+**Constraints**:
+- **Vertical mode**: Skip if d/K < 4 (min features per client)
+  - d=5, K=3: Skip vertical (1-2 features/client)
+  - d=8, K=3: Marginal (2-3 features/client)
+  - d=12+: Feasible (4+ features/client)
+- **Adaptive hyperparams**: Use V2 scaling
+  - Epochs: 50 (d≤8), 100 (d=9-11), 150 (d≥12)
+  - LR: 0.01 × (8/d)^0.5
+
+**Metrics to Track**:
+- Skeleton F1 Score ⭐
+- SHD
+- Number of CI tests performed
+- Tests per client (vertical)
+- SPN training time
+- Memory usage
+
+**Expected Results**:
+- F1 decreases with d (more tests → more errors)
+- Horizontal less affected (samples distributed)
+- Vertical more challenged (feature splits)
+- Hybrid: middle ground
+
+**Priority**: 🔴 CRITICAL (core ablation)
+
+**Implementation**:
+```python
+# scripts/run_ablation_dimensionality.py
+for d in [5, 8, 10, 12, 15, 20, 25, 30]:
+    K = 3
+    # Skip vertical if insufficient features per client
+    if d / K >= 4:
+        modes = ['horizontal', 'vertical', 'hybrid']
+    else:
+        modes = ['horizontal', 'hybrid']
+
+    for mode in modes:
+        for data_type in ['linear', 'nonlinear']:
+            epochs, lr = adaptive_hyperparams(d, K, n=1200)
+            run_experiment(d=d, K=K, n=1200, mode=mode,
+                          data_type=data_type, epochs=epochs, lr=lr)
+```
+
+**Visualization**:
+- Line plot: d (x-axis) vs F1 (y-axis)
+- Separate lines for H/V/Hy
+- Log scale for x-axis if needed
+- Annotate: tests/client for vertical
+
+**Time Estimate**: 8-10 hours (runtime + analysis)
+
+**Tasks**:
+- [ ] Generate datasets for all d values
+- [ ] Run ~40 experiments (~10-15 min each)
+- [ ] Collect metrics
+- [ ] Generate line plots
+- [ ] Analyze scalability limits
+- [ ] Document findings
+
+---
+
+### Ablation #3: Number of Clients → Performance (MEDIUM)
+
+**Research Question**: How does federation granularity affect performance?
+
+**Experimental Design**:
+```
+Fixed: d=12, n=1200
+Vary:  K ∈ {2, 3, 4, 5, 7, 10}
+Modes: Horizontal, Vertical*, Hybrid
+       (*Vertical skipped if d/K < 4)
+Data:  Linear, Nonlinear
+Total: 6 × ~2.5 × 2 ≈ 30 experiments
+```
+
+**Key Considerations**:
+- **Horizontal**: More clients = fewer samples per client
+  - K=2: 600 samples/client ✓
+  - K=5: 240 samples/client ✓
+  - K=10: 120 samples/client ⚠️ (challenging)
+- **Vertical**: More clients = fewer features per client
+  - K=2: 6 features/client ✓
+  - K=3: 4 features/client ✓ (minimum)
+  - K=4: 3 features/client ✗ (skip vertical)
+  - K=5+: Skip vertical
+
+**Metrics to Track**:
+- Skeleton F1 Score ⭐
+- SHD
+- CI Test Accuracy
+- n/client (horizontal)
+- d/client (vertical)
+- Aggregation overhead
+
+**Expected Results**:
+- Horizontal: F1 decreases with K (less data per client)
+- Vertical: F1 decreases with K (fewer features per client)
+- Hybrid: More robust?
+- Optimal K: Likely K=3-5 for d=12, n=1200
+
+**Priority**: 🟡 MEDIUM (useful insight)
+
+**Implementation**:
+```python
+# scripts/run_ablation_num_clients.py
+d, n = 12, 1200
+for K in [2, 3, 4, 5, 7, 10]:
+    # Skip vertical if d/K < 4
+    if d / K >= 4:
+        modes = ['horizontal', 'vertical', 'hybrid']
+    else:
+        modes = ['horizontal', 'hybrid']
+
+    for mode in modes:
+        for data_type in ['linear', 'nonlinear']:
+            n_per_client = n // K
+            run_experiment(d=d, K=K, n=n, mode=mode, data_type=data_type)
+```
+
+**Visualization**:
+- Line plot: K (x-axis) vs F1 (y-axis)
+- Separate lines for H/V/Hy
+- Annotate: samples/client (H), features/client (V)
+
+**Time Estimate**: 4-6 hours (runtime + analysis)
+
+**Tasks**:
+- [ ] Generate datasets for all K values
+- [ ] Run ~30 experiments (~5-10 min each)
+- [ ] Collect metrics
+- [ ] Generate line plots
+- [ ] Identify optimal K
+- [ ] Document findings
+
+---
+
+## V3.6 Experimental Setup
+
+### Directory Structure
+
+```
+experiments/v3_comprehensive_fixes/
+├── data/
+│   ├── synthetic/
+│   │   ├── linear/
+│   │   └── nonlinear/
+│   ├── real_world/
+│   │   ├── sachs/
+│   │   │   ├── raw/                    # Original data
+│   │   │   ├── splits/                 # H/V/Hy splits
+│   │   │   └── ground_truth.pkl        # True DAG
+│   │   ├── law_school/
+│   │   │   ├── raw/
+│   │   │   ├── splits/
+│   │   │   └── ground_truth.pkl
+│   │   └── hyperpc_benchmarks/
+│   │       ├── generated/
+│   │       └── splits/
+│   └── preprocessing/
+│       ├── download_datasets.py
+│       ├── preprocess_sachs.py
+│       ├── preprocess_law_school.py
+│       └── create_federated_splits.py
+├── baselines/
+│   ├── centralized/
+│   │   ├── run_pc.py
+│   │   ├── run_ges.py
+│   │   └── run_fci.py
+│   ├── fedcdh_original/
+│   │   ├── extract_and_setup.py
+│   │   └── run_original_fedcdh.py
+│   ├── federated_methods/
+│   │   ├── search_github.md          # Search results
+│   │   ├── method_1/
+│   │   └── method_2/
+│   └── results/
+│       ├── centralized_results.json
+│       ├── fedcdh_original_results.json
+│       └── comparison_table.csv
+├── ablations/
+│   ├── sample_size/
+│   │   ├── configs/
+│   │   ├── results/
+│   │   └── analysis/
+│   ├── dimensionality/
+│   │   ├── configs/
+│   │   ├── results/
+│   │   └── analysis/
+│   └── num_clients/
+│       ├── configs/
+│       ├── results/
+│       └── analysis/
+├── scripts/
+│   ├── run_v3_fixes.py                   # Test critical fixes
+│   ├── run_v3_baselines.py               # Run baseline comparisons
+│   ├── run_ablation_sample_size.py       # n ablation
+│   ├── run_ablation_dimensionality.py    # d ablation
+│   ├── run_ablation_num_clients.py       # K ablation
+│   └── run_all_v3.sh                     # Master script
+├── analysis/
+│   ├── generate_v3_report.py
+│   ├── compare_baselines.py
+│   ├── ablation_analysis.py
+│   ├── publication_figures.py
+│   └── statistical_tests.py
+└── results/
+    ├── fixes/
+    │   ├── v2_vs_v3_comparison.json
+    │   └── fix_effectiveness.csv
+    ├── baselines/
+    │   └── baseline_comparison.json
+    ├── ablations/
+    │   ├── sample_size_results.json
+    │   ├── dimensionality_results.json
+    │   └── num_clients_results.json
+    └── final_report/
+        ├── v3_comprehensive_report.html
+        ├── publication_figures/
+        └── thesis_tables/
+```
+
+---
+
+## V3.7 Implementation Roadmap
+
+### Phase 0: Setup & Research (Week 0) - 6-8 hours
+
+**Tasks**:
+- [x] Create v3 branch
+- [x] Extract HyperPC data
+- [x] Document V3 plan
+- [ ] Research federated causal baselines
+  - [ ] Search GitHub: "federated causal discovery" (1-2 hrs)
+  - [ ] Review papers 2023-2026 (1-2 hrs)
+  - [ ] Identify 2-3 comparable methods (1 hr)
+  - [ ] Check code availability (1 hr)
+- [ ] Download Law School dataset (1 hr)
+- [ ] Setup experiment directory structure (1 hr)
+
+**Deliverable**: Research summary + directory structure
+
+---
+
+### Phase 1: Critical Fixes (Week 1) - 10-12 hours
+
+**Monday-Tuesday**: Fix #1 (GlobalSumOfProducts)
+- [ ] Read implementation plan in working_state.md (1 hr)
+- [ ] Implement GlobalSumOfProducts class (3-4 hrs)
+  - [ ] Add to causallearn/utils/FedPC.py
+  - [ ] Implement log_prob with NaN masking
+  - [ ] Implement sample method
+- [ ] Implement sample_cluster_combinations helper (1 hr)
+- [ ] Rewrite hybrid mode in FedCDH.py (2-3 hrs)
+  - [ ] Reuse local cluster SPNs
+  - [ ] Build GlobalSumOfProducts
+- [ ] Test hybrid cross-group dependencies (1 hr)
+
+**Wednesday**: Fix #2 (Horizontal Aggregation)
+- [ ] Investigate GroupMixture aggregation (1 hr)
+- [ ] Implement majority voting option (1-2 hrs)
+- [ ] Implement LL-weighted option (1 hr)
+- [ ] Test on Linear SMALL Horizontal (1 hr)
+
+**Thursday**: Fix #3 (Vertical Constraints)
+- [ ] Add minimum feature validation (1 hr)
+- [ ] Add feature overlap option (optional) (1 hr)
+- [ ] Test on Vertical LARGE (30 min)
+
+**Friday**: Verification
+- [ ] Run all fixes on SMALL config (1 hr)
+- [ ] Verify improvements (V2 vs V3) (1 hr)
+- [ ] Document results (30 min)
+
+**Deliverable**: V3 with all critical fixes + verification report
+
+---
+
+### Phase 2: Baselines (Week 2) - 12-16 hours
+
+**Monday**: Centralized Baselines
+- [ ] Extract PC from causal-learn (1 hr)
+- [ ] Extract GES from causal-learn (1 hr)
+- [ ] Extract FCI from causal-learn (1 hr)
+- [ ] Run on pooled Sachs dataset (1 hr)
+- [ ] Collect metrics (30 min)
+
+**Tuesday**: Original FedCDH
+- [ ] Extract from fedcdh_code.zip (1 hr)
+- [ ] Understand API and setup (1-2 hrs)
+- [ ] Run on Sachs + synthetic (2 hrs)
+- [ ] Compare with V3 (1 hr)
+
+**Wednesday-Thursday**: Other Federated Methods
+- [ ] Search GitHub repositories (2-3 hrs)
+- [ ] Clone and setup 2-3 methods (2-3 hrs)
+- [ ] Adapt to our test suite (2-3 hrs)
+- [ ] Run experiments (1-2 hrs)
+
+**Friday**: Baseline Comparison
+- [ ] Compile all results (1 hr)
+- [ ] Generate comparison tables (1 hr)
+- [ ] Statistical significance tests (1 hr)
+
+**Deliverable**: Baseline comparison results + tables
+
+---
+
+### Phase 3: Real-World Data (Week 2-3) - 12-16 hours
+
+**Monday**: Sachs Dataset
+- [ ] Decompress and load data (30 min)
+- [ ] Load ground truth network (30 min)
+- [ ] Create federated splits (H/V/Hy) (1 hr)
+- [ ] Run V3 experiments (H/V/Hy) (3 hrs)
+- [ ] Compare against ground truth (1 hr)
+
+**Tuesday**: Law School Dataset
+- [ ] Download from LSAC/DoWhy (1-2 hrs)
+- [ ] Preprocess data (1-2 hrs)
+- [ ] Load ground truth DAG (30 min)
+- [ ] Create federated splits (1 hr)
+- [ ] Run experiments (2-3 hrs)
+
+**Wednesday**: HyperPC Benchmarks
+- [ ] Explore data generation (1-2 hrs)
+- [ ] Generate synthetic datasets (2 hrs)
+- [ ] Create federated splits (1 hr)
+- [ ] Run experiments (2 hrs)
+
+**Thursday-Friday**: Analysis
+- [ ] Compare real-world vs synthetic (2 hrs)
+- [ ] Analyze performance patterns (2 hrs)
+- [ ] Generate visualizations (2 hrs)
+
+**Deliverable**: Real-world validation results + analysis
+
+---
+
+### Phase 4: Ablation Studies (Week 3-4) - 24-30 hours
+
+**Week 3 Monday-Tuesday**: Sample Size Ablation
+- [ ] Generate datasets (n: 300-3600) (2 hrs)
+- [ ] Run 42 experiments (8-10 hrs runtime)
+- [ ] Collect and organize results (1 hr)
+- [ ] Generate line plots (1 hr)
+- [ ] Analyze findings (1 hr)
+
+**Week 3 Wednesday-Thursday**: Dimensionality Ablation
+- [ ] Generate datasets (d: 5-30) (2 hrs)
+- [ ] Run ~40 experiments (8-10 hrs runtime)
+- [ ] Collect and organize results (1 hr)
+- [ ] Generate line plots (1 hr)
+- [ ] Analyze scalability (1 hr)
+
+**Week 3 Friday**: Number of Clients Ablation
+- [ ] Generate datasets (K: 2-10) (1 hr)
+- [ ] Run ~30 experiments (4-6 hrs runtime)
+- [ ] Collect and organize results (1 hr)
+- [ ] Generate line plots (1 hr)
+- [ ] Identify optimal K (1 hr)
+
+**Week 4 Monday**: Ablation Analysis
+- [ ] Cross-ablation comparison (2 hrs)
+- [ ] Interaction effects (2 hrs)
+- [ ] Statistical tests (2 hrs)
+
+**Deliverable**: Complete ablation study results + analysis
+
+---
+
+### Phase 5: Analysis & Reporting (Week 4) - 14-18 hours
+
+**Tuesday-Wednesday**: V3 Comprehensive Report
+- [ ] Extend V2 report generator (3 hrs)
+- [ ] Add real-world results section (2 hrs)
+- [ ] Add baseline comparison section (2 hrs)
+- [ ] Add ablation study visualizations (2 hrs)
+- [ ] Add V2 vs V3 comparison (1 hr)
+- [ ] Generate HTML report (1 hr)
+
+**Thursday**: Publication Figures
+- [ ] F1 improvement chart (V2 → V3) (1 hr)
+- [ ] Baseline comparison bar charts (1 hr)
+- [ ] Ablation line plots (1 hr)
+- [ ] Real-world network diagrams (2 hrs)
+
+**Friday**: Documentation
+- [ ] Write V3 summary document (2-3 hrs)
+- [ ] Prepare thesis tables (2 hrs)
+- [ ] Document lessons learned (1 hr)
+- [ ] Final review and polish (1 hr)
+
+**Deliverable**: V3 final report + publication figures + thesis materials
+
+---
+
+## V3.8 Timeline Summary
+
+| Phase | Week | Hours | Deliverable |
+|-------|------|-------|-------------|
+| 0: Setup | 0 | 6-8 | Research + directory |
+| 1: Fixes | 1 | 10-12 | V3 with fixes |
+| 2: Baselines | 2 | 12-16 | Baseline comparison |
+| 3: Real-World | 2-3 | 12-16 | Real-world validation |
+| 4: Ablations | 3-4 | 24-30 | Ablation studies |
+| 5: Reporting | 4 | 14-18 | Final report + figures |
+| **Total** | **4 weeks** | **78-100 hours** | **Complete V3** |
+
+**Critical Path** (minimum viable):
+- Phase 1 (10 hrs) + Sachs only (6 hrs) + Sample size ablation (10 hrs) + Basic report (6 hrs) = **32 hours** (~5 days)
+
+---
+
+## V3.9 Success Criteria
+
+### Must Have (Critical)
+- [x] Branch created
+- [ ] GlobalSumOfProducts implemented
+- [ ] Hybrid cross-group F1 > 0.3 (from 0.000)
+- [ ] Horizontal global F1 > 0.3 (from 0.000)
+- [ ] Vertical minimum 6 tests/client
+- [ ] Sachs dataset results
+- [ ] Centralized baseline comparison
+- [ ] Sample size ablation complete
+
+### Should Have (Important)
+- [ ] Law School dataset results
+- [ ] Original FedCDH comparison
+- [ ] All three ablations complete
+- [ ] V3 comprehensive HTML report
+- [ ] Publication-ready figures
+- [ ] Statistical significance tests
+
+### Nice to Have (Optional)
+- [ ] HyperPC benchmarks
+- [ ] Other federated method comparisons
+- [ ] Vertical/Hybrid baseline methods
+- [ ] Interactive visualizations
+- [ ] Ensemble SPN implementation
+
+---
+
+## V3.10 Metrics to Report (Standardized)
+
+**For All Experiments**:
+
+1. **Causal Discovery Metrics**:
+   - Skeleton F1 Score ⭐
+   - Structural Hamming Distance (SHD) ⭐
+   - Precision (edges)
+   - Recall (edges)
+   - Accuracy (overall)
+
+2. **CI Test Metrics**:
+   - CI Test Accuracy (vs ground truth)
+   - Number of CI tests performed
+   - Average p-value distribution
+   - Type I error rate
+   - Type II error rate
+
+3. **SPN Quality Metrics**:
+   - Train Log-Likelihood (LL)
+   - Test Log-Likelihood
+   - MMD² (distribution match)
+   - KS Test pass rate
+
+4. **Computational Metrics**:
+   - Training time (seconds)
+   - Memory usage (MB)
+   - Number of parameters
+   - Inference time
+
+5. **Federated Metrics**:
+   - Communication rounds
+   - Data transferred (MB)
+   - Per-client statistics
+   - Aggregation overhead
+
+---
+
+## V3.11 Comparison Tables (Templates)
+
+### Table 1: Baseline Comparison (Sachs Dataset)
+
+| Method | Mode | F1 | SHD | Precision | Recall | CI Acc | Time (s) | Source |
+|--------|------|-----|-----|-----------|--------|---------|----------|--------|
+| Centralized PC | - | - | - | - | - | - | - | causal-learn |
+| Centralized GES | - | - | - | - | - | - | - | causal-learn |
+| Centralized FCI | - | - | - | - | - | - | - | causal-learn |
+| FedCDH (Original) | H | - | - | - | - | - | - | Li et al. 2024 |
+| FedCDH-SPN (V2) | H | 0.000 | - | - | - | - | - | Our V2 |
+| **FedCDH-SPN (V3)** | **H** | **?** | **-** | **-** | **-** | **-** | **-** | **Our V3** |
+| **FedCDH-SPN (V3)** | **V** | **?** | **-** | **-** | **-** | **-** | **-** | **Our V3** |
+| **FedCDH-SPN (V3)** | **Hy** | **?** | **-** | **-** | **-** | **-** | **-** | **Our V3** |
+
+---
+
+### Table 2: V2 vs V3 Improvement
+
+| Config | Mode | V2 F1 | V3 F1 | Δ F1 | V2 SHD | V3 SHD | Δ SHD | Fix Applied |
+|--------|------|-------|-------|------|--------|--------|-------|-------------|
+| Lin SMALL | H | 0.000 | ? | +? | - | - | - | Horizontal Agg |
+| Lin SMALL | V | 0.425 | ? | ? | - | - | - | Min Features |
+| Lin SMALL | Hy | 0.479 | ? | ? | - | - | - | Sum-over-Products |
+| Lin MEDIUM | H | 0.000 | ? | +? | - | - | - | Horizontal Agg |
+| ... | ... | ... | ... | ... | ... | ... | ... | ... |
+
+---
+
+### Table 3: Ablation - Sample Size (d=10, K=3, Linear)
+
+| n | Mode | F1 | SHD | CI Acc | Train LL | Time (s) | Tests |
+|---|------|-----|-----|---------|----------|----------|-------|
+| 300 | H | - | - | - | - | - | - |
+| 300 | V | - | - | - | - | - | - |
+| 300 | Hy | - | - | - | - | - | - |
+| 600 | H | - | - | - | - | - | - |
+| 600 | V | - | - | - | - | - | - |
+| 600 | Hy | - | - | - | - | - | - |
+| ... | ... | ... | ... | ... | ... | ... | ... |
+| 3600 | Hy | - | - | - | - | - | - |
+
+---
+
+### Table 4: Ablation - Dimensionality (n=1200, K=3, Linear)
+
+| d | Mode | F1 | SHD | Num Tests | Tests/Client (V) | Time (s) | Epochs | LR |
+|---|------|-----|-----|-----------|------------------|----------|--------|-----|
+| 5 | H | - | - | - | - | - | 50 | 0.0112 |
+| 5 | Hy | - | - | - | - | - | 50 | 0.0112 |
+| 8 | H | - | - | - | - | - | 50 | 0.0100 |
+| 8 | V | - | - | - | ~3 | - | 50 | 0.0100 |
+| 8 | Hy | - | - | - | ~3 | - | 50 | 0.0100 |
+| ... | ... | ... | ... | ... | ... | ... | ... | ... |
+| 30 | H | - | - | - | - | - | 150 | 0.0052 |
+| 30 | Hy | - | - | - | - | - | 150 | 0.0052 |
+
+---
+
+### Table 5: Ablation - Number of Clients (d=12, n=1200, Linear)
+
+| K | Mode | F1 | SHD | n/client (H) | d/client (V) | Tests/client | Time (s) |
+|---|------|-----|-----|--------------|--------------|--------------|----------|
+| 2 | H | - | - | 600 | - | - | - |
+| 2 | V | - | - | - | 6 | ~15 | - |
+| 2 | Hy | - | - | 600 | 6 | - | - |
+| 3 | H | - | - | 400 | - | - | - |
+| 3 | V | - | - | - | 4 | ~6 | - |
+| 3 | Hy | - | - | 400 | 4 | - | - |
+| 4 | H | - | - | 300 | - | - | - |
+| 4 | Hy | - | - | 300 | 3 | - | - |
+| ... | ... | ... | ... | ... | ... | ... | ... |
+| 10 | H | - | - | 120 | - | - | - |
+| 10 | Hy | - | - | 120 | 1.2 | - | - |
+
+---
+
+## V3.12 Baseline Search Results
+
+### From causal-learn Repository
+
+**Constraint-Based** (`causallearn/search/ConstraintBased/`):
+- ✅ PC.py - Standard PC algorithm
+- ✅ FCI.py - Fast Causal Inference (handles latent confounders)
+- ✅ CDNOD.py - Causal Discovery from Nonstationary/Heterogeneous Data
+
+**Score-Based** (`causallearn/search/ScoreBased/`):
+- ✅ GES.py - Greedy Equivalence Search
+- ✅ ExactSearch.py - Exact search for small graphs
+
+**FCM-Based** (`causallearn/search/FCMBased/`):
+- ✅ FedCDH/ - Our implementation
+- ✅ lingam/ - LiNGAM variants (linear non-Gaussian)
+- ✅ ANM/ - Additive Noise Model
+- ✅ PNL/ - Post-Nonlinear model
+
+**Status**: PC, GES, FCI available and ready to use as centralized baselines
+
+---
+
+### GitHub Search (To Be Completed)
+
+**Search Plan**:
+1. Search terms:
+   - "federated causal discovery"
+   - "distributed causal discovery"
+   - "privacy-preserving causal discovery"
+   - "vertical federated learning causal"
+2. Filter: Recent repos (2023-2026), with code
+3. Criteria: Python, compatible with our datasets, documented API
+
+**To Be Documented**:
+- [ ] Repository URLs
+- [ ] Method descriptions
+- [ ] Code availability
+- [ ] Adaptation requirements
+- [ ] Comparison feasibility
+
+---
+
+## V3.13 Key Files to Create
+
+### Scripts
+```
+experiments/v3_comprehensive_fixes/scripts/
+├── run_v3_fixes.py                      # Test all 3 fixes
+├── run_v3_baselines.py                  # Run baseline comparisons
+├── run_ablation_sample_size.py          # n ablation (42 exps)
+├── run_ablation_dimensionality.py       # d ablation (~40 exps)
+├── run_ablation_num_clients.py          # K ablation (~30 exps)
+├── run_all_v3.sh                        # Master script
+└── utils/
+    ├── config_generator.py               # Generate experiment configs
+    ├── metrics_collector.py              # Standardized metrics collection
+    └── experiment_runner.py              # Common experiment runner
+```
+
+### Data Processing
+```
+experiments/v3_comprehensive_fixes/data/preprocessing/
+├── download_datasets.py                 # Download all datasets
+├── preprocess_sachs.py                  # Sachs-specific preprocessing
+├── preprocess_law_school.py             # Law School preprocessing
+├── preprocess_hyperpc.py                # HyperPC data generation
+└── create_federated_splits.py           # H/V/Hy split generator
+```
+
+### Baselines
+```
+experiments/v3_comprehensive_fixes/baselines/
+├── centralized/
+│   ├── run_pc.py                        # PC on pooled data
+│   ├── run_ges.py                       # GES on pooled data
+│   └── run_fci.py                       # FCI on pooled data
+├── fedcdh_original/
+│   ├── extract_and_setup.py             # Extract from zip
+│   └── run_original_fedcdh.py           # Run original FedCDH
+└── utils/
+    └── baseline_adapter.py               # Common interface for baselines
+```
+
+### Analysis
+```
+experiments/v3_comprehensive_fixes/analysis/
+├── generate_v3_report.py                # Main report generator
+├── compare_baselines.py                 # Baseline comparison analysis
+├── ablation_analysis.py                 # Ablation study analysis
+├── publication_figures.py               # Generate thesis figures
+├── statistical_tests.py                 # Significance testing
+└── utils/
+    ├── plot_helpers.py                  # Common plotting functions
+    └── table_generators.py              # LaTeX/HTML table generation
+```
+
+---
+
+## V3.14 Next Immediate Steps
+
+**This Week**:
+1. ✅ Create v3 branch
+2. ✅ Extract HyperPC data
+3. ✅ Document V3 plan in working_state.md
+4. ⬜ Search GitHub for federated baselines (2-3 hrs)
+5. ⬜ Setup experiment directory structure (1 hr)
+6. ⬜ Start Phase 1: Implement GlobalSumOfProducts (4-6 hrs)
+
+**Commands**:
+```bash
+cd /Users/M279402/PycharmProjects/fl_spn_CDH
+git checkout v3-comprehensive-fixes
+
+# Create directory structure
+mkdir -p experiments/v3_comprehensive_fixes/{data,baselines,ablations,scripts,analysis,results}
+mkdir -p experiments/v3_comprehensive_fixes/data/{synthetic,real_world,preprocessing}
+mkdir -p experiments/v3_comprehensive_fixes/baselines/{centralized,fedcdh_original,federated_methods}
+mkdir -p experiments/v3_comprehensive_fixes/ablations/{sample_size,dimensionality,num_clients}
+
+# Ready to start Phase 1
+# See V3_CHECKLIST.md for detailed tasks
+```
+
+---
+
+## V3.15 References
+
+### V2 Analysis
+- `experiments/v2_adaptive_hyperparams/experiment_analysis_report.html`
+- `experiments/v2_adaptive_hyperparams/LOCAL_SPNS_CORRECTED.md`
+- Critical issues: Horizontal F1 dilution, Vertical insufficient edges, LARGE config dilution
+
+### Planning Documents
+- `experiments/v2_adaptive_hyperparams/V3_COMPREHENSIVE_PLAN.md`
+- `experiments/v2_adaptive_hyperparams/V3_UPDATED_PLAN.md`
+- `experiments/v2_adaptive_hyperparams/V3_CHECKLIST.md`
+- `experiments/v2_adaptive_hyperparams/V3_QUICK_REFERENCE.md`
+
+### Author Feedback
+- working_state.md Section: "🚨 CRITICAL UPDATE: Seng's Feedback - Missing Sum-over-Products"
+- GlobalSumOfProducts implementation plan (lines 1-400)
+
+### External Resources
+- Sachs et al. (2005) - Protein signaling data
+- arXiv:2506.06039v1 - Do-PFN, Law School dataset
+- arXiv:2506.10914 - CATE synthetic data
+- HyperPC GitHub: github.com/J0nasSeng/hyperpc
+
+### causal-learn Documentation
+- PC: causallearn/search/ConstraintBased/PC.py
+- GES: causallearn/search/ScoreBased/GES.py
+- FCI: causallearn/search/ConstraintBased/FCI.py
+
+---
+
+## V3.16 Risk Assessment
+
+### High Risk
+1. **GlobalSumOfProducts complexity** (Fix #1)
+   - Risk: Implementation more complex than expected
+   - Mitigation: Follow Seng's guidance, test incrementally
+   - Fallback: Document limitation, focus on other fixes
+
+2. **Baseline code availability**
+   - Risk: Other federated methods may not have public code
+   - Mitigation: Start with centralized baselines (guaranteed)
+   - Fallback: Compare with centralized only
+
+### Medium Risk
+1. **Horizontal F1 fix effectiveness** (Fix #2)
+   - Risk: Aggregation changes may not improve F1
+   - Mitigation: Test multiple aggregation strategies
+   - Fallback: Document as limitation
+
+2. **Real-world data quality**
+   - Risk: Law School dataset may be hard to obtain
+   - Mitigation: Focus on Sachs (already available)
+   - Fallback: Use Sachs + HyperPC only
+
+3. **Ablation runtime**
+   - Risk: 112 total experiments may take longer than estimated
+   - Mitigation: Run in parallel on GPU if available
+   - Fallback: Reduce n/d/K ranges
+
+### Low Risk
+1. **Vertical feature constraint**
+   - Risk: May reduce flexibility
+   - Mitigation: Make configurable (min_features parameter)
+   - Fallback: Revert to V2 behavior
+
+2. **Report generation**
+   - Risk: HTML report may become too large
+   - Mitigation: Use pagination, lazy loading
+   - Fallback: Generate separate reports per section
+
+---
+
+## V3.17 Status Summary
+
+**Branch**: `v3-comprehensive-fixes` ✅
+**Planning**: Complete ✅
+**Documentation**: working_state.md updated ✅
+
+**Phase Status**:
+- Phase 0 (Setup): 60% complete (branch created, HyperPC extracted, plan documented)
+- Phase 1 (Fixes): 0% - ready to start
+- Phase 2 (Baselines): 0% - baselines identified
+- Phase 3 (Real-World): 0% - Sachs available
+- Phase 4 (Ablations): 0% - designs complete
+- Phase 5 (Reporting): 0% - templates ready
+
+**Next Action**: Implement GlobalSumOfProducts (Fix #1)
+
+**Expected Completion**: 3-4 weeks from start of Phase 1
+
+---
+
+## V3.18 Git Commit Plan
+
+**Commit Strategy**: Incremental commits per phase
+
+### Phase 1 Commits
+```bash
+# After Fix #1
+git add causallearn/utils/FedPC.py causallearn/search/FCMBased/FedCDH/FedCDH.py
+git commit -m "feat(hybrid): implement GlobalSumOfProducts for cross-group dependencies
+
+- Add GlobalSumOfProducts class to FedPC.py
+- Add sample_cluster_combinations helper
+- Rewrite hybrid mode to use sum-over-products
+- Expected: cross-group F1 0.000 → 0.3-0.7
+
+Ref: Seng feedback on missing sum node"
+
+# After Fix #2
+git add causallearn/utils/FedPC.py
+git commit -m "feat(horizontal): add structure-preserving aggregation options
+
+- Add aggregation_mode parameter (uniform, majority_vote, ll_weighted)
+- Implement majority voting on edges
+- Implement LL-weighted mixing
+- Expected: global F1 0.000 → 0.3+
+
+Ref: V2 analysis showing horizontal F1 dilution"
+
+# After Fix #3
+git add causallearn/search/FCMBased/FedCDH/FedCDH.py
+git commit -m "feat(vertical): add minimum feature constraint
+
+- Add min_features_per_client validation (default: 4)
+- Add feature_overlap_pct parameter (optional)
+- Log feature distribution per client
+- Expected: minimum 6 tests/client
+
+Ref: V2 analysis showing vertical insufficient edges"
+```
+
+### Phase 2-5 Commits
+- Commit after each major deliverable
+- Tag releases: v3-fixes, v3-baselines, v3-ablations, v3-final
+
+---
+
+**End of V3 Roadmap**
+
+**Status**: 📋 DOCUMENTED - Ready to implement
+**Last Updated**: 2026-05-02
+**Next**: Start Phase 1 - Implement GlobalSumOfProducts
