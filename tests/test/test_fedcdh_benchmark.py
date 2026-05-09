@@ -83,44 +83,60 @@ from causallearn.utils.data_utils import (
 #   3. Mode-specific challenges properly reflected (horizontal: sample heterogeneity,
 #      vertical: feature fragmentation, hybrid: both with overlap)
 
-# Experiment configurations (v2 with consistent sample sizes)
+# Experiment configurations (V3 optimized)
 # n_total: Total samples (consistent across modes)
 # n_per_client: Samples per client (horizontal/hybrid: n_total/K, vertical: n_total)
+#
+# V3 Optimizations:
+# - Increased epochs for better SPN training (+20-67%)
+# - num_local_clusters=3 for hybrid mode (more cluster combinations)
+# - force_clusters=2 to prevent BIC selecting K=1
+# - Relaxed structure_vote_threshold and alpha for better recall
 BENCHMARK_CONFIGS = {
     "quick": {
         "d": 5,
         "K": 2,
         "n_total": 200,
         "epochs": 20,
+        "num_local_clusters": 2,  # Keep low for speed
+        "force_clusters": None,  # Let BIC decide for quick tests
         "description": "Quick smoke test: 5 vars, 2 clients, 200 total samples",
     },
     "small": {
         "d": 8,
         "K": 3,
-        "n_total": 900,  # Increased from 600 for better ratio (900/8=112.5)
-        "epochs": 50,
+        "n_total": 900,
+        "epochs": 60,  # +20% from 50 (V3 optimization)
+        "num_local_clusters": 2,
+        "force_clusters": 2,  # V3: Force clustering
         "description": "Small-scale: 8 vars, 3 clients, 900 total samples (300/client horizontal)",
     },
     "medium": {
         "d": 10,
         "K": 3,
         "n_total": 1200,
-        "epochs": 100,
-        "description": "Medium-scale: 10 vars, 3 clients, 1200 total samples (400/client horizontal)",
+        "epochs": 120,  # +20% from 100 (V3 optimization)
+        "num_local_clusters": 3,  # V3: More clusters for hybrid sum-over-products
+        "force_clusters": 2,  # V3: Force clustering
+        "description": "Medium-scale: 10 vars, 3 clients, 1200 total samples (400/client horizontal) [V3 optimized]",
     },
     "large": {
         "d": 11,
         "K": 5,
-        "n_total": 2000,  # Increased from 1650, cleaner division (400/client)
-        "epochs": 150,
-        "description": "Large-scale: 11 vars, 5 clients, 2000 total samples (400/client horizontal)",
+        "n_total": 2500,  # Increased from 2000 (500/client)
+        "epochs": 200,  # +33% from 150 (V3 optimization)
+        "num_local_clusters": 3,  # V3: More clusters for K=5
+        "force_clusters": 2,  # V3: Force clustering
+        "description": "Large-scale: 11 vars, 5 clients, 2500 total samples (500/client horizontal) [V3 optimized]",
     },
     "sachs": {
         "d": 11,
         "K": 3,
         "n_total": 7466,  # Full Sachs dataset (will be loaded from file)
-        "epochs": 150,
-        "description": "Real Sachs protein signaling dataset: 11 vars, 3 clients, 7466 samples (ground truth: 17 edges)",
+        "epochs": 250,  # +67% from 150 (V3 optimization for nonlinear data)
+        "num_local_clusters": 3,  # V3: More clusters for real data
+        "force_clusters": 2,  # V3: Force clustering
+        "description": "Real Sachs protein signaling dataset: 11 vars, 3 clients, 7466 samples (ground truth: 17 edges) [V3 optimized]",
     },
 }
 
@@ -303,9 +319,11 @@ def run_single_experiment(
     use_ci_ranking=False,
     sparsity_percentile=0.2,
     force_clusters=None,
-    num_local_clusters=2,
+    num_local_clusters=None,
     skip_eval=False,
     horizontal_aggregation="structure_voting",
+    structure_vote_threshold=0.4,
+    alpha=0.08,
 ):
     """
     Run a single benchmark experiment (V3 with structure-preserving aggregation).
@@ -319,10 +337,12 @@ def run_single_experiment(
         device: Device to use
         use_ci_ranking: Enable CI ranking (experimental)
         sparsity_percentile: Sparsity for ranking (if enabled)
-        force_clusters: Force specific number of clusters (bypasses BIC)
-        num_local_clusters: Number of local clusters per client (v2 local clustering)
+        force_clusters: Force specific number of clusters (bypasses BIC), or None to use config default
+        num_local_clusters: Number of local clusters per client, or None to use config default
         skip_eval: Skip expensive SPN evaluation
         horizontal_aggregation: 'structure_voting', 'll_weighted', or 'mixture' (V3)
+        structure_vote_threshold: Voting threshold for structure_voting (V3, default: 0.4)
+        alpha: CI test significance level (V3 optimized, default: 0.08)
 
     Returns:
         Dictionary with results
@@ -332,9 +352,15 @@ def run_single_experiment(
     n_total = config["n_total"]
     epochs = config["epochs"]
 
+    # V3: Use config defaults if not explicitly overridden
+    if num_local_clusters is None:
+        num_local_clusters = config.get("num_local_clusters", 2)
+    if force_clusters is None:
+        force_clusters = config.get("force_clusters", None)
+
     logging.info(
         f"Running: {config_name} | {scenario} | {data_type} | seed={seed} | "
-        f"device={device} | adaptive_hyperparams=True"
+        f"device={device} | V3_optimized=True"
     )
     if use_ci_ranking:
         logging.info(f"  CI Ranking: enabled (sparsity={sparsity_percentile})")
@@ -422,7 +448,7 @@ def run_single_experiment(
         scenario=scenario,
         model_type=model_type,
         ci_method="spn",
-        alpha=0.05,
+        alpha=alpha,  # V3: Relaxed from 0.05 to 0.08 for better recall
         epochs=epochs,
         device=device,
         skip_bic=False,  # Use BIC for optimal cluster selection
@@ -432,23 +458,23 @@ def run_single_experiment(
         else "nonlinear",  # Sachs is nonlinear
         use_ci_ranking=use_ci_ranking,
         sparsity_percentile=sparsity_percentile,
-        force_num_clusters=force_clusters,
-        num_local_clusters=num_local_clusters,
+        force_num_clusters=force_clusters,  # V3: Use config default (typically 2)
+        num_local_clusters=num_local_clusters,  # V3: Use config default (typically 3)
         skip_spn_eval=skip_eval,
         # V3 features
         horizontal_aggregation=horizontal_aggregation,  # V3: structure_voting, ll_weighted, or mixture
-        structure_vote_threshold=0.5,  # V3: voting threshold for structure_voting
+        structure_vote_threshold=structure_vote_threshold,  # V3: Relaxed to 0.4 for better recall
     )
 
     logging.info(f"  FedCDH args: d={d}, K={K}, n_per_client={n_per_client}")
     logging.info(
-        f"  V2 features: data_type={args.data_type}, use_ci_ranking={use_ci_ranking}, "
-        f"num_local_clusters={num_local_clusters} (LOCAL clustering per client)"
+        f"  V3 features: data_type={args.data_type}, num_local_clusters={num_local_clusters}, "
+        f"alpha={alpha}, structure_vote_threshold={structure_vote_threshold}"
     )
     if scenario == "horizontal":
         logging.info(f"  V3 horizontal aggregation: {horizontal_aggregation}")
     if force_clusters is not None:
-        logging.info(f"  Forcing K={force_clusters} clusters (bypassing BIC selection)")
+        logging.info(f"  Force K={force_clusters} clusters (bypassing BIC)")
 
     fedcdh = FedCDH(args)
 
@@ -525,10 +551,12 @@ def run_scenario_comparison(
     use_ci_ranking=False,
     sparsity_percentile=0.2,
     force_clusters=None,
-    num_local_clusters=2,
+    num_local_clusters=None,
     skip_eval=False,
     horizontal_aggregation="structure_voting",
     test_all_horizontal_strategies=False,
+    structure_vote_threshold=0.4,
+    alpha=0.08,
 ):
     """
     Benchmark: Compare 3 SPN scenarios (H/V/Hy) with V3 structure-preserving aggregation.
@@ -614,6 +642,8 @@ def run_scenario_comparison(
                     horizontal_aggregation=strategy
                     if strategy
                     else horizontal_aggregation,
+                    structure_vote_threshold=structure_vote_threshold,
+                    alpha=alpha,
                 )
                 results.append(result)
 
@@ -770,10 +800,12 @@ def main(
     use_ci_ranking=False,
     sparsity_percentile=0.2,
     force_clusters=None,
-    num_local_clusters=2,
+    num_local_clusters=None,
     skip_eval=False,
     horizontal_aggregation="structure_voting",
     test_all_horizontal_strategies=False,
+    structure_vote_threshold=0.4,
+    alpha=0.08,
 ):
     """
     Run V3 scenario comparison benchmark with structure-preserving aggregation.
@@ -785,11 +817,13 @@ def main(
         seeds: List of random seeds or None for default
         use_ci_ranking: Enable CI ranking (experimental)
         sparsity_percentile: Sparsity for ranking (if enabled)
-        force_clusters: Force specific number of clusters (bypasses BIC)
-        num_local_clusters: Number of local clusters per client (v2 local clustering)
+        force_clusters: Force specific number of clusters (overrides config default)
+        num_local_clusters: Number of local clusters per client (overrides config default)
         skip_eval: Skip SPN quality evaluation for faster smoke tests
         horizontal_aggregation: V3 horizontal aggregation strategy
         test_all_horizontal_strategies: Test all 3 horizontal strategies (V3)
+        structure_vote_threshold: Voting threshold for structure_voting (V3, default: 0.4)
+        alpha: CI test significance level (V3 optimized, default: 0.08)
     """
     # Use provided device or global DEVICE
     active_device = device if device is not None else DEVICE
@@ -861,6 +895,8 @@ def main(
         skip_eval=skip_eval,
         horizontal_aggregation=horizontal_aggregation,
         test_all_horizontal_strategies=test_all_horizontal_strategies,
+        structure_vote_threshold=structure_vote_threshold,
+        alpha=alpha,
     )
 
     overall_time = time.time() - overall_start
@@ -945,8 +981,8 @@ if __name__ == "__main__":
     parser.add_argument(
         "--num-local-clusters",
         type=int,
-        default=2,
-        help="Number of local clusters per client (default: 2, range: 1-3). V2: Uses LOCAL clustering per client following Seng et al. (2025).",
+        default=None,
+        help="Number of local clusters per client (default: use config value). V3: Config defaults are optimized (typically 3 for better sum-over-products).",
     )
     parser.add_argument(
         "--skip-eval",
@@ -966,6 +1002,18 @@ if __name__ == "__main__":
         action="store_true",
         help="V3: Test all 3 horizontal strategies (structure_voting, ll_weighted, mixture) instead of just one.",
     )
+    parser.add_argument(
+        "--structure-vote-threshold",
+        type=float,
+        default=0.4,
+        help="V3: Voting threshold for structure_voting (default: 0.4 = 40%% agreement). Lower = more edges, higher = fewer edges.",
+    )
+    parser.add_argument(
+        "--alpha",
+        type=float,
+        default=0.08,
+        help="V3: CI test significance level (default: 0.08, relaxed from V2's 0.05 for better recall). Lower = stricter, higher = more permissive.",
+    )
 
     args = parser.parse_args()
 
@@ -982,4 +1030,6 @@ if __name__ == "__main__":
         skip_eval=args.skip_eval,
         horizontal_aggregation=args.horizontal_aggregation,
         test_all_horizontal_strategies=args.test_all_horizontal_strategies,
+        structure_vote_threshold=args.structure_vote_threshold,
+        alpha=args.alpha,
     )
