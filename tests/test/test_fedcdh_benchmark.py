@@ -1,18 +1,22 @@
 """
-FedCDH v2 Benchmark Suite - Adaptive Hyperparameters + CI Ranking.
+FedCDH V3 Benchmark Suite - Structure-Preserving Aggregation + GlobalSumOfProducts.
 
 Compares 3 SPN aggregation scenarios (Horizontal/Vertical/Hybrid) with
-v2 adaptive hyperparameters and optional CI ranking.
+V3 critical fixes for dependency preservation.
 
-v2 Features:
-- ✅ 5-Criterion Adaptive Hyperparameters (mode-aware capacity scaling)
-- ✅ Optional Top-N% CI Ranking (percentile-based edge selection)
-- ✅ Consistent sample sizes across modes (n_total same, distribution differs)
+V3 Features:
+- ✅ Horizontal: 3 aggregation strategies (structure_voting, ll_weighted, mixture)
+- ✅ Hybrid: GlobalSumOfProducts (sum-over-products breaks independence)
+- ✅ Vertical: ProductOverGroups (unchanged from V2)
+- ✅ Sachs protein network dataset integrated
+- ✅ V2 adaptive hyperparameters maintained
 
 Scenarios:
 - Horizontal: Mixture-of-experts (sample partitioning across K clients)
+  * V3 Strategies: structure_voting (recommended), ll_weighted, mixture (V2 baseline)
 - Vertical: Product-of-experts (feature partitioning, all clients see all samples)
 - Hybrid: Mixture-then-Product (overlapping features + sample partitioning)
+  * V3 Fix: GlobalSumOfProducts breaks independence between feature groups
 
 Sample Size Consistency:
 - All modes use n_total samples, but distribution differs:
@@ -25,9 +29,9 @@ Runtime: ~15-30 minutes per configuration (GPU), ~45-90 minutes (CPU)
 
 Data:
 - quick/small/medium/large configs: Synthetic data (linear or nonlinear)
-- sachs config: Real Sachs protein signaling dataset
+- sachs config: Real Sachs protein signaling dataset (11 vars, 7466 samples, 17 edges)
 
-Updated: April 22, 2026 - v2 implementation with adaptive hyperparameters
+Updated: May 9, 2026 - V3 implementation with structure-preserving aggregation
 """
 
 import logging
@@ -114,9 +118,9 @@ BENCHMARK_CONFIGS = {
     "sachs": {
         "d": 11,
         "K": 3,
-        "n_total": 852,  # Divisible by 3 for clean horizontal split
+        "n_total": 7466,  # Full Sachs dataset (will be loaded from file)
         "epochs": 150,
-        "description": "Real Sachs protein signaling dataset: 11 vars, 3 clients, 852 samples (284/client)",
+        "description": "Real Sachs protein signaling dataset: 11 vars, 3 clients, 7466 samples (ground truth: 17 edges)",
     },
 }
 
@@ -301,9 +305,10 @@ def run_single_experiment(
     force_clusters=None,
     num_local_clusters=2,
     skip_eval=False,
+    horizontal_aggregation="structure_voting",
 ):
     """
-    Run a single benchmark experiment (v2 with adaptive hyperparameters).
+    Run a single benchmark experiment (V3 with structure-preserving aggregation).
 
     Args:
         config_name: Configuration name
@@ -316,6 +321,8 @@ def run_single_experiment(
         sparsity_percentile: Sparsity for ranking (if enabled)
         force_clusters: Force specific number of clusters (bypasses BIC)
         num_local_clusters: Number of local clusters per client (v2 local clustering)
+        skip_eval: Skip expensive SPN evaluation
+        horizontal_aggregation: 'structure_voting', 'll_weighted', or 'mixture' (V3)
 
     Returns:
         Dictionary with results
@@ -340,28 +347,55 @@ def run_single_experiment(
     # Load data: Use real Sachs dataset if config is "sachs", otherwise generate synthetic
     if config_name == "sachs":
         logging.info("Loading real Sachs dataset...")
-        from tests.utils.sachs_loader import load_sachs_federated
+        import gzip
+        import pandas as pd
 
-        # Load Sachs data partitioned by interventional conditions (horizontal-like)
-        X_splits_raw, B, c_indx_raw = load_sachs_federated(
-            n_clients=K, n_samples_limit=n_total
-        )
+        # Load Sachs protein network data
+        data_path = "tests/data/sachs.interventional.txt.gz"
+        with gzip.open(data_path, "rt") as f:
+            df = pd.read_csv(f, sep="\t")
 
-        # Reconstruct global data
-        X = np.vstack(X_splits_raw)
+        X = df.values
+        actual_n = X.shape[0]
+        actual_d = X.shape[1]
 
-        # Re-partition based on scenario
-        # Create c_indx matching the global data shape
-        c_indx = np.repeat(np.arange(K), n_total // K).reshape(-1, 1)
-        X_splits = partition_data(X, c_indx, K, scenario)
-
-        W = B  # Use ground truth DAG as W (no need for separate weights)
-        choice = None  # No heterogeneity choice for real data
+        # Ground truth adjacency matrix (17 edges from Sachs et al. 2005)
+        B = np.zeros((11, 11))
+        edges = [
+            (7, 0),
+            (7, 1),
+            (7, 5),
+            (7, 6),
+            (7, 9),
+            (7, 10),  # PKA
+            (8, 0),
+            (8, 1),
+            (8, 8),
+            (8, 9),
+            (8, 10),  # PKC
+            (2, 3),
+            (3, 4),
+            (4, 2),  # Plcg-PIP2-PIP3 cycle
+            (0, 1),
+            (1, 5),
+            (5, 6),  # Raf-Mek-Erk-Akt pathway
+        ]
+        for i, j in edges:
+            B[i, j] = 1
 
         logging.info(
-            f"  Sachs data: {X.shape[0]} samples, {X.shape[1]} features, "
-            f"partitioned for {scenario} scenario"
+            f"  Sachs data: {actual_n} samples, {actual_d} features, {np.sum(B)} edges"
         )
+
+        # Partition based on scenario
+        c_indx = np.repeat(np.arange(K), actual_n // K).reshape(-1, 1)
+        X_splits = partition_data(X, c_indx, K, scenario)
+
+        W = B
+        choice = None
+
+        # Override n_total to actual data size
+        n_total = actual_n
     else:
         # Generate synthetic data
         W, B, X, c_indx, choice = create_benchmark_data(
@@ -379,7 +413,7 @@ def run_single_experiment(
         # Horizontal/Hybrid: Samples split across clients
         n_per_client = n_total // K
 
-    # Setup FedCDH with v2 parameters
+    # Setup FedCDH with V3 parameters
     model_type = "real" if config_name == "sachs" else "synthetic"
     args = Namespace(
         K=K,
@@ -392,20 +426,27 @@ def run_single_experiment(
         epochs=epochs,
         device=device,
         skip_bic=False,  # Use BIC for optimal cluster selection
-        # v2 features
-        data_type=data_type,  # NEW: For adaptive hyperparameters
-        use_ci_ranking=use_ci_ranking,  # NEW: Enable ranking (experimental)
-        sparsity_percentile=sparsity_percentile,  # NEW: For ranking
-        force_num_clusters=force_clusters,  # NEW: Force specific K (bypasses BIC)
-        num_local_clusters=num_local_clusters,  # V2: LOCAL clustering per client (Seng 2025)
-        skip_spn_eval=skip_eval,  # NEW: Skip SPN quality evaluation for faster smoke tests
+        # V2 features
+        data_type=data_type
+        if config_name != "sachs"
+        else "nonlinear",  # Sachs is nonlinear
+        use_ci_ranking=use_ci_ranking,
+        sparsity_percentile=sparsity_percentile,
+        force_num_clusters=force_clusters,
+        num_local_clusters=num_local_clusters,
+        skip_spn_eval=skip_eval,
+        # V3 features
+        horizontal_aggregation=horizontal_aggregation,  # V3: structure_voting, ll_weighted, or mixture
+        structure_vote_threshold=0.5,  # V3: voting threshold for structure_voting
     )
 
     logging.info(f"  FedCDH args: d={d}, K={K}, n_per_client={n_per_client}")
     logging.info(
-        f"  v2 features: data_type={data_type}, use_ci_ranking={use_ci_ranking}, "
+        f"  V2 features: data_type={args.data_type}, use_ci_ranking={use_ci_ranking}, "
         f"num_local_clusters={num_local_clusters} (LOCAL clustering per client)"
     )
+    if scenario == "horizontal":
+        logging.info(f"  V3 horizontal aggregation: {horizontal_aggregation}")
     if force_clusters is not None:
         logging.info(f"  Forcing K={force_clusters} clusters (bypassing BIC selection)")
 
@@ -424,22 +465,27 @@ def run_single_experiment(
     if device == "cuda":
         torch.cuda.empty_cache()
 
-    # Extract metrics (v2 with additional tracking)
-    return {
+    # Extract metrics (V3 with aggregation strategy tracking)
+    result_dict = {
         "config": config_name,
         "scenario": scenario,
-        "data_type": data_type,
+        "data_type": args.data_type,  # Use actual data_type (may be overridden for Sachs)
         "seed": seed,
         "d": d,
         "K": K,
-        "n_total": n_total,  # Track total samples
-        "n_per_client": n_per_client,  # Track per-client samples
+        "n_total": n_total,
+        "n_per_client": n_per_client,
         "epochs": epochs,
         "device": device,
-        # v2 tracking
+        # V2 tracking
         "use_ci_ranking": use_ci_ranking,
         "sparsity_percentile": sparsity_percentile if use_ci_ranking else None,
-        "v2_adaptive": True,  # Flag to indicate v2 adaptive hyperparameters used
+        "v2_adaptive": True,
+        # V3 tracking
+        "v3_enabled": True,
+        "horizontal_aggregation": horizontal_aggregation
+        if scenario == "horizontal"
+        else None,
         # Performance metrics
         "skeleton_f1": results.get("f1_skeleton", 0.0),
         "skeleton_precision": results.get("precision_skeleton", 0.0),
@@ -454,6 +500,16 @@ def run_single_experiment(
         "comm_cost": results.get("comm_cost", 0.0),
         "eval_dir": getattr(fedcdh, "spn_eval_dir", None),
     }
+
+    # Add V3-specific metrics for horizontal mode
+    if scenario == "horizontal" and horizontal_aggregation == "structure_voting":
+        if hasattr(fedcdh, "edge_confidence") and fedcdh.edge_confidence:
+            result_dict["avg_edge_confidence"] = float(
+                np.mean(list(fedcdh.edge_confidence.values()))
+            )
+            result_dict["num_consensus_edges"] = len(fedcdh.edge_confidence)
+
+    return result_dict
 
 
 # ============================================================
@@ -471,11 +527,13 @@ def run_scenario_comparison(
     force_clusters=None,
     num_local_clusters=2,
     skip_eval=False,
+    horizontal_aggregation="structure_voting",
+    test_all_horizontal_strategies=False,
 ):
     """
-    Benchmark: Compare 3 SPN scenarios (H/V/Hy) with v2 adaptive hyperparameters.
+    Benchmark: Compare 3 SPN scenarios (H/V/Hy) with V3 structure-preserving aggregation.
 
-    Tests which aggregation strategy performs best with adaptive capacity scaling.
+    Tests which aggregation strategy performs best with V3 fixes.
 
     Args:
         config_name: Configuration to use (quick/small/medium/large/sachs)
@@ -485,6 +543,10 @@ def run_scenario_comparison(
         use_ci_ranking: Enable CI ranking (experimental)
         sparsity_percentile: Sparsity for ranking (if enabled)
         force_clusters: Force specific number of clusters (bypasses BIC)
+        num_local_clusters: Number of local clusters per client
+        skip_eval: Skip expensive SPN evaluation
+        horizontal_aggregation: Strategy for horizontal mode (V3)
+        test_all_horizontal_strategies: Test all 3 horizontal strategies (V3)
     """
     if seeds is None:
         seeds = SEEDS
@@ -494,11 +556,21 @@ def run_scenario_comparison(
     config = BENCHMARK_CONFIGS[config_name]
     scenarios = ["horizontal", "vertical", "hybrid"]
 
+    # V3: Test all horizontal strategies if requested
+    if test_all_horizontal_strategies:
+        horizontal_strategies = ["structure_voting", "ll_weighted", "mixture"]
+    else:
+        horizontal_strategies = [horizontal_aggregation]
+
     logging.info("\n" + "=" * 80)
-    logging.info(f"BENCHMARK: v2 SCENARIO COMPARISON ({config_name})")
+    logging.info(f"BENCHMARK: V3 SCENARIO COMPARISON ({config_name})")
     logging.info(config["description"])
     logging.info(f"Data type: {data_type}")
-    logging.info(f"v2 Adaptive Hyperparameters: ENABLED")
+    logging.info(f"V3 Structure-Preserving Aggregation: ENABLED")
+    if test_all_horizontal_strategies:
+        logging.info(f"Horizontal strategies: {horizontal_strategies}")
+    else:
+        logging.info(f"Horizontal aggregation: {horizontal_aggregation}")
     if use_ci_ranking:
         logging.info(f"CI Ranking: ENABLED (sparsity={sparsity_percentile})")
     else:
@@ -508,42 +580,57 @@ def run_scenario_comparison(
 
     results = []
     run_counter = 1
-    total_runs = len(scenarios) * len(seeds)
+
+    # Calculate total runs (horizontal may have multiple strategies)
+    horizontal_runs = len(horizontal_strategies) if "horizontal" in scenarios else 0
+    other_runs = len([s for s in scenarios if s != "horizontal"])
+    total_runs = (horizontal_runs + other_runs) * len(seeds)
 
     for scenario in scenarios:
-        for seed in seeds:
-            logging.info(
-                f"\n[Run {run_counter}/{total_runs}] Starting: {scenario} (seed={seed})"
-            )
+        # For horizontal mode, test all requested strategies
+        strategies_to_test = (
+            horizontal_strategies if scenario == "horizontal" else [None]
+        )
 
-            result = run_single_experiment(
-                config_name=config_name,
-                config=config,
-                scenario=scenario,
-                data_type=data_type,
-                seed=seed,
-                device=active_device,
-                use_ci_ranking=use_ci_ranking,
-                sparsity_percentile=sparsity_percentile,
-                force_clusters=force_clusters,
-                num_local_clusters=num_local_clusters,
-                skip_eval=skip_eval,
-            )
-            results.append(result)
+        for strategy in strategies_to_test:
+            for seed in seeds:
+                strategy_label = f" ({strategy})" if strategy else ""
+                logging.info(
+                    f"\n[Run {run_counter}/{total_runs}] Starting: {scenario}{strategy_label} (seed={seed})"
+                )
 
-            # Log result with eval_dir
-            eval_dir = result.get("eval_dir", "N/A")
-            logging.info(
-                f"  {scenario:12s} seed={seed} | "
-                f"Skeleton F1={result['skeleton_f1']:.3f} | "
-                f"DAG F1={result['dag_f1']:.3f} | "
-                f"Time={result['train_time']:.1f}s"
-            )
-            if eval_dir != "N/A":
-                logging.info(f"  Experiment directory: {eval_dir}")
-                logging.info(f"  UMAP images: {eval_dir}/umap_*.png")
+                result = run_single_experiment(
+                    config_name=config_name,
+                    config=config,
+                    scenario=scenario,
+                    data_type=data_type,
+                    seed=seed,
+                    device=active_device,
+                    use_ci_ranking=use_ci_ranking,
+                    sparsity_percentile=sparsity_percentile,
+                    force_clusters=force_clusters,
+                    num_local_clusters=num_local_clusters,
+                    skip_eval=skip_eval,
+                    horizontal_aggregation=strategy
+                    if strategy
+                    else horizontal_aggregation,
+                )
+                results.append(result)
 
-            run_counter += 1
+                # Log result with eval_dir
+                eval_dir = result.get("eval_dir", "N/A")
+                strategy_info = f" ({strategy})" if strategy else ""
+                logging.info(
+                    f"  {scenario:12s}{strategy_info:18s} seed={seed} | "
+                    f"Skeleton F1={result['skeleton_f1']:.3f} | "
+                    f"DAG F1={result['dag_f1']:.3f} | "
+                    f"Time={result['train_time']:.1f}s"
+                )
+                if eval_dir != "N/A":
+                    logging.info(f"  Experiment directory: {eval_dir}")
+                    logging.info(f"  UMAP images: {eval_dir}/umap_*.png")
+
+                run_counter += 1
 
     return results
 
@@ -685,9 +772,11 @@ def main(
     force_clusters=None,
     num_local_clusters=2,
     skip_eval=False,
+    horizontal_aggregation="structure_voting",
+    test_all_horizontal_strategies=False,
 ):
     """
-    Run v2 scenario comparison benchmark with adaptive hyperparameters.
+    Run V3 scenario comparison benchmark with structure-preserving aggregation.
 
     Args:
         config_name: Configuration to use (quick/small/medium/large/sachs)
@@ -696,9 +785,11 @@ def main(
         seeds: List of random seeds or None for default
         use_ci_ranking: Enable CI ranking (experimental)
         sparsity_percentile: Sparsity for ranking (if enabled)
-        force_clusters: Force specific number of clusters (bypasses BIC). Recommended: 2 for MEDIUM.
+        force_clusters: Force specific number of clusters (bypasses BIC)
         num_local_clusters: Number of local clusters per client (v2 local clustering)
         skip_eval: Skip SPN quality evaluation for faster smoke tests
+        horizontal_aggregation: V3 horizontal aggregation strategy
+        test_all_horizontal_strategies: Test all 3 horizontal strategies (V3)
     """
     # Use provided device or global DEVICE
     active_device = device if device is not None else DEVICE
@@ -717,12 +808,16 @@ def main(
     )
 
     logging.info("\n" + "=" * 80)
-    logging.info("FEDCDH v2 BENCHMARK SUITE - ADAPTIVE HYPERPARAMETERS")
+    logging.info("FEDCDH V3 BENCHMARK SUITE - STRUCTURE-PRESERVING AGGREGATION")
     logging.info("=" * 80)
     logging.info(f"Configuration: {config_name}")
     logging.info(f"Data type: {data_type}")
     logging.info(f"Device: {active_device}")
-    logging.info(f"v2 Adaptive Hyperparameters: ENABLED")
+    logging.info(f"V3 Structure-Preserving Aggregation: ENABLED")
+    if test_all_horizontal_strategies:
+        logging.info(f"Horizontal strategies: structure_voting, ll_weighted, mixture")
+    else:
+        logging.info(f"Horizontal aggregation: {horizontal_aggregation}")
     if use_ci_ranking:
         logging.info(f"CI Ranking: ENABLED (sparsity={sparsity_percentile})")
     else:
@@ -753,7 +848,7 @@ def main(
 
     overall_start = time.time()
 
-    # Run v2 scenario comparison benchmark
+    # Run V3 scenario comparison benchmark
     all_results = run_scenario_comparison(
         config_name=config_name,
         data_type=data_type,
@@ -764,6 +859,8 @@ def main(
         force_clusters=force_clusters,
         num_local_clusters=num_local_clusters,
         skip_eval=skip_eval,
+        horizontal_aggregation=horizontal_aggregation,
+        test_all_horizontal_strategies=test_all_horizontal_strategies,
     )
 
     overall_time = time.time() - overall_start
@@ -797,7 +894,7 @@ if __name__ == "__main__":
     import argparse
 
     parser = argparse.ArgumentParser(
-        description="FedCDH v2 Benchmark Suite - Adaptive Hyperparameters + CI Ranking"
+        description="FedCDH V3 Benchmark Suite - Structure-Preserving Aggregation + GlobalSumOfProducts"
     )
     parser.add_argument(
         "--config",
@@ -856,6 +953,19 @@ if __name__ == "__main__":
         action="store_true",
         help="Skip expensive SPN quality evaluation (UMAP, independence tests, dashboards) for faster smoke tests. Only computes F1 scores.",
     )
+    # V3 arguments
+    parser.add_argument(
+        "--horizontal-aggregation",
+        type=str,
+        default="structure_voting",
+        choices=["structure_voting", "ll_weighted", "mixture"],
+        help="V3 horizontal aggregation strategy (default: structure_voting). structure_voting=democratic voting (recommended), ll_weighted=quality-weighted, mixture=V2 baseline.",
+    )
+    parser.add_argument(
+        "--test-all-horizontal-strategies",
+        action="store_true",
+        help="V3: Test all 3 horizontal strategies (structure_voting, ll_weighted, mixture) instead of just one.",
+    )
 
     args = parser.parse_args()
 
@@ -870,4 +980,6 @@ if __name__ == "__main__":
         force_clusters=args.force_clusters,
         num_local_clusters=args.num_local_clusters,
         skip_eval=args.skip_eval,
+        horizontal_aggregation=args.horizontal_aggregation,
+        test_all_horizontal_strategies=args.test_all_horizontal_strategies,
     )
