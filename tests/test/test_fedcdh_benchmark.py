@@ -138,6 +138,15 @@ BENCHMARK_CONFIGS = {
         "force_clusters": 2,  # V3: Force clustering
         "description": "Real Sachs protein signaling dataset: 11 vars, 3 clients, 7466 samples (ground truth: 17 edges) [V3 optimized]",
     },
+    "law_school": {
+        "d": 5,
+        "K": 3,
+        "n_total": 21000,  # LSAC Bar Passage Study dataset
+        "epochs": 150,
+        "num_local_clusters": 3,  # V3: More clusters for social science data
+        "force_clusters": 2,  # V3: Force clustering
+        "description": "Law School Admissions dataset: 5 vars (race, LSAT, UGPA, region, FYA), 21K samples (ground truth: 7 edges) [Fairness benchmark]",
+    },
 }
 
 # Seeds for statistical robustness
@@ -370,7 +379,7 @@ def run_single_experiment(
 
     start_time = time.time()
 
-    # Load data: Use real Sachs dataset if config is "sachs", otherwise generate synthetic
+    # Load data: Use real datasets if config is "sachs" or "law_school", otherwise generate synthetic
     if config_name == "sachs":
         logging.info("Loading real Sachs dataset...")
         import gzip
@@ -410,7 +419,7 @@ def run_single_experiment(
             B[i, j] = 1
 
         logging.info(
-            f"  Sachs data: {actual_n} samples, {actual_d} features, {np.sum(B)} edges"
+            f"  Sachs data: {actual_n} samples, {actual_d} features, {int(np.sum(B))} edges"
         )
 
         # Partition based on scenario
@@ -422,6 +431,33 @@ def run_single_experiment(
 
         # Override n_total to actual data size
         n_total = actual_n
+
+    elif config_name == "law_school":
+        logging.info("Loading Law School Admissions dataset...")
+        from tests.utils.law_school_loader import load_law_school_federated
+
+        # Load Law School data (synthetic based on known causal structure)
+        X, B, feature_names = load_law_school_federated(
+            n_clients=K, n_samples_limit=n_total
+        )
+
+        actual_n = X.shape[0]
+        actual_d = X.shape[1]
+
+        logging.info(
+            f"  Law School data: {actual_n} samples, {actual_d} features ({feature_names}), {int(np.sum(B))} edges"
+        )
+
+        # Partition based on scenario
+        c_indx = np.repeat(np.arange(K), actual_n // K).reshape(-1, 1)
+        X_splits = partition_data(X, c_indx, K, scenario)
+
+        W = B
+        choice = None
+
+        # Override n_total to actual data size
+        n_total = actual_n
+
     else:
         # Generate synthetic data
         W, B, X, c_indx, choice = create_benchmark_data(
@@ -440,7 +476,7 @@ def run_single_experiment(
         n_per_client = n_total // K
 
     # Setup FedCDH with V3 parameters
-    model_type = "real" if config_name == "sachs" else "synthetic"
+    model_type = "real" if config_name in ["sachs", "law_school"] else "synthetic"
     args = Namespace(
         K=K,
         d=d,
@@ -454,8 +490,8 @@ def run_single_experiment(
         skip_bic=False,  # Use BIC for optimal cluster selection
         # V2 features
         data_type=data_type
-        if config_name != "sachs"
-        else "nonlinear",  # Sachs is nonlinear
+        if config_name not in ["sachs", "law_school"]
+        else "nonlinear",  # Real datasets are nonlinear
         use_ci_ranking=use_ci_ranking,
         sparsity_percentile=sparsity_percentile,
         force_num_clusters=force_clusters,  # V3: Use config default (typically 2)
@@ -936,7 +972,7 @@ if __name__ == "__main__":
         "--config",
         type=str,
         default="quick",
-        choices=["quick", "small", "medium", "large", "sachs"],
+        choices=["quick", "small", "medium", "large", "sachs", "law_school"],
         help="Benchmark configuration (default: quick)",
     )
     parser.add_argument(

@@ -2479,6 +2479,11 @@ def compute_adaptive_hyperparameters(
 
     final_depth = max(1, base_depth + depth_bonus)
 
+    # Safety constraint: Ensure 2**depth doesn't exceed num_features
+    # (simple_einet requires 2**depth <= num_features for tree construction)
+    max_safe_depth = int(np.floor(np.log2(max(1, num_features))))
+    final_depth = min(final_depth, max_safe_depth)
+
     # Criterion 4: Quality-Aware Epoch Scheduling
     # More features need more training, especially in horizontal mode
     # Base scaling: d^1.5 (superlinear growth)
