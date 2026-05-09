@@ -3,7 +3,7 @@ EXPERIMENT MANIFEST
 ================================================================================
 
 Total experiments: 3
-Generated: 2026-05-01 11:27:27
+Generated: 2026-05-09 15:29:42
 
 
 ================================================================================
@@ -21,10 +21,10 @@ Performance:
   Skeleton F1:  0.667
   Skeleton SHD: 5.0
   DAG F1:       0.133
-  Train Time:   113.9s
+  Train Time:   5.1s
 
 Experiment Directory:
-  /Users/M279402/PycharmProjects/fl_spn_CDH/eval/20260501_112329_horizontal_2clients_5vars_200samples
+  /Users/M279402/PycharmProjects/fl_spn_CDH/eval/20260509_152935_horizontal_2clients_5vars_200samples
 
 Generated Files:
   - run.log (detailed training log)
@@ -46,10 +46,10 @@ Performance:
   Skeleton F1:  0.222
   Skeleton SHD: 7.0
   DAG F1:       0.000
-  Train Time:   24.4s
+  Train Time:   3.3s
 
 Experiment Directory:
-  /Users/M279402/PycharmProjects/fl_spn_CDH/eval/20260501_112522_vertical_2clients_5vars_200samples
+  /Users/M279402/PycharmProjects/fl_spn_CDH/eval/20260509_152940_vertical_2clients_5vars_200samples
 
 Generated Files:
   - run.log (detailed training log)
@@ -71,10 +71,10 @@ Performance:
   Skeleton F1:  0.000
   Skeleton SHD: 7.0
   DAG F1:       0.000
-  Train Time:   102.3s
+  Train Time:   1.5s
 
 Experiment Directory:
-  /Users/M279402/PycharmProjects/fl_spn_CDH/eval/20260501_112546_hybrid_2clients_5vars_200samples
+  /Users/M279402/PycharmProjects/fl_spn_CDH/eval/20260509_152942_hybrid_2clients_5vars_200samples
 
 Generated Files:
   - run.log (detailed training log)

@@ -278,6 +278,11 @@ class FedCDH:
         # to validate that local models learn correct distributions before causal discovery
         self.local_spns = []
 
+        # V3: Structure-preserving aggregation for horizontal mode
+        # Options: "mixture" (default), "structure_voting", "ll_weighted"
+        self.horizontal_aggregation = getattr(args, "horizontal_aggregation", "mixture")
+        self.structure_vote_threshold = getattr(args, "structure_vote_threshold", 0.5)
+
     def _extract_feature_indices(self, client_id: int, include_context: bool = False):
         """
         Extract feature indices for a client in vertical mode.
@@ -773,11 +778,11 @@ class FedCDH:
 
             if self.scenario == "horizontal":
                 # HORIZONTAL MODE: Mixture over client local mixtures
-                # P(X) = Σ_k w_k × P_k(X)
-                # where P_k = LocalClusterMixture for client k
+                # V3 Enhancement: Support structure-preserving aggregation
                 logging.info(
                     "[Horizontal Mode] Building global mixture over client mixtures"
                 )
+                logging.info(f"  Aggregation method: {self.horizontal_aggregation}")
 
                 # Dataset weights (proportional to sample counts)
                 dataset_weights = np.array(
@@ -787,15 +792,95 @@ class FedCDH:
 
                 logging.info(f"  Dataset weights: {dataset_weights}")
 
-                # Global mixture
-                fed_spn = GlobalFedSPN(
-                    components=client_local_mixtures,
-                    weights=dataset_weights.tolist(),
-                    strategy="mixture",
-                    device=self.device,
-                )
+                # V3: Choose aggregation strategy
+                if self.horizontal_aggregation == "structure_voting":
+                    # Solution 1: Structure-preserving via majority voting
+                    from causallearn.utils.structure_aggregation import (
+                        extract_local_dependency_graph,
+                        aggregate_structures_by_voting,
+                        log_structure_aggregation_summary,
+                    )
 
-                logging.info("  ✓ Horizontal global mixture built")
+                    logging.info(
+                        "  [Structure Voting] Extracting dependency graphs from local SPNs..."
+                    )
+
+                    # Extract local dependency graphs
+                    local_graphs = []
+                    for k, (spn, X_k) in enumerate(
+                        zip(client_local_mixtures, X_splits)
+                    ):
+                        logging.info(f"    Client {k}: Extracting dependencies...")
+                        graph = extract_local_dependency_graph(
+                            spn_model=spn,
+                            X_data=X_k,
+                            alpha=alpha,
+                            num_permutations=50,
+                            device=str(self.device),
+                        )
+                        local_graphs.append(graph)
+                        logging.info(f"      → {len(graph.edges())} edges detected")
+
+                    # Aggregate via majority voting
+                    consensus_graph, edge_confidence = aggregate_structures_by_voting(
+                        local_graphs=local_graphs,
+                        threshold=self.structure_vote_threshold,
+                    )
+
+                    # Log summary
+                    log_structure_aggregation_summary(
+                        local_graphs=local_graphs,
+                        consensus_graph=consensus_graph,
+                        edge_confidence=edge_confidence,
+                    )
+
+                    # Store consensus for downstream causal discovery
+                    # Note: This graph can be used to constrain PC algorithm or as direct output
+                    self.consensus_dependency_graph = consensus_graph
+                    self.edge_confidence = edge_confidence
+
+                    # Build standard mixture for SPN inference (still needed for CI tests)
+                    fed_spn = GlobalFedSPN(
+                        components=client_local_mixtures,
+                        weights=dataset_weights.tolist(),
+                        strategy="mixture",
+                        device=self.device,
+                    )
+
+                    logging.info(
+                        "  ✓ Structure voting completed + global mixture built"
+                    )
+
+                elif self.horizontal_aggregation == "ll_weighted":
+                    # Solution 2: Confidence-weighted by log-likelihood
+                    from causallearn.utils.structure_aggregation import (
+                        build_structure_weighted_mixture,
+                    )
+
+                    logging.info("  [LL Weighted] Computing quality-based weights...")
+
+                    fed_spn, quality_weights = build_structure_weighted_mixture(
+                        local_spns=client_local_mixtures,
+                        local_data=X_splits,
+                        device=str(self.device),
+                        weight_by_ll=True,
+                    )
+
+                    logging.info(f"    Sample weights: {dataset_weights}")
+                    logging.info(f"    Quality weights: {quality_weights}")
+                    logging.info("  ✓ LL-weighted mixture built")
+
+                else:
+                    # Default: Standard mixture (V2 behavior)
+                    # P(X) = Σ_k w_k × P_k(X)
+                    fed_spn = GlobalFedSPN(
+                        components=client_local_mixtures,
+                        weights=dataset_weights.tolist(),
+                        strategy="mixture",
+                        device=self.device,
+                    )
+
+                    logging.info("  ✓ Horizontal global mixture built (default)")
 
             elif self.scenario == "vertical":
                 # VERTICAL MODE: Product over disjoint feature groups
