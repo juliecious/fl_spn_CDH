@@ -388,7 +388,11 @@ def run_single_experiment(
         # Load Sachs protein network data
         data_path = "tests/data/sachs.interventional.txt.gz"
         with gzip.open(data_path, "rt") as f:
-            df = pd.read_csv(f, sep="\t")
+            df = pd.read_csv(f, sep=" ")  # Space-delimited, not tab
+
+        # Remove 'INT' column if present (intervention type)
+        if "INT" in df.columns:
+            df = df.drop("INT", axis=1)
 
         X = df.values
         actual_n = X.shape[0]
