@@ -1,6 +1,10 @@
 """
 Benchmark Loaders for Standard Bayesian Networks (Sachs, Asia, Alarm).
 Provides ground truth DAGs and heterogeneous data generation for Federated Causal Discovery.
+
+For complete implementations with data generation, see:
+- dream_loader.py: DREAM4 gene regulatory networks (5 networks, 10 nodes each)
+- bayesian_network_loaders.py: Asia (8 nodes) and Alarm (37 nodes) with full data generation
 """
 
 import numpy as np
@@ -54,10 +58,15 @@ def load_standard_graph(name: str) -> np.ndarray:
     Load the binary adjacency matrix for a standard benchmark graph.
 
     Args:
-        name: 'asia', 'sachs', or 'alarm' (placeholder)
+        name: 'asia', 'sachs', 'alarm', or 'dream4_netX' (X=1-5)
 
     Returns:
         Adjacency matrix [d, d]
+
+    Note:
+        For full data generation capabilities, use:
+        - bayesian_network_loaders.load_bayesian_network() for Asia/Alarm
+        - dream_loader.load_dream4_network() for DREAM4 networks
     """
     name = name.lower()
     if name == "asia":
@@ -65,12 +74,23 @@ def load_standard_graph(name: str) -> np.ndarray:
     elif name == "sachs":
         return SACHS_DAG
     elif name == "alarm":
-        # Placeholder for Alarm (37 nodes) - usually requires BIF parsing
-        # For now, return a random DAG of size 37 if requested, or raise error
-        # Returning generic DAG for now to prevent crash if selected
-        from causallearn.utils.data_utils import simulate_dag
+        # Import from complete implementation
+        try:
+            from .bayesian_network_loaders import ALARM_DAG
 
-        return simulate_dag(37, 37 * 1.5, "SF")
+            return ALARM_DAG
+        except ImportError:
+            raise ImportError("Install bayesian_network_loaders.py for Alarm network")
+    elif name.startswith("dream4_net"):
+        # DREAM4 network: dream4_net1, dream4_net2, etc.
+        try:
+            net_id = int(name.replace("dream4_net", ""))
+            from .dream_loader import load_dream4_network
+
+            B, _ = load_dream4_network(net_id)
+            return B
+        except (ValueError, ImportError) as e:
+            raise ValueError(f"Invalid DREAM4 network name or import error: {e}")
     else:
         raise ValueError(f"Unknown graph name: {name}")
 

@@ -1,6 +1,0 @@
-,,,skeleton_f1,skeleton_f1,dag_f1,dag_f1,skeleton_shd,skeleton_shd,dag_shd,dag_shd,train_time,train_time
-,,,mean,std,mean,std,mean,std,mean,std,mean,std
-config,scenario,data_type,,,,,,,,,,
-quick,horizontal,linear,0.667,,0.133,,5.0,,9.0,,5.126,
-quick,hybrid,linear,0.0,,0.0,,7.0,,7.0,,1.511,
-quick,vertical,linear,0.222,,0.0,,7.0,,8.0,,3.331,

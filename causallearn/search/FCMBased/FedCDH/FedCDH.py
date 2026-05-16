@@ -1602,11 +1602,20 @@ class FedCDH:
             "time_cd": cd_time,
             "comm_cost": comm_cost,
         }
+
+        # Optional: Return discovered graphs for visualization
+        if getattr(self.args, "return_graphs", False):
+            result["est_dag"] = est_dag
+            result["est_cpdag"] = est_cpdag
+            result["true_dag"] = true_DAG_bin
+
         safe_result = {
             k: (
                 float(v)
                 if v is not None and not (isinstance(v, float) and np.isnan(v))
                 else 0.0
+                if isinstance(v, (int, float))
+                else v  # Keep non-numeric values (graphs)
             )
             for k, v in result.items()
         }
