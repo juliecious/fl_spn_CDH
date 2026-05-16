@@ -139,6 +139,37 @@ DATASET_REGISTRY = {
         validation="domain_knowledge",
         source="Fairness causal graph",
     ),
+    # === BAYESIAN NETWORK BENCHMARKS ===
+    "asia": DatasetConfig(
+        name="asia",
+        type="benchmark",
+        d=8,
+        n=1000,
+        edges=8,
+        domain="medicine",
+        validation="expert_knowledge",
+        source="Lauritzen & Spiegelhalter 1988",
+    ),
+    "alarm": DatasetConfig(
+        name="alarm",
+        type="benchmark",
+        d=37,
+        n=1000,
+        edges=46,
+        domain="medicine",
+        validation="expert_knowledge",
+        source="Beinlich et al. 1989",
+    ),
+    "dream4_net1": DatasetConfig(
+        name="dream4_net1",
+        type="benchmark",
+        d=10,
+        n=1000,
+        edges=13,
+        domain="biology",
+        validation="gold_standard",
+        source="DREAM4 Challenge 2009",
+    ),
     # === SYNTHETIC BENCHMARKS ===
     # Erdős-Rényi (random graphs)
     "synthetic_er_tiny": DatasetConfig(
@@ -343,6 +374,8 @@ class DatasetLoader:
 
         if config.type == "real":
             return DatasetLoader._load_real_dataset(dataset_name)
+        elif config.type == "benchmark":
+            return DatasetLoader._load_benchmark_dataset(dataset_name)
         else:
             return DatasetLoader._generate_synthetic_dataset(config, seed)
 
@@ -419,6 +452,54 @@ class DatasetLoader:
 
         logging.info(
             f"  Law School: {X.shape[0]} samples, {X.shape[1]} features, {int(np.sum(B))} edges"
+        )
+        return X, B, feature_names
+
+    @staticmethod
+    def _load_benchmark_dataset(
+        dataset_name: str,
+    ) -> Tuple[np.ndarray, np.ndarray, List[str]]:
+        """Load pre-generated benchmark datasets (Asia, Alarm, DREAM4)."""
+        from tests.utils.dataset_loaders.bayesian_network_loaders import (
+            ASIA_DAG,
+            ASIA_NAMES,
+            ALARM_DAG,
+            ALARM_NAMES,
+        )
+        from tests.utils.dataset_loaders.dream_loader import (
+            DREAM4_10_NETWORKS,
+            edgelist_to_adjacency,
+        )
+
+        logging.info(f"Loading {dataset_name} benchmark dataset...")
+
+        if dataset_name == "asia":
+            # Load pre-generated CSV
+            data_path = "data/benchmarks/asia_linear_n1000.csv"
+            df = pd.read_csv(data_path)
+            X = df.values
+            B = ASIA_DAG.copy()
+            feature_names = ASIA_NAMES.copy()
+        elif dataset_name == "alarm":
+            # Load pre-generated CSV
+            data_path = "data/benchmarks/alarm_linear_n1000.csv"
+            df = pd.read_csv(data_path)
+            X = df.values
+            B = ALARM_DAG.copy()
+            feature_names = ALARM_NAMES.copy()
+        elif dataset_name == "dream4_net1":
+            # Load pre-generated CSV
+            data_path = "data/benchmarks/dream4_net1_linear_n1000.csv"
+            df = pd.read_csv(data_path)
+            X = df.values
+            edge_list = DREAM4_10_NETWORKS["network1"]
+            B = edgelist_to_adjacency(edge_list, n_nodes=10)
+            feature_names = [f"G{i+1}" for i in range(10)]
+        else:
+            raise ValueError(f"Unknown benchmark dataset: {dataset_name}")
+
+        logging.info(
+            f"  {dataset_name}: {X.shape[0]} samples, {X.shape[1]} features, {int(np.sum(B))} edges"
         )
         return X, B, feature_names
 
