@@ -1373,7 +1373,15 @@ class UnifiedBenchmark:
         X_splits: List[np.ndarray],
         feature_names: List[str],
     ):
-        """Generate UMAP visualizations for global and local SPNs."""
+        """
+        Generate UMAP visualizations comparing SPN-sampled data with ground truth.
+
+        Approach:
+        1. Sample data from learned SPN
+        2. Compare with ground truth (real) data
+        3. Project both onto same UMAP space
+        4. Visualize overlap/differences to assess model quality
+        """
         logging.info(f"      → _generate_umap_visualizations called")
         try:
             import umap
@@ -1411,42 +1419,76 @@ class UnifiedBenchmark:
             logging.info("      → Skipping UMAP (d <= 2)")
             return
 
-        # Generate global SPN UMAP
+        # Generate global SPN UMAP: Compare SPN samples with real data
         try:
-            # Concatenate all client data for global visualization
+            # Concatenate all client data
             X_global = np.vstack(X_splits)
-            n_samples = min(1000, X_global.shape[0])
-            sample_indices = np.random.choice(
-                X_global.shape[0], n_samples, replace=False
-            )
-            X_sample = X_global[sample_indices, :]
+            n_samples = min(500, X_global.shape[0])
+
+            # Get real data samples
+            real_indices = np.random.choice(X_global.shape[0], n_samples, replace=False)
+            X_real = X_global[real_indices, :]
+
+            # Sample from learned SPN
+            logging.info(f"      → Sampling {n_samples} points from global SPN...")
+            X_sampled_tensor = fedcdh_instance.fed_spn_model.sample(n_samples)
+            X_sampled = X_sampled_tensor.cpu().detach().numpy()
+
+            # Ensure correct dimensions (remove context column if present)
+            if X_sampled.shape[1] > d:
+                X_sampled = X_sampled[:, :d]
+
+            # Combine real and sampled data
+            X_combined = np.vstack([X_real, X_sampled])
+            labels = np.array(["Real"] * n_samples + ["SPN"] * n_samples)
 
             # Create UMAP embedding
+            n_neighbors = min(15, 2 * n_samples - 1)
             reducer = umap.UMAP(
-                n_components=2, random_state=42, n_neighbors=min(15, n_samples - 1)
+                n_components=2, random_state=42, n_neighbors=n_neighbors
             )
-            embedding = reducer.fit_transform(X_sample)
+            embedding = reducer.fit_transform(X_combined)
 
-            # Plot
+            # Plot with separate colors for real vs sampled
             fig, ax = plt.subplots(figsize=(10, 8))
-            scatter = ax.scatter(
-                embedding[:, 0],
-                embedding[:, 1],
-                c=range(n_samples),
-                cmap="viridis",
-                alpha=0.6,
-                s=20,
+
+            # Real data in blue
+            real_mask = labels == "Real"
+            ax.scatter(
+                embedding[real_mask, 0],
+                embedding[real_mask, 1],
+                c="blue",
+                alpha=0.5,
+                s=30,
+                label="Real Data",
+                edgecolors="none",
             )
-            ax.set_title(f"Global Federated SPN - UMAP Projection (n={n_samples})")
+
+            # SPN samples in red
+            spn_mask = labels == "SPN"
+            ax.scatter(
+                embedding[spn_mask, 0],
+                embedding[spn_mask, 1],
+                c="red",
+                alpha=0.5,
+                s=30,
+                label="SPN Samples",
+                edgecolors="none",
+            )
+
+            ax.set_title(f"Global SPN vs Real Data (n={n_samples} each)")
             ax.set_xlabel("UMAP 1")
             ax.set_ylabel("UMAP 2")
-            plt.colorbar(scatter, ax=ax, label="Sample Index")
+            ax.legend(loc="best")
             plt.tight_layout()
             plt.savefig(exp_dir / "umap_global_spn.png", dpi=150, bbox_inches="tight")
             plt.close()
             logging.info(f"      → Saved UMAP: umap_global_spn.png")
         except Exception as e:
+            import traceback
+
             logging.warning(f"      → Failed to generate global UMAP: {e}")
+            logging.warning(f"      → Traceback: {traceback.format_exc()}")
 
         # Generate local client UMAP visualizations
         for k, (local_spn, X_client) in enumerate(
@@ -1456,30 +1498,67 @@ class UnifiedBenchmark:
                 if X_client.shape[1] <= 2:
                     continue
 
-                n_samples = min(500, X_client.shape[0])
-                sample_indices = np.random.choice(
+                n_samples = min(250, X_client.shape[0])
+
+                # Get real data samples
+                real_indices = np.random.choice(
                     X_client.shape[0], n_samples, replace=False
                 )
-                X_sample = X_client[sample_indices, :]
+                X_real = X_client[real_indices, :]
 
+                # Sample from local SPN
+                logging.info(
+                    f"      → Sampling {n_samples} points from client {k} SPN..."
+                )
+                X_sampled_tensor = local_spn.sample(n_samples)
+                X_sampled = X_sampled_tensor.cpu().detach().numpy()
+
+                # Ensure correct dimensions
+                if X_sampled.shape[1] > X_client.shape[1]:
+                    X_sampled = X_sampled[:, : X_client.shape[1]]
+
+                # Combine real and sampled data
+                X_combined = np.vstack([X_real, X_sampled])
+                labels = np.array(["Real"] * n_samples + ["SPN"] * n_samples)
+
+                # Create UMAP embedding
+                n_neighbors = min(15, 2 * n_samples - 1)
                 reducer = umap.UMAP(
-                    n_components=2, random_state=42, n_neighbors=min(15, n_samples - 1)
+                    n_components=2, random_state=42, n_neighbors=n_neighbors
                 )
-                embedding = reducer.fit_transform(X_sample)
+                embedding = reducer.fit_transform(X_combined)
 
+                # Plot
                 fig, ax = plt.subplots(figsize=(8, 6))
-                scatter = ax.scatter(
-                    embedding[:, 0],
-                    embedding[:, 1],
-                    c=range(n_samples),
-                    cmap="plasma",
-                    alpha=0.6,
-                    s=20,
+
+                # Real data in blue
+                real_mask = labels == "Real"
+                ax.scatter(
+                    embedding[real_mask, 0],
+                    embedding[real_mask, 1],
+                    c="blue",
+                    alpha=0.5,
+                    s=30,
+                    label="Real Data",
+                    edgecolors="none",
                 )
-                ax.set_title(f"Client {k} Local SPN - UMAP Projection (n={n_samples})")
+
+                # SPN samples in red
+                spn_mask = labels == "SPN"
+                ax.scatter(
+                    embedding[spn_mask, 0],
+                    embedding[spn_mask, 1],
+                    c="red",
+                    alpha=0.5,
+                    s=30,
+                    label="SPN Samples",
+                    edgecolors="none",
+                )
+
+                ax.set_title(f"Client {k} SPN vs Real Data (n={n_samples} each)")
                 ax.set_xlabel("UMAP 1")
                 ax.set_ylabel("UMAP 2")
-                plt.colorbar(scatter, ax=ax, label="Sample Index")
+                ax.legend(loc="best")
                 plt.tight_layout()
                 plt.savefig(
                     exp_dir / f"umap_local_client_{k}.png", dpi=150, bbox_inches="tight"
@@ -1487,7 +1566,10 @@ class UnifiedBenchmark:
                 plt.close()
                 logging.info(f"      → Saved UMAP: umap_local_client_{k}.png")
             except Exception as e:
+                import traceback
+
                 logging.warning(f"      → Failed to generate UMAP for client {k}: {e}")
+                logging.warning(f"      → Traceback: {traceback.format_exc()}")
 
     def run_all_experiments(self) -> pd.DataFrame:
         """Run all combinations of datasets × methods × seeds."""
