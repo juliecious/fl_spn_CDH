@@ -932,8 +932,14 @@ class MethodRunner:
         # Prepare data splits
         samples_per_client = n // K if scenario != "vertical" else n
 
-        # Create c_indx
-        c_indx = np.repeat(np.arange(K), samples_per_client).reshape(-1, 1)
+        # Create c_indx (context indices)
+        if scenario == "vertical":
+            # Vertical: All clients see same samples, no sample partitioning
+            # c_indx can be zeros or any constant (not used for vertical)
+            c_indx = np.zeros((n, 1), dtype=int)
+        else:
+            # Horizontal/Hybrid: Samples are partitioned across clients
+            c_indx = np.repeat(np.arange(K), samples_per_client).reshape(-1, 1)
 
         # Partition data based on scenario
         if scenario == "horizontal":
@@ -943,21 +949,18 @@ class MethodRunner:
                 for i in range(K)
             ]
         elif scenario == "vertical":
-            # Vertical: All samples, split features
-            features_per_client = d // K
+            # Vertical: All samples, split features across clients
+            # Use np.array_split to handle uneven divisions
+            feature_indices = np.array_split(range(d), K)
+            X_splits = [X[:, indices] for indices in feature_indices]
+        elif scenario == "hybrid":
+            # Hybrid: Split samples only (like horizontal), keep all features
+            # Note: FedCDH hybrid mode expects all clients to have all features
+            # The "hybrid" aspect comes from how SPNs are aggregated, not data partitioning
             X_splits = [
-                X[:, i * features_per_client : (i + 1) * features_per_client]
+                X[i * samples_per_client : (i + 1) * samples_per_client, :]
                 for i in range(K)
             ]
-        elif scenario == "hybrid":
-            # Hybrid: Split both samples and features
-            X_splits = []
-            for i in range(K):
-                start_sample = i * samples_per_client
-                end_sample = (i + 1) * samples_per_client
-                start_feature = (i * d) // K
-                end_feature = ((i + 1) * d) // K
-                X_splits.append(X[start_sample:end_sample, start_feature:end_feature])
         else:
             raise ValueError(f"Unknown scenario: {scenario}")
 
