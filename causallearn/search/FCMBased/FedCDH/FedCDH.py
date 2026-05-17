@@ -1611,11 +1611,15 @@ class FedCDH:
 
         safe_result = {
             k: (
-                float(v)
-                if v is not None and not (isinstance(v, float) and np.isnan(v))
+                v  # Keep arrays (graphs) as-is
+                if isinstance(v, np.ndarray)
+                else float(v)
+                if v is not None
+                and isinstance(v, (int, float))
+                and not (isinstance(v, float) and np.isnan(v))
                 else 0.0
                 if isinstance(v, (int, float))
-                else v  # Keep non-numeric values (graphs)
+                else v  # Keep other non-numeric values
             )
             for k, v in result.items()
         }

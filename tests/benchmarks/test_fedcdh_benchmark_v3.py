@@ -982,6 +982,7 @@ class MethodRunner:
                 "horizontal_aggregation", "structure_voting"
             ),
             structure_vote_threshold=kwargs.get("structure_vote_threshold", 0.4),
+            return_graphs=True,  # CRITICAL: Must return graphs for evaluation
         )
 
         start_time = time.time()
@@ -992,7 +993,20 @@ class MethodRunner:
             runtime = time.time() - start_time
 
             # Extract graph - FedCDH.fit() returns a dict with 'est_dag'
-            G = results.get("est_dag", results.get("graph", np.zeros((d, d))))
+            if "est_dag" in results:
+                G = results["est_dag"]
+            elif "graph" in results:
+                G = results["graph"]
+            else:
+                logging.warning(f"  No graph in results, keys: {list(results.keys())}")
+                G = np.zeros((d, d))
+
+            # Convert to binary adjacency matrix if needed
+            if hasattr(G, "shape"):
+                G_binary = (np.abs(G) > 0).astype(int)
+            else:
+                logging.warning(f"  Graph is not array, type: {type(G)}")
+                G_binary = np.zeros((d, d))
 
             metrics = {
                 "total_time": runtime,
@@ -1003,10 +1017,13 @@ class MethodRunner:
                 "_X_splits": X_splits,  # Store for UMAP
             }
 
-            return G, metrics
+            return G_binary, metrics
 
         except Exception as e:
+            import traceback
+
             logging.error(f"  {method_name.upper()} failed: {e}")
+            logging.error(f"  Traceback: {traceback.format_exc()}")
             runtime = time.time() - start_time
             return np.zeros((d, d)), {"total_time": runtime}
 
