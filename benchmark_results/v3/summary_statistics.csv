@@ -1,0 +1,4 @@
+,,skeleton_f1,skeleton_f1,skeleton_f1,skeleton_precision,skeleton_precision,skeleton_recall,skeleton_recall,skeleton_shd,skeleton_shd,dag_f1,dag_f1,dag_shd,dag_shd,total_time,total_time
+,,mean,std,count,mean,std,mean,std,mean,std,mean,std,mean,std,mean,std
+dataset,method,,,,,,,,,,,,,,,
+law_school,fedspn_v,0.222,,1,0.5,,0.143,,7.0,,0.222,,7.0,,233.546,

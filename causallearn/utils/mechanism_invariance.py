@@ -555,24 +555,28 @@ def orient_edge_vertical_with_ownership(
             )
 
     else:
-        # Cross-client edge: use global product SPN
+        # Cross-client edge: Cannot use ProductOverGroups with conditional masking in vertical mode
+        #
+        # Problem:
+        # - ProductOverGroups uses feature extraction (use_nan_masking=False)
+        # - Conditional via masking [val, NaN, ...] doesn't work with feature extraction
+        # - Each client SPN extracts its features, sees incorrect partially-masked data
+        #
+        # Solution: Use ANM-based (Additive Noise Model) residual scoring
+        # - Fit i→j: compute residual var(j - f(i))
+        # - Fit j→i: compute residual var(i - f(j))
+        # - Lower residual variance suggests correct causal direction
         if verbose:
             print(
                 f"  Edge {i}--{j}: cross-client (client {client_i} → client {client_j})"
             )
 
-        # Use global product SPN
-        score_i_to_j = compute_conditional_global(
-            j, [i], fed_spn_model, data_aug, num_samples
-        )
-        score_j_to_i = compute_conditional_global(
-            i, [j], fed_spn_model, data_aug, num_samples
-        )
+        # Use ANM residual scoring for cross-client orientation
+        score_i_to_j = compute_anm_score(j, [i], data_aug, num_samples)
+        score_j_to_i = compute_anm_score(i, [j], data_aug, num_samples)
 
         if verbose:
-            print(
-                f"    Global SPN: log P(j|i)={score_i_to_j:.3f}, log P(i|j)={score_j_to_i:.3f}"
-            )
+            print(f"    ANM residuals: j~i={score_i_to_j:.3f}, i~j={score_j_to_i:.3f}")
 
     # Orient towards higher conditional likelihood
     if score_i_to_j > score_j_to_i:
@@ -666,6 +670,11 @@ def compute_conditional_global(
     """
     Compute log P(target | parents) using GLOBAL product SPN.
 
+    WARNING: This function uses NaN masking which is INCOMPATIBLE with
+    ProductOverGroups in vertical mode (use_nan_masking=False).
+
+    For vertical mode cross-client edges, use compute_conditional_global_via_marginals instead.
+
     Similar to compute_conditional_local but uses global indices.
     """
     import torch
@@ -722,3 +731,85 @@ def compute_conditional_global(
         return 0.0
 
     return np.mean(log_cond)
+
+
+def compute_anm_score(
+    target_idx: int,
+    parent_indices: list,
+    data_aug: np.ndarray,
+    num_samples: int = 500,
+) -> float:
+    """
+    Compute ANM (Additive Noise Model) score for causal direction.
+
+    ANM Assumption: Y = f(X) + ε where ε ⊥ X
+
+    If X → Y is correct, then:
+        residual = Y - f(X) should be independent of X
+
+    Score: Negative residual variance (lower is better for correct direction)
+
+    Args:
+        target_idx: Target variable index
+        parent_indices: Parent variable indices (typically single parent)
+        data_aug: Full data including context column
+        num_samples: Number of samples to use
+
+    Returns:
+        Negative residual variance (higher score = better fit)
+    """
+    from sklearn.ensemble import GradientBoostingRegressor
+    from sklearn.preprocessing import StandardScaler
+
+    n = data_aug.shape[0]
+
+    # Sample subset
+    if n > num_samples:
+        indices = np.random.choice(n, size=num_samples, replace=False)
+        data_subset = data_aug[indices]
+    else:
+        data_subset = data_aug
+
+    # Extract features (exclude context column if present)
+    if len(parent_indices) == 0:
+        return 0.0
+
+    parent_idx = parent_indices[0]
+
+    # Get X and Y
+    X = data_subset[:, parent_idx].reshape(-1, 1)
+    Y = data_subset[:, target_idx].reshape(-1, 1)
+
+    # Standardize for numerical stability
+    scaler_x = StandardScaler()
+    scaler_y = StandardScaler()
+    X_scaled = scaler_x.fit_transform(X)
+    Y_scaled = scaler_y.fit_transform(Y)
+
+    try:
+        # Fit non-linear model: Y = f(X) + ε
+        model = GradientBoostingRegressor(
+            n_estimators=50,
+            max_depth=3,
+            learning_rate=0.1,
+            random_state=42,
+            subsample=0.8,
+        )
+        model.fit(X_scaled, Y_scaled.ravel())
+
+        # Compute residuals
+        Y_pred = model.predict(X_scaled)
+        residuals = Y_scaled.ravel() - Y_pred
+
+        # Score: Negative variance of residuals (higher = better fit)
+        # Better fit → lower residual variance → model explains Y well given X → X→Y likely
+        residual_var = np.var(residuals)
+
+        # Return negative variance (we want to maximize score, minimize variance)
+        return -residual_var
+
+    except Exception as e:
+        # Fallback: use linear correlation
+        corr = np.corrcoef(X.ravel(), Y.ravel())[0, 1]
+        # Return squared correlation as score (R²-like)
+        return -(1 - corr**2)  # Negative unexplained variance
