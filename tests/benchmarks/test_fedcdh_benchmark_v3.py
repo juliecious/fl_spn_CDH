@@ -965,6 +965,10 @@ class MethodRunner:
             raise ValueError(f"Unknown scenario: {scenario}")
 
         # Setup FedCDH args
+        # Get experiment directory to prevent FedCDH from creating its own
+        exp_dir = kwargs.get("exp_dir", None)
+        spn_eval_dir = str(exp_dir) if exp_dir else None
+
         args = Namespace(
             K=K,
             d=d,
@@ -986,6 +990,7 @@ class MethodRunner:
             ),
             structure_vote_threshold=kwargs.get("structure_vote_threshold", 0.4),
             return_graphs=True,  # CRITICAL: Must return graphs for evaluation
+            spn_eval_dir=spn_eval_dir,  # Use benchmark's experiment directory
         )
 
         start_time = time.time()
@@ -1147,6 +1152,7 @@ class UnifiedBenchmark:
                 alpha=self.alpha,
                 seed=seed,
                 device=self.device,
+                exp_dir=exp_dir,  # Pass experiment directory to prevent FedCDH from creating its own
             )
 
             # Extract internal objects for visualization (if available)
@@ -1639,6 +1645,11 @@ class UnifiedBenchmark:
                         import traceback
 
                         traceback.print_exc()
+
+                    finally:
+                        # Clear CUDA cache after each experiment to prevent memory accumulation
+                        if torch.cuda.is_available():
+                            torch.cuda.empty_cache()
 
                     counter += 1
 

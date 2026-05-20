@@ -199,9 +199,14 @@ def orient_skeleton_mechanism_invariance(
     verbose: bool = False,
     data_aug: Optional[np.ndarray] = None,
     c_idx: int = -1,
+    feature_maps: Optional[dict] = None,
+    local_spns: Optional[List] = None,
 ) -> np.ndarray:
     """
     Orient all undirected edges in skeleton using mechanism invariance.
+
+    For vertical mode (feature_maps provided), uses ownership-aware orientation
+    that leverages both local SPNs (within-client) and global product SPN (cross-client).
     """
     d = skeleton_graph.shape[0]
     oriented_graph = skeleton_graph.copy()
@@ -213,35 +218,73 @@ def orient_skeleton_mechanism_invariance(
             if skeleton_graph[i, j] == -1 and skeleton_graph[j, i] == -1:
                 undirected_edges.append((i, j))
 
-    if verbose:
+    # Detect vertical mode: feature_maps provided
+    is_vertical_mode = feature_maps is not None
+
+    if is_vertical_mode and verbose:
+        print(f"\n[Vertical Mode: Ownership-Aware Orientation]")
+        print(f"Found {len(undirected_edges)} undirected edges to orient")
+        print(
+            f"Using ownership-aware strategy (local SPN for within-client, global for cross-client)"
+        )
+    elif verbose:
         print(f"\n[Mechanism Invariance Orientation]")
         print(f"Found {len(undirected_edges)} undirected edges to orient")
 
     # Orient each edge
     oriented_count = 0
     for i, j in undirected_edges:
-        direction = orient_edge_mechanism_invariance(
-            i,
-            j,
-            fed_spn_model,
-            X_aug_splits,
-            method=orientation_method,
-            data_aug=data_aug,
-            c_idx=c_idx,
-        )
+        if is_vertical_mode:
+            # Vertical mode: Use ownership-aware orientation
+            if local_spns is not None:
+                direction = orient_edge_vertical_with_ownership(
+                    i,
+                    j,
+                    fed_spn_model,
+                    local_spns,
+                    feature_maps,
+                    data_aug if data_aug is not None else X_aug_splits[0],
+                    verbose=verbose,
+                )
+            else:
+                # Fallback to likelihood-based if no local SPNs provided
+                direction = orient_edge_likelihood_based(
+                    i,
+                    j,
+                    fed_spn_model,
+                    data_aug if data_aug is not None else X_aug_splits[0],
+                    verbose=False,
+                )
+        else:
+            # Horizontal/Hybrid: Use mechanism invariance
+            direction = orient_edge_mechanism_invariance(
+                i,
+                j,
+                fed_spn_model,
+                X_aug_splits,
+                method=orientation_method,
+                data_aug=data_aug,
+                c_idx=c_idx,
+            )
 
         if direction == 1:  # i → j
             oriented_graph[i, j] = 1  # Tail at i
             oriented_graph[j, i] = -1  # Arrow at j
             oriented_count += 1
             if verbose:
-                print(f"  {i} → {j} (P(j|i) more invariant)")
+                if is_vertical_mode:
+                    print(f"  {i} → {j} (better likelihood fit)")
+                else:
+                    print(f"  {i} → {j} (P(j|i) more invariant)")
         else:  # j → i
             oriented_graph[j, i] = 1  # Tail at j
             oriented_graph[i, j] = -1  # Arrow at i
             oriented_count += 1
             if verbose:
-                print(f"  {j} → {i} (P(i|j) more invariant)")
+                if is_vertical_mode:
+                    print(f"  {j} → {i} (better likelihood fit)")
+                else:
+                    print(f"  {j} → {i} (P(i|j) more invariant)")
 
     if verbose:
         print(f"Oriented {oriented_count} edges using mechanism invariance\n")
@@ -321,3 +364,361 @@ def compute_hybrid_orientation_score(
         return 1  # i → j
     else:
         return 2  # j → i
+
+
+def orient_edge_likelihood_based(
+    i: int,
+    j: int,
+    fed_spn_model,
+    data_aug: np.ndarray,
+    num_samples: int = 500,
+    verbose: bool = False,
+) -> int:
+    """
+    Orient edge i--j using likelihood comparison (for vertical mode).
+
+    Since vertical mode has no heterogeneity, we cant use MI. Instead,
+    we compare the likelihood fit of X→Y vs Y→X using the trained SPN.
+
+    Algorithm:
+        1. Compute log P(Y|X) ≈ log P(X,Y) - log P(X) using SPN
+        2. Compute log P(X|Y) ≈ log P(X,Y) - log P(Y) using SPN
+        3. Return direction with higher average conditional likelihood
+
+    Args:
+        i, j: Feature indices
+        fed_spn_model: Trained global SPN
+        data_aug: Full augmented data [X, context]
+        num_samples: Number of samples to use for evaluation
+        verbose: Print debug info
+
+    Returns:
+        1 if i→j, -1 if j→i
+    """
+    import torch
+
+    n = data_aug.shape[0]
+    d = data_aug.shape[1]
+
+    # Sample subset for efficiency
+    if n > num_samples:
+        indices = np.random.choice(n, size=num_samples, replace=False)
+        data_subset = data_aug[indices]
+    else:
+        data_subset = data_aug
+
+    # Compute log P(i, j) - joint probability
+    masked_joint = np.full((len(data_subset), d), np.nan)
+    masked_joint[:, [i, j]] = data_subset[:, [i, j]]
+    # Keep context column if present
+    if d > max(i, j):
+        context_idx = d - 1
+        masked_joint[:, context_idx] = data_subset[:, context_idx]
+
+    with torch.no_grad():
+        masked_joint_t = torch.from_numpy(masked_joint).float()
+        if hasattr(fed_spn_model, "device"):
+            masked_joint_t = masked_joint_t.to(fed_spn_model.device)
+        log_prob_joint = fed_spn_model.log_prob(masked_joint_t)
+        ll_joint = log_prob_joint.cpu().numpy().flatten()
+
+    # Compute log P(i) - marginal of i
+    masked_i = np.full((len(data_subset), d), np.nan)
+    masked_i[:, i] = data_subset[:, i]
+    if d > max(i, j):
+        masked_i[:, context_idx] = data_subset[:, context_idx]
+
+    with torch.no_grad():
+        masked_i_t = torch.from_numpy(masked_i).float()
+        if hasattr(fed_spn_model, "device"):
+            masked_i_t = masked_i_t.to(fed_spn_model.device)
+        log_prob_i = fed_spn_model.log_prob(masked_i_t)
+        ll_i = log_prob_i.cpu().numpy().flatten()
+
+    # Compute log P(j) - marginal of j
+    masked_j = np.full((len(data_subset), d), np.nan)
+    masked_j[:, j] = data_subset[:, j]
+    if d > max(i, j):
+        masked_j[:, context_idx] = data_subset[:, context_idx]
+
+    with torch.no_grad():
+        masked_j_t = torch.from_numpy(masked_j).float()
+        if hasattr(fed_spn_model, "device"):
+            masked_j_t = masked_j_t.to(fed_spn_model.device)
+        log_prob_j = fed_spn_model.log_prob(masked_j_t)
+        ll_j = log_prob_j.cpu().numpy().flatten()
+
+    # Compute conditional likelihoods
+    # log P(j|i) = log P(i,j) - log P(i)
+    log_cond_j_given_i = ll_joint - ll_i
+    # log P(i|j) = log P(i,j) - log P(j)
+    log_cond_i_given_j = ll_joint - ll_j
+
+    # Average over samples (filter out infinities/NaNs)
+    log_cond_j_given_i = log_cond_j_given_i[np.isfinite(log_cond_j_given_i)]
+    log_cond_i_given_j = log_cond_i_given_j[np.isfinite(log_cond_i_given_j)]
+
+    if len(log_cond_j_given_i) == 0 or len(log_cond_i_given_j) == 0:
+        # Fallback: random orientation if we cant compute
+        return 1 if np.random.rand() < 0.5 else -1
+
+    score_i_to_j = np.mean(log_cond_j_given_i)
+    score_j_to_i = np.mean(log_cond_i_given_j)
+
+    if verbose:
+        print(f"Edge {i}--{j}:")
+        print(f"  log P(j|i) = {score_i_to_j:.3f}")
+        print(f"  log P(i|j) = {score_j_to_i:.3f}")
+
+    # Orient towards higher conditional likelihood
+    # Higher log P(j|i) suggests i→j is better fit
+    if score_i_to_j > score_j_to_i:
+        return 1  # i → j
+    else:
+        return -1  # j → i
+
+
+def orient_edge_vertical_with_ownership(
+    i: int,
+    j: int,
+    fed_spn_model,
+    local_spns: list,
+    feature_maps: dict,
+    data_aug: np.ndarray,
+    num_samples: int = 500,
+    verbose: bool = False,
+) -> int:
+    """
+    Orient edge i--j using ownership-aware strategy for vertical mode.
+
+    Inspired by Seng's ProductOverGroups design:
+    - Within-client edges: Use local SPN (more accurate)
+    - Cross-client edges: Use global product SPN (captures dependencies)
+
+    Args:
+        i, j: Feature indices
+        fed_spn_model: Global product SPN
+        local_spns: List of local SPNs per client
+        feature_maps: {client_id: [feature_indices]} ownership mapping
+        data_aug: Full augmented data [X, context]
+        num_samples: Number of samples for evaluation
+        verbose: Print debug info
+
+    Returns:
+        1 if i→j, -1 if j→i
+    """
+    import torch
+
+    # Determine ownership
+    client_i = None
+    client_j = None
+
+    for client_id, features in feature_maps.items():
+        if i in features:
+            client_i = client_id
+        if j in features:
+            client_j = client_id
+
+    if client_i is None or client_j is None:
+        # Fallback to global if ownership unclear
+        if verbose:
+            print(f"  Warning: Could not determine ownership for edge {i}--{j}")
+        return orient_edge_likelihood_based(
+            i, j, fed_spn_model, data_aug, num_samples, verbose=False
+        )
+
+    if client_i == client_j:
+        # Within-client edge: use local SPN
+        if verbose:
+            print(f"  Edge {i}--{j}: within-client (client {client_i})")
+
+        local_spn = local_spns[client_i]
+
+        # Get client's features for proper indexing
+        client_features = feature_maps[client_i]
+
+        # Map global indices to local indices
+        local_i = client_features.index(i)
+        local_j = client_features.index(j)
+
+        # Use local SPN to compare conditionals
+        score_i_to_j = compute_conditional_local(
+            local_j, [local_i], local_spn, data_aug, client_features, num_samples
+        )
+        score_j_to_i = compute_conditional_local(
+            local_i, [local_j], local_spn, data_aug, client_features, num_samples
+        )
+
+        if verbose:
+            print(
+                f"    Local SPN: log P(j|i)={score_i_to_j:.3f}, log P(i|j)={score_j_to_i:.3f}"
+            )
+
+    else:
+        # Cross-client edge: use global product SPN
+        if verbose:
+            print(
+                f"  Edge {i}--{j}: cross-client (client {client_i} → client {client_j})"
+            )
+
+        # Use global product SPN
+        score_i_to_j = compute_conditional_global(
+            j, [i], fed_spn_model, data_aug, num_samples
+        )
+        score_j_to_i = compute_conditional_global(
+            i, [j], fed_spn_model, data_aug, num_samples
+        )
+
+        if verbose:
+            print(
+                f"    Global SPN: log P(j|i)={score_i_to_j:.3f}, log P(i|j)={score_j_to_i:.3f}"
+            )
+
+    # Orient towards higher conditional likelihood
+    if score_i_to_j > score_j_to_i:
+        return 1  # i → j
+    else:
+        return -1  # j → i
+
+
+def compute_conditional_local(
+    target_local_idx: int,
+    parent_local_indices: list,
+    local_spn,
+    data_aug: np.ndarray,
+    client_features: list,
+    num_samples: int = 500,
+) -> float:
+    """
+    Compute log P(target | parents) using LOCAL SPN.
+
+    Args:
+        target_local_idx: Target feature index in LOCAL space (0 to d_client-1)
+        parent_local_indices: Parent indices in LOCAL space
+        local_spn: Client's local SPN (LocalClusterMixture)
+        data_aug: Full augmented data [X, context]
+        client_features: List of global feature indices owned by this client
+        num_samples: Number of samples to use
+
+    Returns:
+        Average log P(target | parents)
+    """
+    import torch
+
+    n = data_aug.shape[0]
+
+    # Sample subset
+    if n > num_samples:
+        indices = np.random.choice(n, size=num_samples, replace=False)
+        data_subset = data_aug[indices]
+    else:
+        data_subset = data_aug
+
+    # Extract client's features from global data
+    X_client = data_subset[:, client_features]  # Shape: (num_samples, d_client)
+
+    d_client = len(client_features)
+
+    # Create masked data for marginalization
+    # Compute P(target, parents)
+    joint_indices = [target_local_idx] + parent_local_indices
+    masked_joint = np.full((len(X_client), d_client), np.nan)
+    masked_joint[:, joint_indices] = X_client[:, joint_indices]
+
+    with torch.no_grad():
+        masked_joint_t = torch.from_numpy(masked_joint).float()
+        if hasattr(local_spn, "device"):
+            masked_joint_t = masked_joint_t.to(local_spn.device)
+        log_prob_joint = local_spn.log_prob(masked_joint_t)
+        ll_joint = log_prob_joint.cpu().numpy().flatten()
+
+    # Compute P(parents)
+    if len(parent_local_indices) > 0:
+        masked_parents = np.full((len(X_client), d_client), np.nan)
+        masked_parents[:, parent_local_indices] = X_client[:, parent_local_indices]
+
+        with torch.no_grad():
+            masked_parents_t = torch.from_numpy(masked_parents).float()
+            if hasattr(local_spn, "device"):
+                masked_parents_t = masked_parents_t.to(local_spn.device)
+            log_prob_parents = local_spn.log_prob(masked_parents_t)
+            ll_parents = log_prob_parents.cpu().numpy().flatten()
+    else:
+        ll_parents = np.zeros_like(ll_joint)
+
+    # log P(target | parents) = log P(target, parents) - log P(parents)
+    log_cond = ll_joint - ll_parents
+    log_cond = log_cond[np.isfinite(log_cond)]
+
+    if len(log_cond) == 0:
+        return 0.0
+
+    return np.mean(log_cond)
+
+
+def compute_conditional_global(
+    target_idx: int,
+    parent_indices: list,
+    fed_spn_model,
+    data_aug: np.ndarray,
+    num_samples: int = 500,
+) -> float:
+    """
+    Compute log P(target | parents) using GLOBAL product SPN.
+
+    Similar to compute_conditional_local but uses global indices.
+    """
+    import torch
+
+    n = data_aug.shape[0]
+    d = data_aug.shape[1]
+
+    # Sample subset
+    if n > num_samples:
+        indices = np.random.choice(n, size=num_samples, replace=False)
+        data_subset = data_aug[indices]
+    else:
+        data_subset = data_aug
+
+    # Compute P(target, parents) - joint probability
+    joint_indices = [target_idx] + parent_indices
+    masked_joint = np.full((len(data_subset), d), np.nan)
+    masked_joint[:, joint_indices] = data_subset[:, joint_indices]
+
+    # Keep context column if present
+    if d > max(joint_indices):
+        context_idx = d - 1
+        masked_joint[:, context_idx] = data_subset[:, context_idx]
+
+    with torch.no_grad():
+        masked_joint_t = torch.from_numpy(masked_joint).float()
+        if hasattr(fed_spn_model, "device"):
+            masked_joint_t = masked_joint_t.to(fed_spn_model.device)
+        log_prob_joint = fed_spn_model.log_prob(masked_joint_t)
+        ll_joint = log_prob_joint.cpu().numpy().flatten()
+
+    # Compute P(parents) - marginal
+    if len(parent_indices) > 0:
+        masked_parents = np.full((len(data_subset), d), np.nan)
+        masked_parents[:, parent_indices] = data_subset[:, parent_indices]
+
+        if d > max(parent_indices):
+            masked_parents[:, context_idx] = data_subset[:, context_idx]
+
+        with torch.no_grad():
+            masked_parents_t = torch.from_numpy(masked_parents).float()
+            if hasattr(fed_spn_model, "device"):
+                masked_parents_t = masked_parents_t.to(fed_spn_model.device)
+            log_prob_parents = fed_spn_model.log_prob(masked_parents_t)
+            ll_parents = log_prob_parents.cpu().numpy().flatten()
+    else:
+        ll_parents = np.zeros_like(ll_joint)
+
+    # log P(target | parents) = log P(target, parents) - log P(parents)
+    log_cond = ll_joint - ll_parents
+    log_cond = log_cond[np.isfinite(log_cond)]
+
+    if len(log_cond) == 0:
+        return 0.0
+
+    return np.mean(log_cond)

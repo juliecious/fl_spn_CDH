@@ -312,39 +312,56 @@ def cdnod_alg(
     if background_knowledge is not None:
         orient_by_background_knowledge(cg_1, background_knowledge)
 
-    # Orientation logic
-    cg = None
-    if uc_rule == 0:
-        if uc_priority != -1:
-            cg_2 = UCSepset.uc_sepset(
-                cg_1, uc_priority, background_knowledge=background_knowledge
-            )
-        else:
-            cg_2 = UCSepset.uc_sepset(
-                cg_1, background_knowledge=background_knowledge, cg_list=cg_list, K=K
-            )
-        cg = Meek.meek(cg_2, background_knowledge=background_knowledge)
-    elif uc_rule == 1:
-        if uc_priority != -1:
-            cg_2 = UCSepset.maxp(
-                cg_1, uc_priority, background_knowledge=background_knowledge
-            )
-        else:
-            cg_2 = UCSepset.maxp(cg_1, background_knowledge=background_knowledge)
-        cg = Meek.meek(cg_2, background_knowledge=background_knowledge)
-    elif uc_rule == 2:
-        if uc_priority != -1:
-            cg_2 = UCSepset.definite_maxp(
-                cg_1, alpha, uc_priority, background_knowledge=background_knowledge
-            )
-        else:
-            cg_2 = UCSepset.definite_maxp(
-                cg_1, alpha, background_knowledge=background_knowledge
-            )
-        cg_before = Meek.definite_meek(cg_2, background_knowledge=background_knowledge)
-        cg = Meek.meek(cg_before, background_knowledge=background_knowledge)
+    # BUGFIX: For vertical mode, skip UCSepset+Meek (they need context, which is all zeros)
+    # Instead, jump directly to likelihood-based orientation
+    feature_maps = kwargs.get("feature_maps", None)
+    is_vertical_mode = feature_maps is not None
+
+    if is_vertical_mode and fed_spn_model is not None:
+        # Vertical mode: Skip UCSepset+Meek, use likelihood-based orientation directly
+        if verbose:
+            print(f"\n[Vertical Mode] Skipping UCSepset+Meek (context is all zeros)")
+            print(f"[Vertical Mode] Using likelihood-based orientation instead")
+        cg = cg_1  # Skip to Stage 3 with skeleton only
     else:
-        raise ValueError("uc_rule should be in [0, 1, 2]")
+        # Horizontal/Hybrid: Run normal UCSepset+Meek orientation
+        cg = None
+        if uc_rule == 0:
+            if uc_priority != -1:
+                cg_2 = UCSepset.uc_sepset(
+                    cg_1, uc_priority, background_knowledge=background_knowledge
+                )
+            else:
+                cg_2 = UCSepset.uc_sepset(
+                    cg_1,
+                    background_knowledge=background_knowledge,
+                    cg_list=cg_list,
+                    K=K,
+                )
+            cg = Meek.meek(cg_2, background_knowledge=background_knowledge)
+        elif uc_rule == 1:
+            if uc_priority != -1:
+                cg_2 = UCSepset.maxp(
+                    cg_1, uc_priority, background_knowledge=background_knowledge
+                )
+            else:
+                cg_2 = UCSepset.maxp(cg_1, background_knowledge=background_knowledge)
+            cg = Meek.meek(cg_2, background_knowledge=background_knowledge)
+        elif uc_rule == 2:
+            if uc_priority != -1:
+                cg_2 = UCSepset.definite_maxp(
+                    cg_1, alpha, uc_priority, background_knowledge=background_knowledge
+                )
+            else:
+                cg_2 = UCSepset.definite_maxp(
+                    cg_1, alpha, background_knowledge=background_knowledge
+                )
+            cg_before = Meek.definite_meek(
+                cg_2, background_knowledge=background_knowledge
+            )
+            cg = Meek.meek(cg_before, background_knowledge=background_knowledge)
+        else:
+            raise ValueError("uc_rule should be in [0, 1, 2]")
 
     # Stage 3: Edge Orientation
     # Choose orientation strategy based on orientation_type
@@ -358,12 +375,36 @@ def cdnod_alg(
         )
 
         # Prepare data splits for mechanism invariance (use augmented data with context)
-        X_aug_splits = []
-        samples_per_client = int(data_aug.shape[0] / K)
-        for k in range(K):
-            start_idx = k * samples_per_client
-            end_idx = (k + 1) * samples_per_client if k < K - 1 else data_aug.shape[0]
-            X_aug_splits.append(data_aug[start_idx:end_idx])
+        # BUGFIX: Handle vertical mode (feature partitioning) differently
+        feature_maps = kwargs.get("feature_maps", None)
+
+        if feature_maps is not None:
+            # VERTICAL MODE: Features are partitioned, all clients see all samples
+            # MI orientation needs FULL data (all features) for each client since we need
+            # to evaluate P(Y|X) where X and Y might be on different clients
+            # Solution: Give each "client split" the full data (simulate pooled scenario for orientation)
+            X_aug_splits = [data_aug for _ in range(K)]
+
+            if verbose:
+                print(
+                    f"[Vertical Mode] Feature partitioning detected: {len(feature_maps)} clients"
+                )
+                print(
+                    f"  Using full data for each client during orientation (n={data_aug.shape[0]}, d={data_aug.shape[1]})"
+                )
+                print(
+                    f"  Note: Orientation uses pooled data since features are partitioned"
+                )
+        else:
+            # HORIZONTAL/HYBRID MODE: Samples are partitioned, all clients see all features
+            X_aug_splits = []
+            samples_per_client = int(data_aug.shape[0] / K)
+            for k in range(K):
+                start_idx = k * samples_per_client
+                end_idx = (
+                    (k + 1) * samples_per_client if k < K - 1 else data_aug.shape[0]
+                )
+                X_aug_splits.append(data_aug[start_idx:end_idx])
 
         # Orient all undirected edges in the skeleton (excluding context variable)
         d_features = data.shape[1]  # Number of features (without context)
@@ -374,6 +415,9 @@ def cdnod_alg(
                 f"\n[Stage 3] Using Mechanism Invariance Orientation ({orientation_type})"
             )
 
+        # Extract local_spns if available (for vertical ownership-aware orientation)
+        local_spns = kwargs.get("local_spns", None)
+
         oriented_subgraph = orient_skeleton_mechanism_invariance(
             skeleton_subgraph,
             fed_spn_model,
@@ -382,6 +426,8 @@ def cdnod_alg(
             verbose=verbose,
             data_aug=data_aug,
             c_idx=c_indx_id,
+            feature_maps=feature_maps,  # Pass feature_maps for vertical mode detection
+            local_spns=local_spns,  # Pass local SPNs for ownership-aware orientation
         )
 
         # Update the main graph with oriented edges

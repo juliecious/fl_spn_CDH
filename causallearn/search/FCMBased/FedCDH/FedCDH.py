@@ -306,6 +306,130 @@ class FedCDH:
 
         return indices
 
+    def derive_covariances_from_spn(
+        self, fed_spn_model, n_samples=5000, n_fourier_features=10, seed=42
+    ):
+        """
+        Derive covariance tensor from trained SPN for FICP orientation.
+
+        This is the KEY innovation: Instead of computing parallel summary statistics,
+        we derive covariances FROM the SPN that was trained for skeleton discovery.
+
+        Args:
+            fed_spn_model: Trained GlobalFedSPN model
+            n_samples: Number of samples to draw from SPN
+            n_fourier_features: Number of random Fourier features (h)
+            seed: Random seed for reproducibility
+
+        Returns:
+            covariance_tensor: Shape (d+1, d+1, h, h) where d is number of variables
+                              Last dimension is domain/client indicator variable
+        """
+        logging.info(f"\n{'='*60}")
+        logging.info(f"Deriving Covariances from Trained SPN")
+        logging.info(f"  Samples: {n_samples}, Fourier features: {n_fourier_features}")
+        logging.info(f"{'='*60}")
+
+        np.random.seed(seed)
+        torch.manual_seed(seed)
+
+        # Extract the underlying GlobalFedSPN from wrapper
+        if hasattr(fed_spn_model, "model"):
+            global_spn = fed_spn_model.model
+        else:
+            global_spn = fed_spn_model
+
+        # Step 1: Sample from SPN
+        logging.info(f"[Step 1/4] Sampling {n_samples} points from trained SPN...")
+        with torch.no_grad():
+            samples = global_spn.sample(n_samples)
+
+        if torch.is_tensor(samples):
+            samples = samples.cpu().numpy()
+
+        n_vars = samples.shape[1]
+        logging.info(f"  Sample shape: {samples.shape}")
+        logging.info(
+            f"  Sample statistics: mean={samples.mean(axis=0)[:3]}, std={samples.std(axis=0)[:3]}"
+        )
+
+        # Step 2: Initialize covariance tensor
+        # Shape: (n_vars+1, n_vars+1, h, h) where last var is domain indicator
+        logging.info(
+            f"[Step 2/4] Initializing covariance tensor (shape: {n_vars+1} x {n_vars+1} x {n_fourier_features} x {n_fourier_features})..."
+        )
+        CT = np.zeros((n_vars + 1, n_vars + 1, n_fourier_features, n_fourier_features))
+
+        # Step 3: Compute random Fourier features for each variable
+        logging.info(f"[Step 3/4] Computing random Fourier features...")
+
+        # Random Fourier feature parameters (shared across all variables)
+        rff_w = np.random.randn(n_fourier_features)
+        rff_b = np.random.uniform(0, 2 * np.pi, n_fourier_features)
+
+        def compute_rff(x, h):
+            """Compute random Fourier features for Gaussian kernel."""
+            x = x.reshape(-1, 1)
+            features = np.sqrt(2 / h) * np.cos(x @ rff_w.reshape(1, -1) + rff_b)
+            return features
+
+        # Compute features for all variables
+        phi_vars = []
+        for i in range(n_vars):
+            phi = compute_rff(samples[:, i], n_fourier_features)
+            phi_vars.append(phi)
+
+        # Domain variable: Create synthetic domain labels for heterogeneity
+        # In real federated setting, this would come from client indices
+        # For now, assign domains based on sample order (simulate K domains)
+        K_domains = self.K_clients
+        samples_per_domain = n_samples // K_domains
+        domain_labels = np.repeat(np.arange(K_domains), samples_per_domain)
+        # Handle remainder
+        if len(domain_labels) < n_samples:
+            domain_labels = np.concatenate(
+                [domain_labels, np.full(n_samples - len(domain_labels), K_domains - 1)]
+            )
+
+        # Domain features using delta kernel (one-hot encoding)
+        phi_domain = np.zeros((n_samples, n_fourier_features))
+        for idx in range(n_samples):
+            phi_domain[idx, domain_labels[idx] % n_fourier_features] = 1.0
+
+        # Step 4: Compute covariances
+        logging.info(f"[Step 4/4] Computing pairwise covariances...")
+
+        # Variable-variable covariances
+        for i in range(n_vars):
+            for j in range(n_vars):
+                C_ij = (phi_vars[i].T @ phi_vars[j]) / n_samples
+                CT[i, j, :, :] = C_ij
+
+            # Variable-domain covariances
+            C_i_domain = (phi_vars[i].T @ phi_domain) / n_samples
+            CT[i, n_vars, :, :] = C_i_domain
+            CT[n_vars, i, :, :] = C_i_domain.T
+
+        # Domain self-covariance
+        CT[n_vars, n_vars, :, :] = (phi_domain.T @ phi_domain) / n_samples
+
+        # Log statistics
+        non_zero = np.count_nonzero(CT)
+        total_elements = CT.size
+        tensor_norm = np.linalg.norm(CT)
+
+        logging.info(f"\n{'='*60}")
+        logging.info(f"Covariance Tensor Statistics:")
+        logging.info(f"  Shape: {CT.shape}")
+        logging.info(
+            f"  Non-zero elements: {non_zero}/{total_elements} ({100*non_zero/total_elements:.1f}%)"
+        )
+        logging.info(f"  Frobenius norm: {tensor_norm:.4f}")
+        logging.info(f"  Memory size: {CT.nbytes / 1024:.1f} KB")
+        logging.info(f"{'='*60}\n")
+
+        return CT
+
     def fit(self, X_splits, c_indx, true_DAG_bin):
         # Get training epochs and alpha from args
         if hasattr(self.args, "epochs"):
@@ -346,19 +470,19 @@ class FedCDH:
             # Feature maps only needed for vertical scenario (disjoint features)
             # For horizontal/hybrid, all clients see all features
             if self.scenario == "vertical":
-                # Vertical: Split features across clients
-                cols_per_client = np.array_split(range(self.d_features), self.K_clients)
+                # Vertical: Build feature maps from X_splits (NO context column for training)
+                # Context column only added to X_aug_global for CI testing
                 feature_maps = {}
-                X_splits_train = []
                 for k in range(self.K_clients):
-                    f_indices = cols_per_client[k].tolist()
-                    if k == 0:
-                        f_indices.append(self.d_features)  # Context column U
-                    feature_maps[k] = f_indices
-                    X_splits_train.append(X_aug_global[:, f_indices])
-                X_splits = X_splits_train
-                # Store for evaluation (fixes vertical mode LL evaluation bug)
-                self.X_splits_train = X_splits_train
+                    # Feature indices are simply the columns in X_splits[k]
+                    # Assuming X_splits are already properly partitioned
+                    d_k = X_splits[k].shape[1]
+                    # Map to global feature indices
+                    start_idx = sum(X_splits[i].shape[1] for i in range(k))
+                    feature_maps[k] = list(range(start_idx, start_idx + d_k))
+
+                # Store original X_splits for training (WITHOUT context column)
+                self.X_splits_train = X_splits
             else:
                 # Horizontal/Hybrid: All clients see all features (no feature map needed)
                 feature_maps = None
@@ -543,6 +667,91 @@ class FedCDH:
                 logging.info(f"Training epochs: {adaptive_epochs}")
             train_epochs = adaptive_epochs
 
+            # === MODE-SPECIFIC CAPACITY ADJUSTMENTS ===
+            # Vertical and Hybrid modes have fundamental architectural challenges
+            # that require additional capacity beyond standard adaptive scaling
+            logging.info(f"\n{'='*60}")
+            logging.info(f"[MODE-SPECIFIC ADJUSTMENTS] Scenario: {self.scenario}")
+            logging.info(f"{'='*60}")
+
+            capacity_multiplier = 1.0
+            epoch_multiplier = 1.0
+            K_local_override = None
+
+            if self.scenario == "vertical":
+                # Vertical mode challenge: Feature fragmentation across clients
+                # Each client sees d/K features, must learn cross-client dependencies
+                d_per_client = self.d_features / self.K_clients
+
+                logging.info(
+                    f"  Vertical mode: d/K = {d_per_client:.2f} features per client"
+                )
+
+                # Critical fix: Disable clustering if insufficient features
+                if d_per_client < 3:
+                    K_local_override = 1
+                    logging.info(
+                        f"  → CRITICAL: d/K < 3, forcing K_local=1 (clustering disabled)"
+                    )
+                    logging.info(
+                        f"     Reason: Cannot meaningfully cluster <3 features per client"
+                    )
+
+                # Adaptive capacity scaling inversely with features per client
+                # Fewer features → need more capacity to compensate
+                if d_per_client < 2:
+                    capacity_multiplier = 3.0
+                    epoch_multiplier = 4.0
+                    logging.info(
+                        f"  → Severe fragmentation: 3.0× capacity, 4.0× epochs"
+                    )
+                elif d_per_client < 4:
+                    capacity_multiplier = 2.0
+                    epoch_multiplier = 2.5
+                    logging.info(f"  → High fragmentation: 2.0× capacity, 2.5× epochs")
+                elif d_per_client < 8:
+                    capacity_multiplier = 1.3
+                    epoch_multiplier = 1.5
+                    logging.info(
+                        f"  → Moderate fragmentation: 1.3× capacity, 1.5× epochs"
+                    )
+                else:
+                    capacity_multiplier = 1.0
+                    epoch_multiplier = 1.2
+                    logging.info(
+                        f"  → Low fragmentation: baseline capacity, 1.2× epochs"
+                    )
+
+            elif self.scenario == "hybrid":
+                # Hybrid mode challenge: Dual complexity
+                # - Sample partitioning (like horizontal)
+                # - Sum-of-Products aggregation (more complex than mixture)
+
+                # Memory-aware adjustment: Small d causes OOM in Sum-of-Products
+                # Reason: With small d, local clusters create large intermediate tensors
+                if self.d_features < 15:
+                    capacity_multiplier = 1.3  # Reduced from 1.6
+                    epoch_multiplier = 1.5  # Reduced from 1.8
+                    K_local_override = 1  # Disable clustering to save memory
+                    logging.info(
+                        f"  Hybrid mode (d={self.d_features} < 15): "
+                        f"1.3× capacity, 1.5× epochs, K_local=1 (memory-aware)"
+                    )
+                    logging.info(
+                        f"    → Reason: Small d with Sum-of-Products can cause CUDA OOM"
+                    )
+                else:
+                    capacity_multiplier = 1.6
+                    epoch_multiplier = 1.8
+                    logging.info(
+                        f"  Hybrid mode: 1.6× capacity, 1.8× epochs (dual challenge compensation)"
+                    )
+
+            else:  # horizontal
+                logging.info(f"  Horizontal mode: baseline capacity (no adjustment)")
+
+            logging.info(f"{'='*60}\n")
+
             # V2 LOCAL CLUSTERING: Seng et al. (2025) Algorithm 1
             # KEY CHANGE: Client-first loop (not cluster-first) with LOCAL k-means per client
             # Rationale: Prevents data fragmentation, preserves sample sufficiency
@@ -552,6 +761,10 @@ class FedCDH:
 
             # Determine local cluster count
             K_local = getattr(self.args, "num_local_clusters", 2)
+
+            # Apply mode-specific override if needed
+            if K_local_override is not None:
+                K_local = K_local_override
             # Safety: Ensure at least 100 samples per local cluster
             min_samples_per_cluster = 100
             for X_k in X_splits:
@@ -639,40 +852,150 @@ class FedCDH:
                             base_epochs=train_epochs,
                         )
 
-                        # Create and train SPN for this local cluster
-                        if local_d == 1:
-                            spn_kh = UnivariateSPNWrapper(
-                                device=self.device,
-                                num_sums=num_sums,
-                                num_leaves=num_leaves,
-                                seed=k * 10 + h,
-                            )
-                            spn_kh.train_local(
-                                cluster_data,
-                                epochs=hyperparams["epochs"],
-                                lr=adaptive_lr,
-                            )
-                        else:
-                            spn_kh = LocalSPNWrapper(
-                                num_features=local_d,
-                                device=self.device,
-                                num_sums=hyperparams["num_sums"],
-                                num_leaves=hyperparams["num_leaves"],
-                                depth=hyperparams["depth"],
-                                num_repetitions=num_repetitions,
-                                seed=k * 10 + h,
-                            )
-                            spn_kh.train_local(
-                                cluster_data,
-                                epochs=hyperparams["epochs"],
-                                lr=adaptive_lr,
-                                l1_weight=1e-4,
-                                l2_weight=hyperparams["weight_decay"],
-                                dropout=hyperparams["dropout"],
-                            )
+                        # Apply mode-specific capacity multipliers
+                        hyperparams["num_sums"] = int(
+                            hyperparams["num_sums"] * capacity_multiplier
+                        )
+                        hyperparams["num_leaves"] = int(
+                            hyperparams["num_leaves"] * capacity_multiplier
+                        )
+                        hyperparams["epochs"] = int(
+                            hyperparams["epochs"] * epoch_multiplier
+                        )
 
-                        cluster_spns.append(spn_kh)
-                        cluster_weights.append(cluster_size)
+                        # Create and train SPN for this local cluster with error handling
+                        try:
+                            if local_d == 1:
+                                spn_kh = UnivariateSPNWrapper(
+                                    device=self.device,
+                                    num_sums=hyperparams["num_sums"],
+                                    num_leaves=hyperparams["num_leaves"],
+                                    seed=k * 10 + h,
+                                )
+                                spn_kh.train_local(
+                                    cluster_data,
+                                    epochs=hyperparams["epochs"],
+                                    lr=adaptive_lr,
+                                )
+                            else:
+                                spn_kh = LocalSPNWrapper(
+                                    num_features=local_d,
+                                    device=self.device,
+                                    num_sums=hyperparams["num_sums"],
+                                    num_leaves=hyperparams["num_leaves"],
+                                    depth=hyperparams["depth"],
+                                    num_repetitions=num_repetitions,
+                                    seed=k * 10 + h,
+                                )
+                                spn_kh.train_local(
+                                    cluster_data,
+                                    epochs=hyperparams["epochs"],
+                                    lr=adaptive_lr,
+                                    l1_weight=1e-4,
+                                    l2_weight=hyperparams["weight_decay"],
+                                    dropout=hyperparams["dropout"],
+                                )
+
+                            cluster_spns.append(spn_kh)
+                            cluster_weights.append(cluster_size)
+
+                        except torch.cuda.OutOfMemoryError as oom_error:
+                            logging.error(
+                                f"    CUDA OOM during training cluster {h} for client {k}. "
+                                f"Trying CPU fallback..."
+                            )
+                            # Clear CUDA cache
+                            torch.cuda.empty_cache()
+
+                            # Retry on CPU
+                            try:
+                                if local_d == 1:
+                                    spn_kh = UnivariateSPNWrapper(
+                                        device="cpu",
+                                        num_sums=num_sums,
+                                        num_leaves=num_leaves,
+                                        seed=k * 10 + h,
+                                    )
+                                    spn_kh.train_local(
+                                        cluster_data,
+                                        epochs=hyperparams["epochs"],
+                                        lr=adaptive_lr,
+                                    )
+                                else:
+                                    spn_kh = LocalSPNWrapper(
+                                        num_features=local_d,
+                                        device="cpu",
+                                        num_sums=hyperparams["num_sums"],
+                                        num_leaves=hyperparams["num_leaves"],
+                                        depth=hyperparams["depth"],
+                                        num_repetitions=num_repetitions,
+                                        seed=k * 10 + h,
+                                    )
+                                    spn_kh.train_local(
+                                        cluster_data,
+                                        epochs=hyperparams["epochs"],
+                                        lr=adaptive_lr,
+                                        l1_weight=1e-4,
+                                        l2_weight=hyperparams["weight_decay"],
+                                        dropout=hyperparams["dropout"],
+                                    )
+
+                                # Move trained model back to original device to avoid device mismatch
+                                try:
+                                    # Move main model
+                                    spn_kh.model = spn_kh.model.to(self.device)
+
+                                    # Move normalization tensors if they exist
+                                    if spn_kh.mean is not None:
+                                        spn_kh.mean = spn_kh.mean.to(self.device)
+                                    if spn_kh.std is not None:
+                                        spn_kh.std = spn_kh.std.to(self.device)
+
+                                    # Move variable ordering tensors if they exist
+                                    if (
+                                        hasattr(spn_kh, "variable_order")
+                                        and spn_kh.variable_order is not None
+                                    ):
+                                        spn_kh.variable_order = (
+                                            spn_kh.variable_order.to(self.device)
+                                        )
+                                    if (
+                                        hasattr(spn_kh, "inv_variable_order")
+                                        and spn_kh.inv_variable_order is not None
+                                    ):
+                                        spn_kh.inv_variable_order = (
+                                            spn_kh.inv_variable_order.to(self.device)
+                                        )
+
+                                    # Update device attribute
+                                    spn_kh.device = self.device
+
+                                    logging.info(
+                                        f"    ✓ CPU fallback successful for cluster {h}, "
+                                        f"all tensors moved to {self.device}"
+                                    )
+                                except Exception as move_error:
+                                    logging.warning(
+                                        f"    ✓ CPU fallback successful but could not move to {self.device}, "
+                                        f"keeping on CPU: {move_error}"
+                                    )
+                                    # Keep on CPU - will handle in aggregation
+
+                                cluster_spns.append(spn_kh)
+                                cluster_weights.append(cluster_size)
+                            except Exception as cpu_error:
+                                logging.error(
+                                    f"    CPU fallback also failed for cluster {h}: {cpu_error}"
+                                )
+                                logging.warning(
+                                    f"    Skipping cluster {h} due to training failure"
+                                )
+                                continue
+
+                        except Exception as e:
+                            logging.error(f"    Training failed for cluster {h}: {e}")
+                            logging.warning(f"    Skipping cluster {h}")
+                            continue
 
                     # Normalize weights
                     if len(cluster_spns) > 0:
@@ -712,45 +1035,167 @@ class FedCDH:
                         base_epochs=train_epochs,
                     )
 
-                    if local_d == 1:
-                        single_spn = UnivariateSPNWrapper(
-                            device=self.device,
-                            num_sums=num_sums,
-                            num_leaves=num_leaves,
-                            seed=k * 10,
-                        )
-                        single_spn.train_local(
-                            client_data, epochs=hyperparams["epochs"], lr=adaptive_lr
-                        )
-                    else:
-                        single_spn = LocalSPNWrapper(
-                            num_features=local_d,
-                            device=self.device,
-                            num_sums=hyperparams["num_sums"],
-                            num_leaves=hyperparams["num_leaves"],
-                            depth=hyperparams["depth"],
-                            num_repetitions=num_repetitions,
-                            seed=k * 10,
-                        )
-                        single_spn.train_local(
-                            client_data,
-                            epochs=hyperparams["epochs"],
-                            lr=adaptive_lr,
-                            l1_weight=1e-4,
-                            l2_weight=hyperparams["weight_decay"],
-                            dropout=hyperparams["dropout"],
-                        )
-
-                    # Wrap in LocalClusterMixture for consistency (K_local=1)
-                    local_mixture = LocalClusterMixture(
-                        cluster_spns=[single_spn],
-                        cluster_weights=[1.0],
-                        client_id=k,
-                        device=self.device,
+                    # Apply mode-specific capacity multipliers
+                    hyperparams["num_sums"] = int(
+                        hyperparams["num_sums"] * capacity_multiplier
                     )
-                    client_local_mixtures.append(local_mixture)
+                    hyperparams["num_leaves"] = int(
+                        hyperparams["num_leaves"] * capacity_multiplier
+                    )
+                    hyperparams["epochs"] = int(
+                        hyperparams["epochs"] * epoch_multiplier
+                    )
 
-                    logging.info(f"  ✓ Client {k} single SPN trained")
+                    try:
+                        if local_d == 1:
+                            single_spn = UnivariateSPNWrapper(
+                                device=self.device,
+                                num_sums=hyperparams["num_sums"],
+                                num_leaves=hyperparams["num_leaves"],
+                                seed=k * 10,
+                            )
+                            single_spn.train_local(
+                                client_data,
+                                epochs=hyperparams["epochs"],
+                                lr=adaptive_lr,
+                            )
+                        else:
+                            single_spn = LocalSPNWrapper(
+                                num_features=local_d,
+                                device=self.device,
+                                num_sums=hyperparams["num_sums"],
+                                num_leaves=hyperparams["num_leaves"],
+                                depth=hyperparams["depth"],
+                                num_repetitions=num_repetitions,
+                                seed=k * 10,
+                            )
+                            single_spn.train_local(
+                                client_data,
+                                epochs=hyperparams["epochs"],
+                                lr=adaptive_lr,
+                                l1_weight=1e-4,
+                                l2_weight=hyperparams["weight_decay"],
+                                dropout=hyperparams["dropout"],
+                            )
+
+                        # Wrap in LocalClusterMixture for consistency (K_local=1)
+                        local_mixture = LocalClusterMixture(
+                            cluster_spns=[single_spn],
+                            cluster_weights=[1.0],
+                            client_id=k,
+                            device=self.device,
+                        )
+                        client_local_mixtures.append(local_mixture)
+
+                        logging.info(f"  ✓ Client {k} single SPN trained")
+
+                    except torch.cuda.OutOfMemoryError as oom_error:
+                        logging.error(
+                            f"  CUDA OOM during training client {k} single SPN. "
+                            f"Trying CPU fallback..."
+                        )
+                        # Clear CUDA cache
+                        torch.cuda.empty_cache()
+
+                        # Retry on CPU
+                        try:
+                            if local_d == 1:
+                                single_spn = UnivariateSPNWrapper(
+                                    device="cpu",
+                                    num_sums=num_sums,
+                                    num_leaves=num_leaves,
+                                    seed=k * 10,
+                                )
+                                single_spn.train_local(
+                                    client_data,
+                                    epochs=hyperparams["epochs"],
+                                    lr=adaptive_lr,
+                                )
+                            else:
+                                single_spn = LocalSPNWrapper(
+                                    num_features=local_d,
+                                    device="cpu",
+                                    num_sums=hyperparams["num_sums"],
+                                    num_leaves=hyperparams["num_leaves"],
+                                    depth=hyperparams["depth"],
+                                    num_repetitions=num_repetitions,
+                                    seed=k * 10,
+                                )
+                                single_spn.train_local(
+                                    client_data,
+                                    epochs=hyperparams["epochs"],
+                                    lr=adaptive_lr,
+                                    l1_weight=1e-4,
+                                    l2_weight=hyperparams["weight_decay"],
+                                    dropout=hyperparams["dropout"],
+                                )
+
+                            # Move trained model back to original device to avoid device mismatch
+                            try:
+                                # Move main model
+                                single_spn.model = single_spn.model.to(self.device)
+
+                                # Move normalization tensors if they exist
+                                if single_spn.mean is not None:
+                                    single_spn.mean = single_spn.mean.to(self.device)
+                                if single_spn.std is not None:
+                                    single_spn.std = single_spn.std.to(self.device)
+
+                                # Move variable ordering tensors if they exist
+                                if (
+                                    hasattr(single_spn, "variable_order")
+                                    and single_spn.variable_order is not None
+                                ):
+                                    single_spn.variable_order = (
+                                        single_spn.variable_order.to(self.device)
+                                    )
+                                if (
+                                    hasattr(single_spn, "inv_variable_order")
+                                    and single_spn.inv_variable_order is not None
+                                ):
+                                    single_spn.inv_variable_order = (
+                                        single_spn.inv_variable_order.to(self.device)
+                                    )
+
+                                # Update device attribute
+                                single_spn.device = self.device
+
+                                logging.info(
+                                    f"  ✓ CPU fallback successful for client {k}, "
+                                    f"all tensors moved to {self.device}"
+                                )
+                            except Exception as move_error:
+                                logging.warning(
+                                    f"  ✓ CPU fallback successful but could not move to {self.device}, "
+                                    f"keeping on CPU: {move_error}"
+                                )
+                                # Keep on CPU - will handle in aggregation
+
+                            # Wrap in LocalClusterMixture for consistency (K_local=1)
+                            local_mixture = LocalClusterMixture(
+                                cluster_spns=[single_spn],
+                                cluster_weights=[1.0],
+                                client_id=k,
+                                device=self.device,  # Use original device, not hardcoded "cpu"
+                            )
+                            client_local_mixtures.append(local_mixture)
+
+                        except Exception as cpu_error:
+                            logging.error(
+                                f"  CPU fallback also failed for client {k}: {cpu_error}"
+                            )
+                            raise RuntimeError(
+                                f"Client {k}: Failed to train single SPN on both CUDA and CPU. "
+                                f"Cannot proceed without at least one successful client."
+                            )
+
+                    except Exception as e:
+                        logging.error(
+                            f"  Training failed for client {k} single SPN: {e}"
+                        )
+                        raise RuntimeError(
+                            f"Client {k}: Failed to train single SPN. Cannot proceed."
+                        )
 
             logging.info(f"\n{'='*60}")
             logging.info(
@@ -882,58 +1327,21 @@ class FedCDH:
 
                     logging.info("  ✓ Horizontal global mixture built (default)")
 
-            elif self.scenario == "vertical":
-                # VERTICAL MODE: Product over disjoint feature groups
-                # P(X) = Π_k P_k(X_k)
-                # where each client owns disjoint features
+            elif self.scenario in ["vertical", "hybrid"]:
+                # UNIFIED MODE: Mixture-of-Products for both Vertical and Hybrid
+                # Vertical is a special case of Hybrid with no overlapping features
+                # P(X1, ..., Xn) = Σ_l q(L=l) × Π_groups p(group | L=l)
                 logging.info(
-                    "[Vertical Mode] Building product over disjoint feature groups"
+                    f"[{self.scenario.title()} Mode] Building mixture-of-products (Seng et al. 2025 Algorithm 1)"
                 )
-
-                # Build GroupMixtures (one per client's feature subset)
-                from causallearn.utils.FedPC import GroupMixture, ProductOverGroups
-
-                group_mixtures = []
-                feature_groups = []
-
-                for k in range(self.K_clients):
-                    # Each client is a group (disjoint features)
-                    # NOTE: In vertical mode, SPNs are trained ONLY on feature subsets
-                    # (e.g., client 0 trains on features [0,1,2], returns [n, 3] samples)
-                    # So we do NOT pass full_d (which would expect [n, d_full] samples)
-                    # This is different from hybrid mode where SPNs are full-dimensional
-                    group_mix = GroupMixture(
-                        client_spns=[client_local_mixtures[k]],
-                        weights=[1.0],  # Single client
-                        feature_indices=feature_maps[k],
-                        device=self.device,
-                        # full_d NOT passed - SPNs return [n, len(feature_indices)]
+                if self.scenario == "vertical":
+                    logging.info(
+                        "  Captures cross-client dependencies via latent cluster variable"
                     )
-                    group_mixtures.append(group_mix)
-                    feature_groups.append(feature_maps[k])
-
-                # Product over disjoint groups
-                fed_spn = ProductOverGroups(
-                    group_mixtures=group_mixtures,
-                    feature_groups=feature_groups,
-                    device=self.device,
-                )
-
-                logging.info(f"  Feature groups: {feature_groups}")
-                logging.info("  ✓ Vertical product built")
-
-                # Store feature_map for vertical evaluation
-                self.vertical_feature_map = feature_maps
-
-            elif self.scenario == "hybrid":
-                # HYBRID MODE: Sum-over-products with cluster combinations
-                # Implements Seng's fix: "sum nodes on top of the products that group these clusters"
-                logging.info(
-                    "[Hybrid Mode] Building sum-over-products with cluster combinations (Seng fix)"
-                )
-                logging.info(
-                    "  Note: Reusing local cluster SPNs (K_local clusters per client)"
-                )
+                else:
+                    logging.info(
+                        "  Handles overlapping features via horizontal mixtures within products"
+                    )
 
                 from causallearn.utils.FedPC import (
                     build_feature_indicator_matrix,
@@ -945,11 +1353,11 @@ class FedCDH:
                 )
 
                 # Step 1: Sample cluster combinations
-                # For K=3, K_local=2 → 8 combinations (will enumerate all)
+                # Each combination represents a "dependency pattern" (latent state L=l)
                 combinations, combo_weights = sample_cluster_combinations(
                     K_clients=self.K_clients,
                     K_local=K_local,
-                    num_samples=10,  # Will be ignored if enumerating all
+                    num_samples=None,  # Enumerate all if K_local^K <= 20, else sample
                     seed=42,
                 )
 
@@ -959,13 +1367,26 @@ class FedCDH:
 
                 # Step 2: Build feature indicator matrix
                 M, feature_names = build_feature_indicator_matrix(
-                    X_splits=X_splits, scenario="hybrid", d_features=self.d_features
+                    X_splits=X_splits,
+                    scenario=self.scenario,
+                    d_features=self.d_features,
                 )
 
-                # Step 3: Group features by client set
+                # Step 3: Group features by client overlap patterns
+                # For vertical: returns {(0,): [f1,f2], (1,): [f3,f4], ...} (no overlaps)
+                # For hybrid: returns {(0,): [...], (0,1): [...], ...} (with overlaps)
                 feature_subspaces = group_features_by_client_set(M, feature_names)
 
-                # Step 4: For each combination, build a product
+                logging.info(f"  Feature subspaces: {len(feature_subspaces)} groups")
+                for client_set, features in feature_subspaces.items():
+                    if len(client_set) == 1:
+                        logging.info(f"    Client {client_set[0]}: features {features}")
+                    else:
+                        logging.info(
+                            f"    Clients {client_set} (overlap): features {features}"
+                        )
+
+                # Step 4: Build products for each cluster combination
                 products = []
 
                 for combo_idx, cluster_config in enumerate(combinations):
@@ -980,7 +1401,6 @@ class FedCDH:
 
                     for client_set, features in feature_subspaces.items():
                         # Collect SPNs from selected clusters for this feature group
-                        # Performance: Pre-allocate list with known size
                         num_clients_in_group = len(client_set)
                         cluster_spns_for_group = []
 
@@ -989,15 +1409,9 @@ class FedCDH:
                             cluster_idx = cluster_config[k]
 
                             # Extract the cluster SPN from LocalClusterMixture
-                            # Note: client_local_mixtures[k] is a LocalClusterMixture
-                            # with K_local cluster SPNs
                             cluster_spn = client_local_mixtures[k].cluster_spns[
                                 cluster_idx
                             ]
-
-                            # NOTE: cluster_spn was trained on ALL features for client k
-                            # We rely on NaN masking during inference to handle feature subspaces
-                            # (SPNs already marginalize NaN features correctly via all-NaN detection)
 
                             cluster_spns_for_group.append(cluster_spn)
 
@@ -1007,20 +1421,22 @@ class FedCDH:
                             )
                             continue
 
-                        # Performance: Uniform weights - compute directly instead of ones/sum
-                        # Justification: Equal contribution from each client in the group
+                        # Equal weight for each client in the group
                         weight_value = 1.0 / num_clients_in_group
                         group_weights = [weight_value] * num_clients_in_group
 
                         # Create GroupMixture for this feature subspace
-                        # NOTE: cluster SPNs are full-dimensional (trained on all 8 features)
-                        # so we pass full_d to enable NaN masking
+                        # For vertical: single SPN with weight 1.0, extract features (no NaN masking)
+                        # For hybrid: multiple SPNs mixed, use NaN masking for full-d SPNs
                         group_mix = GroupMixture(
                             client_spns=cluster_spns_for_group,
-                            weights=group_weights,  # Already a list, no need to convert
+                            weights=group_weights,
                             feature_indices=features,
                             device=self.device,
-                            full_d=self.d_features,  # Enable NaN masking for full-d SPNs
+                            full_d=self.d_features,  # Total features (for context stripping)
+                            use_nan_masking=(
+                                self.scenario == "hybrid"
+                            ),  # Only NaN mask in hybrid
                         )
                         group_mixtures.append(group_mix)
                         feature_groups.append(features)
@@ -1030,12 +1446,15 @@ class FedCDH:
                             f"Combo {combo_idx}: No feature groups created!"
                         )
 
-                    # Build product for this cluster configuration
+                    # Create product for this cluster combination
+                    # ProductOverGroupsWithOverlap handles both scenarios:
+                    # - Vertical: no overlaps, behaves like ProductOverGroups
+                    # - Hybrid: with overlaps, handles feature intersection
                     product = ProductOverGroupsWithOverlap(
                         group_mixtures=group_mixtures,
                         feature_groups=feature_groups,
                         device=self.device,
-                        allow_overlap=True,
+                        allow_overlap=(self.scenario == "hybrid"),
                     )
                     products.append(product)
 
@@ -1043,8 +1462,8 @@ class FedCDH:
                         f"    ✓ Product {combo_idx + 1}: {len(group_mixtures)} feature groups"
                     )
 
-                # Step 5: Create global sum over products
-                # This is the KEY FIX: sum breaks independence between feature groups!
+                # Step 5: Build mixture over all products
+                # This is the global model: P(X) = Σ_l q(L=l) × p(X | L=l)
                 fed_spn = GlobalSumOfProducts(
                     products=products,
                     weights=combo_weights,
@@ -1052,9 +1471,13 @@ class FedCDH:
                 )
 
                 logging.info(
-                    f"  ✓ Hybrid sum-over-products built: {len(products)} products, "
-                    f"{len(feature_groups)} groups per product"
+                    f"  ✓ {self.scenario.title()} mixture-of-products built: "
+                    f"{len(products)} products, {len(feature_groups)} groups per product"
                 )
+
+                # Store feature_map for vertical evaluation
+                if self.scenario == "vertical":
+                    self.vertical_feature_map = feature_maps
 
             else:
                 raise ValueError(f"Unknown scenario: {self.scenario}")
@@ -1064,10 +1487,31 @@ class FedCDH:
                 fed_spn, u_index=self.d_features, routing=False
             )
 
-            # Store local SPNs for post-hoc quality evaluation
+            # Derive covariance tensor from SPN for FICP orientation
+            # This replaces the need for parallel KCI summary statistics
+            if getattr(self.args, "use_spn_covariances", True):
+                logging.info("\n" + "=" * 60)
+                logging.info("Deriving Covariances from SPN for Orientation")
+                logging.info("=" * 60)
+                self.covariance_tensor = self.derive_covariances_from_spn(
+                    fed_spn,
+                    n_samples=getattr(self.args, "cov_n_samples", 5000),
+                    n_fourier_features=getattr(self.args, "cov_n_features", 10),
+                    seed=getattr(self.args, "seed", 42),
+                )
+                logging.info("✓ Covariances derived from SPN successfully\n")
+            else:
+                self.covariance_tensor = None
+                logging.info(
+                    "Note: Using KCI-based orientation (use_spn_covariances=False)\n"
+                )
+
+            # Store local SPNs for post-hoc quality evaluation AND orientation
             # In new architecture: client_local_mixtures[k] = LocalClusterMixture
-            # Each LocalClusterMixture contains cluster_spns[h] = SPNs for local clusters
-            # For evaluation, we use the first local cluster SPN from each client
+            # For vertical mode: store full LocalClusterMixture for ownership-aware orientation
+            # For evaluation: extract first cluster SPN
+            self.local_cluster_mixtures = client_local_mixtures  # Store full mixtures
+
             self.local_spns = []
             for k in range(self.K_clients):
                 if len(client_local_mixtures[k].cluster_spns) > 0:
@@ -1560,6 +2004,39 @@ class FedCDH:
             cit_obj = CIT(X_aug_global, "fisherz")
 
         cit_counter = QueryCounterCIT(cit_obj)
+
+        # Prepare kwargs for cdnod
+        cdnod_kwargs = {
+            "num_permutations": 0,
+            "orientation_type": getattr(self.args, "ablation_orientation", "mi_hybrid"),
+        }
+
+        # Pass covariance tensor if available (derived from SPN)
+        if hasattr(self, "covariance_tensor") and self.covariance_tensor is not None:
+            cdnod_kwargs["covariance_tensor"] = self.covariance_tensor
+            logging.info("Using SPN-derived covariances for FICP orientation")
+
+        # BUGFIX: Pass feature_maps and local_cluster_mixtures for vertical mode orientation
+        # Vertical mode partitions features, not samples, so orientation needs feature ownership
+        # Ownership-aware orientation uses local SPNs (within-client) and global product SPN (cross-client)
+        if self.scenario == "vertical" and hasattr(self, "vertical_feature_map"):
+            cdnod_kwargs["feature_maps"] = self.vertical_feature_map
+            logging.info(
+                f"Vertical mode: Passing feature_maps to cdnod for ownership-aware orientation (K={len(self.vertical_feature_map)} clients)"
+            )
+
+            # Pass local cluster mixtures if available (stored during training)
+            if (
+                hasattr(self, "local_cluster_mixtures")
+                and self.local_cluster_mixtures is not None
+            ):
+                cdnod_kwargs[
+                    "local_spns"
+                ] = self.local_cluster_mixtures  # Pass LocalClusterMixture objects
+                logging.info(
+                    f"Vertical mode: Passing {len(self.local_cluster_mixtures)} local cluster mixtures for within-client edge orientation"
+                )
+
         cg = cdnod(
             X_global,
             c_indx,
@@ -1570,8 +2047,7 @@ class FedCDH:
             uc_rule=2,
             uc_priority=-1,
             fed_spn_model=self.fed_spn_model,
-            num_permutations=0,
-            orientation_type=getattr(self.args, "ablation_orientation", "hybrid"),
+            **cdnod_kwargs,
         )
         cd_time = time.time() - start_cd
         num_queries = cit_counter.query_count

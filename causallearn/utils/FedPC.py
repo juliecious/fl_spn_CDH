@@ -160,11 +160,19 @@ class LocalSPNWrapper(nn.Module):
 
         # Compute and store normalization stats
         if self.mean is None:
+            import logging
+
+            logging.error(
+                f"[LocalSPNWrapper.fit] Computing stats from data.shape={data.shape}"
+            )
             self.mean = torch.tensor(data.mean(axis=0), dtype=torch.float32).to(
                 self.device
             )
             self.std = torch.tensor(data.std(axis=0), dtype=torch.float32).to(
                 self.device
+            )
+            logging.error(
+                f"[LocalSPNWrapper.fit] Computed mean.shape={self.mean.shape}, std.shape={self.std.shape}"
             )
 
         data_t = torch.tensor(data, dtype=torch.float32).to(self.device)
@@ -912,7 +920,13 @@ class GroupMixture(nn.Module):
     """
 
     def __init__(
-        self, client_spns, weights, feature_indices, device="cpu", full_d=None
+        self,
+        client_spns,
+        weights,
+        feature_indices,
+        device="cpu",
+        full_d=None,
+        use_nan_masking=None,
     ):
         super().__init__()
 
@@ -928,14 +942,19 @@ class GroupMixture(nn.Module):
         # Store feature indices and device
         self.feature_indices = list(feature_indices)
         self.device = device
-        self.full_d = full_d  # If not None, SPNs expect full_d dimensions
+        self.full_d = full_d  # Total number of features (for context stripping)
+
+        # Determine whether to use NaN masking or feature extraction
+        # If not explicitly specified, default to False (feature extraction)
+        # Hybrid mode must explicitly pass use_nan_masking=True
+        self.use_nan_masking = use_nan_masking if use_nan_masking is not None else False
 
         # Performance optimization: Pre-compute log weights (called in every forward pass)
         self.log_weights = torch.log(self.weights + 1e-9).unsqueeze(0)  # [1, K]
 
         # Performance optimization: Pre-compute feature mask for NaN tensor creation
         # This avoids creating the mask on every forward pass
-        if self.full_d is not None:
+        if self.use_nan_masking and self.full_d is not None:
             # Create a boolean mask for features NOT in this group
             self.nan_mask = torch.ones(self.full_d, dtype=torch.bool, device=device)
             self.nan_mask[self.feature_indices] = False
@@ -978,22 +997,31 @@ class GroupMixture(nn.Module):
         Reference: Seng et al. (2025), Definition 1 (Horizontal FL mixture)
         """
         # BUGFIX: Handle context column if present
-        # In hybrid mode with horizontal-style context column, input may be [batch, d+1]
-        # where last column is context. Strip it before processing.
+        # Input may be [batch, d+1] where last column is context. Strip it before processing.
         if self.full_d is not None and x.shape[1] > self.full_d:
-            # Context column detected (e.g., x is [batch, 9] but full_d=8)
-            x = x[:, : self.full_d]  # Strip context column → [batch, 8]
+            # Context column detected - strip it
+            x = x[:, : self.full_d]
 
         # Step 1: Extract features for this group
         # Justification: Each group only models its subset of features
-        # If full_d is set, use NaN masking instead of extraction
-        if self.full_d is not None:
+        # Use NaN masking if requested (hybrid mode), otherwise extract features (vertical mode)
+        if self.use_nan_masking and self.full_d is not None:
+            # Hybrid mode: SPNs trained on full features, use NaN masking for marginalization
             # Performance optimization: Clone and mask instead of full + copy
-            # This is faster for small feature groups (typical case)
             x_g = x.clone()  # [batch, d]
             x_g[:, self.nan_mask] = float("nan")  # Mask features not in this group
         else:
-            # SPNs trained on subspace - extract features
+            # Vertical mode: SPNs trained on feature subspace, extract features
+            # DEBUG
+            if (
+                x.shape[1] != len(self.feature_indices)
+                and x.shape[1] > max(self.feature_indices) + 1
+            ):
+                import logging
+
+                logging.error(
+                    f"DIMENSION MISMATCH: x.shape={x.shape}, feature_indices={self.feature_indices}, use_nan_masking={self.use_nan_masking}, full_d={self.full_d}"
+                )
             x_g = x[:, self.feature_indices]  # [batch, len(feature_indices)]
 
         # BUGFIX: Handle case when ALL features in this group are NaN
