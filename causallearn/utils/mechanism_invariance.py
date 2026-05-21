@@ -742,12 +742,15 @@ def compute_anm_score(
     """
     Compute ANM (Additive Noise Model) score for causal direction.
 
-    ANM Assumption: Y = f(X) + ε where ε ⊥ X
+    ANM Assumption: If X → Y is correct, then Y = f(X) + ε where ε ⊥ X
 
-    If X → Y is correct, then:
-        residual = Y - f(X) should be independent of X
+    Key Insight:
+        - Correct direction: residuals should be INDEPENDENT of the cause
+        - Wrong direction: residuals will be DEPENDENT on the effect
 
-    Score: Negative residual variance (lower is better for correct direction)
+    We test independence using HSIC (Hilbert-Schmidt Independence Criterion):
+        score = -HSIC(residuals, X)
+        Higher score (closer to 0) = more independent = likely correct direction
 
     Args:
         target_idx: Target variable index
@@ -756,10 +759,11 @@ def compute_anm_score(
         num_samples: Number of samples to use
 
     Returns:
-        Negative residual variance (higher score = better fit)
+        Negative HSIC score (higher = more independent residuals = better)
     """
     from sklearn.ensemble import GradientBoostingRegressor
     from sklearn.preprocessing import StandardScaler
+    from scipy.spatial.distance import pdist, squareform
 
     n = data_aug.shape[0]
 
@@ -799,17 +803,33 @@ def compute_anm_score(
 
         # Compute residuals
         Y_pred = model.predict(X_scaled)
-        residuals = Y_scaled.ravel() - Y_pred
+        residuals = (Y_scaled.ravel() - Y_pred).reshape(-1, 1)
 
-        # Score: Negative variance of residuals (higher = better fit)
-        # Better fit → lower residual variance → model explains Y well given X → X→Y likely
-        residual_var = np.var(residuals)
+        # Test independence: HSIC(residuals, X)
+        # Use RBF kernel for both
+        def rbf_kernel(X, gamma=1.0):
+            """Compute RBF kernel matrix."""
+            pairwise_sq_dists = squareform(pdist(X, "sqeuclidean"))
+            return np.exp(-gamma * pairwise_sq_dists)
 
-        # Return negative variance (we want to maximize score, minimize variance)
-        return -residual_var
+        # Compute kernel matrices
+        K_res = rbf_kernel(residuals, gamma=1.0)
+        K_x = rbf_kernel(X_scaled, gamma=1.0)
+
+        # Center the kernel matrices
+        n_samples = K_res.shape[0]
+        H = np.eye(n_samples) - np.ones((n_samples, n_samples)) / n_samples
+        K_res_c = H @ K_res @ H
+        K_x_c = H @ K_x @ H
+
+        # HSIC = (1/(n-1)²) * trace(K_res_c @ K_x_c)
+        hsic = np.trace(K_res_c @ K_x_c) / ((n_samples - 1) ** 2)
+
+        # Return negative HSIC (higher score = more independent = better)
+        return -hsic
 
     except Exception as e:
-        # Fallback: use linear correlation
+        # Fallback: use correlation-based independence test
         corr = np.corrcoef(X.ravel(), Y.ravel())[0, 1]
-        # Return squared correlation as score (R²-like)
-        return -(1 - corr**2)  # Negative unexplained variance
+        # Return squared correlation as rough independence measure
+        return -abs(corr) ** 2

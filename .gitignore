@@ -7,3 +7,4 @@ __pycache__/
 /.claude/
 eval/
 /experiments/
+/benchmark_results/
