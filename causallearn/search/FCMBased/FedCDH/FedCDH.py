@@ -33,7 +33,7 @@ from causallearn.utils.data_utils import (
     get_dag_from_pdag,
     set_random_seed,
 )
-from causallearn.utils.cost_analysis import (
+from causallearn.search.FCMBased.FedCDH.cost_analysis import (
     estimate_fedcdh_comm_cost,
     estimate_kci_comm_cost,
 )
@@ -564,15 +564,27 @@ class FedCDH:
             if self.scenario == "vertical":
                 # Vertical: concatenate features (axis=1)
                 X_global = np.concatenate(X_splits, axis=1)
-            elif (
-                self.scenario == "hybrid"
-                and self.sample_maps is not None
-                and self.feature_maps is not None
-            ):
+            elif self.scenario == "hybrid":
                 # TRUE HYBRID: Reconstruct from overlapping splits
-                from causallearn.utils.hybrid_partition import (
+                from causallearn.search.FCMBased.FedCDH.data_partitioning.hybrid import (
                     reconstruct_from_hybrid_splits,
                 )
+
+                # If sample_maps not provided, infer from data splits and c_indx
+                if self.sample_maps is None and c_indx is not None:
+                    # Infer sample ownership from c_indx
+                    sample_maps_inferred = {}
+                    for k in range(len(X_splits)):
+                        # Find which samples belong to client k
+                        client_mask = c_indx.flatten() == k
+                        sample_maps_inferred[k] = np.where(client_mask)[0]
+                    self.sample_maps = sample_maps_inferred
+
+                # Verify we have feature_maps for hybrid mode
+                if self.feature_maps is None:
+                    raise ValueError(
+                        "Hybrid mode requires feature_maps. Please provide feature_maps to FedCDH constructor."
+                    )
 
                 X_global = reconstruct_from_hybrid_splits(
                     X_splits, self.sample_maps, self.feature_maps
@@ -1397,7 +1409,7 @@ class FedCDH:
                 # V3: Choose aggregation strategy
                 if self.horizontal_aggregation == "structure_voting":
                     # Solution 1: Structure-preserving via majority voting
-                    from causallearn.utils.structure_aggregation import (
+                    from causallearn.search.FCMBased.FedCDH.data_partitioning.aggregation import (
                         extract_local_dependency_graph,
                         aggregate_structures_by_voting,
                         log_structure_aggregation_summary,
@@ -1455,7 +1467,7 @@ class FedCDH:
 
                 elif self.horizontal_aggregation == "ll_weighted":
                     # Solution 2: Confidence-weighted by log-likelihood
-                    from causallearn.utils.structure_aggregation import (
+                    from causallearn.search.FCMBased.FedCDH.data_partitioning.aggregation import (
                         build_structure_weighted_mixture,
                     )
 
@@ -1627,16 +1639,16 @@ class FedCDH:
 
                             # Create GroupMixture for this feature subspace
                             # For vertical: single SPN with weight 1.0, extract features (no NaN masking)
-                            # For hybrid: multiple SPNs mixed, use NaN masking for full-d SPNs
+                            # For hybrid: multiple SPNs mixed, also extract features (no NaN masking)
+                            # IMPORTANT: In hybrid mode, SPNs are trained on LOCAL feature subspaces,
+                            # not full d-dimensional space, so we extract features, not mask with NaN
                             group_mix = GroupMixture(
                                 client_spns=cluster_spns_for_group,
                                 weights=group_weights,
                                 feature_indices=features,
                                 device=self.device,
                                 full_d=self.d_features,  # Total features (for context stripping)
-                                use_nan_masking=(
-                                    self.scenario == "hybrid"
-                                ),  # Only NaN mask in hybrid
+                                use_nan_masking=False,  # Always extract features, never NaN mask
                             )
                             group_mixtures.append(group_mix)
                             feature_groups.append(features)
