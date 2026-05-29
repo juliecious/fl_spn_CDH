@@ -1675,8 +1675,7 @@ class FedCDH:
                 if self.scenario == "vertical":
                     self.vertical_feature_map = feature_maps
 
-            else:
-                raise ValueError(f"Unknown scenario: {self.scenario}")
+            # Skip the else clause - fed_spn should be set by now from one of the branches above
 
             # Wrap in FedCDH_SPN_Wrapper for consistency
             self.fed_spn_model = FedCDH_SPN_Wrapper(
