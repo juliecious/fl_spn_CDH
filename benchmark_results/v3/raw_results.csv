@@ -1,2 +1,0 @@
-dataset,method,seed,n_samples,n_features,n_edges_true,K,alpha,skeleton_f1,skeleton_precision,skeleton_recall,skeleton_shd,skeleton_tp,skeleton_fp,skeleton_fn,skeleton_tn,dag_f1,dag_precision,dag_recall,dag_shd,dag_tp,dag_fp,dag_fn,dag_reversed,orientation_accuracy,total_time,training_time,ci_test_time,aggregation_time
-law_school,fedspn_v,42,21000,5,7,3,0.05,0.22222222222222224,0.5,0.14285714285714285,7,1,1,6,2,0.22222222222222224,0.5,0.14285714285714285,7,1,1,6,0,0.5,233.5458071231842,163.48206498622892,46.70916142463685,23.354580712318423

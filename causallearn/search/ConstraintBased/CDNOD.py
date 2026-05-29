@@ -370,7 +370,7 @@ def cdnod_alg(
         and fed_spn_model is not None
     ):
         # New: Mechanism Invariance-Based Orientation
-        from causallearn.utils.mechanism_invariance import (
+        from causallearn.search.FCMBased.FedCDH.orientation.mechanism_invariance import (
             orient_skeleton_mechanism_invariance,
         )
 
