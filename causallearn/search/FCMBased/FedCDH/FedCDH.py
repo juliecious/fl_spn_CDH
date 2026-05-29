@@ -16,6 +16,7 @@ from causallearn.utils.FedPC import (
     LocalClusterMixture,
     UnivariateSPNWrapper,
     FederatedProduct,
+    FederatedProductWithClusters,
     FederatedStructureLearner,
     GroupMixture,
     ProductOverGroups,
@@ -24,6 +25,7 @@ from causallearn.utils.FedPC import (
     group_features_by_client_set,
     compute_adaptive_hyperparameters,
 )
+from causallearn.utils.fedpc_auto_structure import construct_fedpc_automatic
 from causallearn.utils.data_utils import (
     count_dag_accuracy,
     count_skeleton_accuracy,
@@ -393,6 +395,14 @@ class FedCDH:
         # Options: "mixture" (default), "structure_voting", "ll_weighted"
         self.horizontal_aggregation = getattr(args, "horizontal_aggregation", "mixture")
         self.structure_vote_threshold = getattr(args, "structure_vote_threshold", 0.5)
+
+        # Gap 3: Automatic structure learning (Seng's Algorithm 1)
+        # If True, automatically detect scenario from feature_maps
+        self.auto_structure = getattr(args, "auto_structure", False)
+
+        # Gap 4: Cluster-conditional vertical federation (Seng's Assumption 2)
+        # If True, use FederatedProductWithClusters instead of naive FederatedProduct
+        self.use_cluster_conditional = getattr(args, "use_cluster_conditional", False)
 
     def _extract_feature_indices(self, client_id: int, include_context: bool = False):
         """
@@ -1474,32 +1484,71 @@ class FedCDH:
 
                     logging.info("  ✓ Horizontal global mixture built (default)")
 
+            # === GAP 3: AUTOMATIC STRUCTURE LEARNING ===
+            # If auto_structure=True, automatically detect scenario from feature_maps
+            if self.auto_structure and self.feature_maps is not None:
+                logging.info("\n[Automatic Structure Learning] Gap 3 Integration")
+                fed_spn, detected_scenario = construct_fedpc_automatic(
+                    local_spns=client_local_mixtures,
+                    feature_maps=self.feature_maps,
+                    num_features=self.d_features,
+                    num_clusters=K_local,
+                    device=self.device,
+                    verbose=self.verbose,
+                )
+                logging.info(f"  ✓ Auto-detected scenario: {detected_scenario}")
+                logging.info(f"  ✓ Built optimal structure: {type(fed_spn).__name__}")
+                # Override scenario for consistency in downstream code
+                self.scenario = detected_scenario
+
             elif self.scenario in ["vertical", "hybrid"]:
-                # UNIFIED MODE: Mixture-of-Products for both Vertical and Hybrid
-                # Vertical is a special case of Hybrid with no overlapping features
-                # P(X1, ..., Xn) = Σ_l q(L=l) × Π_groups p(group | L=l)
-                logging.info(
-                    f"[{self.scenario.title()} Mode] Building mixture-of-products (Seng et al. 2025 Algorithm 1)"
-                )
-                if self.scenario == "vertical":
+                # === GAP 4: CLUSTER-CONDITIONAL VERTICAL (Optional) ===
+                # If use_cluster_conditional=True and scenario=vertical, use simpler FederatedProductWithClusters
+                if self.use_cluster_conditional and self.scenario == "vertical":
+                    logging.info("\n[Cluster-Conditional Vertical] Gap 4 Integration")
                     logging.info(
-                        "  Captures cross-client dependencies via latent cluster variable"
+                        "  Using FederatedProductWithClusters (Seng Assumption 2)"
                     )
+                    logging.info("  Factorization: p(X) = Σₗ q(L=l) Πᵢ p(Xᵢ|L=l)")
+
+                    fed_spn = FederatedProductWithClusters(
+                        local_cluster_models=client_local_mixtures,
+                        feature_maps=feature_maps,
+                        num_features=self.d_features,
+                        num_clusters=K_local,
+                        device=self.device,
+                    )
+                    logging.info(
+                        f"  ✓ Built cluster-conditional product: {K_local} clusters, {self.K_clients} clients"
+                    )
+                    self.vertical_feature_map = feature_maps
+
                 else:
+                    # UNIFIED MODE: Mixture-of-Products for both Vertical and Hybrid
+                    # Vertical is a special case of Hybrid with no overlapping features
+                    # P(X1, ..., Xn) = Σ_l q(L=l) × Π_groups p(group | L=l)
                     logging.info(
-                        "  Handles overlapping features via horizontal mixtures within products"
+                        f"[{self.scenario.title()} Mode] Building mixture-of-products (Seng et al. 2025 Algorithm 1)"
+                    )
+                    if self.scenario == "vertical":
+                        logging.info(
+                            "  Captures cross-client dependencies via latent cluster variable"
+                        )
+                    else:
+                        logging.info(
+                            "  Handles overlapping features via horizontal mixtures within products"
+                        )
+
+                    from causallearn.utils.FedPC import (
+                        build_feature_indicator_matrix,
+                        group_features_by_client_set,
+                        GroupMixture,
+                        ProductOverGroupsWithOverlap,
+                        GlobalSumOfProducts,
+                        sample_cluster_combinations,
                     )
 
-                from causallearn.utils.FedPC import (
-                    build_feature_indicator_matrix,
-                    group_features_by_client_set,
-                    GroupMixture,
-                    ProductOverGroupsWithOverlap,
-                    GlobalSumOfProducts,
-                    sample_cluster_combinations,
-                )
-
-                # Step 1: Sample cluster combinations
+                    # Step 1: Sample cluster combinations
                 # Each combination represents a "dependency pattern" (latent state L=l)
                 combinations, combo_weights = sample_cluster_combinations(
                     K_clients=self.K_clients,
