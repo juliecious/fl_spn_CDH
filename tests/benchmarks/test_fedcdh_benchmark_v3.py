@@ -896,15 +896,23 @@ class MethodRunner:
         **kwargs,
     ) -> Tuple[np.ndarray, Dict[str, Any]]:
         """Run FedSPN methods (H/V/Hy)."""
-        # Extract scenario from method name
-        if method_name == "fedspn_h":
-            scenario = "horizontal"
-        elif method_name == "fedspn_v":
-            scenario = "vertical"
-        elif method_name == "fedspn_hy":
-            scenario = "hybrid"
+        # Check for scenario override (from command-line --scenario)
+        scenario_override = kwargs.get("scenario_override", None)
+
+        if scenario_override:
+            # Use override scenario
+            scenario = scenario_override
+            logging.info(f"  Using scenario override: {scenario}")
         else:
-            raise ValueError(f"Unknown FedSPN variant: {method_name}")
+            # Extract scenario from method name
+            if method_name == "fedspn_h":
+                scenario = "horizontal"
+            elif method_name == "fedspn_v":
+                scenario = "vertical"
+            elif method_name == "fedspn_hy":
+                scenario = "hybrid"
+            else:
+                raise ValueError(f"Unknown FedSPN variant: {method_name}")
 
         # Create config
         d = X.shape[1]
@@ -916,6 +924,16 @@ class MethodRunner:
             X = X[:n_trimmed, :]
             n = n_trimmed
 
+        # Handle K_local override (from command-line --K_local)
+        K_local_override = kwargs.get("K_local_override", None)
+        if K_local_override:
+            num_local_clusters = K_local_override
+            force_clusters = K_local_override
+            logging.info(f"  Using K_local override: {K_local_override}")
+        else:
+            num_local_clusters = kwargs.get("num_local_clusters", 2)
+            force_clusters = kwargs.get("force_clusters", 2)
+
         config = {
             "d": d,
             "K": K,
@@ -923,10 +941,8 @@ class MethodRunner:
             "epochs": kwargs.get(
                 "epochs", 20
             ),  # Reduced for faster smoke tests (was 50)
-            "num_local_clusters": kwargs.get(
-                "num_local_clusters", 2
-            ),  # Reduced for speed
-            "force_clusters": kwargs.get("force_clusters", 2),
+            "num_local_clusters": num_local_clusters,
+            "force_clusters": force_clusters,
         }
 
         # Prepare data splits
@@ -942,25 +958,51 @@ class MethodRunner:
             c_indx = np.repeat(np.arange(K), samples_per_client).reshape(-1, 1)
 
         # Partition data based on scenario
+        sample_maps = None
+        feature_maps = None
+
         if scenario == "horizontal":
             # Horizontal: Split samples, all features
             X_splits = [
                 X[i * samples_per_client : (i + 1) * samples_per_client, :]
                 for i in range(K)
             ]
+            # Build maps for consistency
+            sample_indices = [
+                np.arange(i * samples_per_client, (i + 1) * samples_per_client)
+                for i in range(K)
+            ]
+            sample_maps = {k: indices for k, indices in enumerate(sample_indices)}
+            feature_maps = {k: np.arange(d) for k in range(K)}
+
         elif scenario == "vertical":
             # Vertical: All samples, split features across clients
             # Use np.array_split to handle uneven divisions
             feature_indices = np.array_split(range(d), K)
             X_splits = [X[:, indices] for indices in feature_indices]
+            # Build maps
+            sample_maps = {k: np.arange(n) for k in range(K)}
+            feature_maps = {
+                k: np.array(indices) for k, indices in enumerate(feature_indices)
+            }
+
         elif scenario == "hybrid":
-            # Hybrid: Split samples only (like horizontal), keep all features
-            # Note: FedCDH hybrid mode expects all clients to have all features
-            # The "hybrid" aspect comes from how SPNs are aggregated, not data partitioning
-            X_splits = [
-                X[i * samples_per_client : (i + 1) * samples_per_client, :]
-                for i in range(K)
-            ]
+            # TRUE HYBRID: Overlapping samples AND features (Seng et al. design)
+            from causallearn.utils.hybrid_partition import create_hybrid_block_partition
+
+            overlap_fraction = K_local_override / 10.0 if K_local_override else 0.3
+            X_splits, sample_maps, feature_maps = create_hybrid_block_partition(
+                X, K, overlap_fraction=overlap_fraction, seed=seed
+            )
+
+            # Update c_indx for hybrid mode (need to track client ownership)
+            # Each sample may belong to multiple clients, use first owner as primary
+            c_indx = np.zeros((n, 1), dtype=int)
+            for k, sample_idx in sample_maps.items():
+                for idx in sample_idx:
+                    if c_indx[idx, 0] == 0 or k == 0:  # First owner or client 0
+                        c_indx[idx, 0] = k
+
         else:
             raise ValueError(f"Unknown scenario: {scenario}")
 
@@ -993,10 +1035,15 @@ class MethodRunner:
             spn_eval_dir=spn_eval_dir,  # Use benchmark's experiment directory
         )
 
+        # Log configuration for K ablation studies
+        logging.info(
+            f"  FedSPN config: scenario={scenario}, K={K}, K_local={config['num_local_clusters']}, epochs={config['epochs']}"
+        )
+
         start_time = time.time()
 
         try:
-            fedcdh = FedCDH(args)
+            fedcdh = FedCDH(args, sample_maps=sample_maps, feature_maps=feature_maps)
             results = fedcdh.fit(X_splits, c_indx, B)
             runtime = time.time() - start_time
 
@@ -1058,6 +1105,8 @@ class UnifiedBenchmark:
         output_dir: str = "benchmark_results/v3",
         device: str = None,
         save_graphs: bool = False,
+        scenario_override: str = None,
+        K_local_override: int = None,
     ):
         """
         Initialize unified benchmark.
@@ -1071,6 +1120,8 @@ class UnifiedBenchmark:
             output_dir: Output directory for results
             device: Device to use (cuda/mps/cpu) or None for auto-detect
             save_graphs: Whether to save graphs and visualizations
+            scenario_override: Force specific scenario (horizontal/vertical/hybrid)
+            K_local_override: Force specific K_local for SPN methods
         """
         self.datasets = datasets
         self.methods = methods
@@ -1081,6 +1132,8 @@ class UnifiedBenchmark:
         self.output_dir.mkdir(parents=True, exist_ok=True)
         self.device = device if device is not None else get_device()
         self.save_graphs = save_graphs
+        self.scenario_override = scenario_override
+        self.K_local_override = K_local_override
 
         # Create graphs directory if saving graphs
         if self.save_graphs:
@@ -1153,6 +1206,8 @@ class UnifiedBenchmark:
                 seed=seed,
                 device=self.device,
                 exp_dir=exp_dir,  # Pass experiment directory to prevent FedCDH from creating its own
+                scenario_override=self.scenario_override,
+                K_local_override=self.K_local_override,
             )
 
             # Extract internal objects for visualization (if available)
@@ -1705,6 +1760,7 @@ def main():
     )
     parser.add_argument(
         "--methods",
+        "--method",
         type=str,
         default="ges,fedspn_h",
         help="Comma-separated list of methods",
@@ -1720,6 +1776,19 @@ def main():
         type=int,
         default=3,
         help="Number of federated clients",
+    )
+    parser.add_argument(
+        "--K_local",
+        type=int,
+        default=None,
+        help="Number of local clusters per client for SPN (default: 2). Key parameter for K ablation studies.",
+    )
+    parser.add_argument(
+        "--scenario",
+        type=str,
+        default=None,
+        choices=["horizontal", "vertical", "hybrid"],
+        help="Override federated scenario (default: inferred from method name)",
     )
     parser.add_argument(
         "--alpha",
@@ -1763,6 +1832,8 @@ def main():
         output_dir=args.output_dir,
         device=args.device,
         save_graphs=args.save_graphs,
+        scenario_override=args.scenario,
+        K_local_override=args.K_local,
     )
 
     # Run experiments

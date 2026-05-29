@@ -450,7 +450,21 @@ class LocalClusterMixture(nn.Module):
 
                 cluster_lls = []
                 for spn in self.cluster_spns:
-                    ll = spn.log_prob(x_obs)
+                    # Hybrid mode fix: Check if SPN expects different dimensions
+                    spn_input = x_obs
+                    if hasattr(spn, "mean") and spn.mean is not None:
+                        expected_dims = spn.mean.shape[0]
+                        if expected_dims > x_obs.shape[1]:
+                            # Pad with NaN to marginalize
+                            padding = torch.full(
+                                (x_obs.shape[0], expected_dims - x_obs.shape[1]),
+                                float("nan"),
+                                device=x_obs.device,
+                                dtype=x_obs.dtype,
+                            )
+                            spn_input = torch.cat([x_obs, padding], dim=1)
+
+                    ll = spn.log_prob(spn_input)
                     cluster_lls.append(ll)
 
                 ll_stack = torch.cat(cluster_lls, dim=1)
@@ -1012,16 +1026,29 @@ class GroupMixture(nn.Module):
             x_g[:, self.nan_mask] = float("nan")  # Mask features not in this group
         else:
             # Vertical mode: SPNs trained on feature subspace, extract features
-            # DEBUG
-            if (
-                x.shape[1] != len(self.feature_indices)
-                and x.shape[1] > max(self.feature_indices) + 1
-            ):
+            # Note: During CI testing, we receive full-dimensional data [batch, d_full]
+            # and extract the subset for this client. This is expected behavior.
+
+            # Validate: Input must have enough dimensions for feature extraction
+            if x.shape[1] <= max(self.feature_indices):
                 import logging
 
                 logging.error(
-                    f"DIMENSION MISMATCH: x.shape={x.shape}, feature_indices={self.feature_indices}, use_nan_masking={self.use_nan_masking}, full_d={self.full_d}"
+                    f"REAL DIMENSION ERROR: Cannot extract features {self.feature_indices} from input shape {x.shape}. "
+                    f"Need at least {max(self.feature_indices)+1} features but got {x.shape[1]}."
                 )
+                raise IndexError(
+                    f"Cannot extract features {self.feature_indices} from tensor with shape {x.shape}"
+                )
+
+            # Debug log: Track when we extract features from full-dimensional input
+            if x.shape[1] != len(self.feature_indices):
+                import logging
+
+                logging.debug(
+                    f"Vertical mode: extracting features {self.feature_indices} from full tensor with shape {x.shape}"
+                )
+
             x_g = x[:, self.feature_indices]  # [batch, len(feature_indices)]
 
         # BUGFIX: Handle case when ALL features in this group are NaN
@@ -1065,7 +1092,38 @@ class GroupMixture(nn.Module):
             x_g.shape[0], len(self.client_spns), device=x.device, dtype=x.dtype
         )
         for i, spn in enumerate(self.client_spns):
-            ll_stack[:, i : i + 1] = spn.log_prob(x_g)  # [batch, 1]
+            # Check if client SPN expects different dimensions
+            # This happens in hybrid mode where client has more features than this group
+            spn_input = x_g
+
+            # Get expected dimensions from SPN
+            if isinstance(spn, LocalClusterMixture):
+                # LocalClusterMixture wraps LocalSPNWrapper - check first cluster SPN
+                if len(spn.cluster_spns) > 0:
+                    first_spn = spn.cluster_spns[0]
+                    if hasattr(first_spn, "mean") and first_spn.mean is not None:
+                        expected_dims = first_spn.mean.shape[0]
+                    else:
+                        expected_dims = x_g.shape[1]  # Default to x_g dims
+                else:
+                    expected_dims = x_g.shape[1]
+            elif hasattr(spn, "mean") and spn.mean is not None:
+                expected_dims = spn.mean.shape[0]
+            else:
+                expected_dims = x_g.shape[1]  # Default to x_g dims
+
+            if expected_dims > x_g.shape[1]:
+                # Pad with NaN to marginalize over extra features
+                padding_size = expected_dims - x_g.shape[1]
+                padding = torch.full(
+                    (x_g.shape[0], padding_size),
+                    float("nan"),
+                    device=x_g.device,
+                    dtype=x_g.dtype,
+                )
+                spn_input = torch.cat([x_g, padding], dim=1)
+
+            ll_stack[:, i : i + 1] = spn.log_prob(spn_input)  # [batch, 1]
 
         # Step 3: Stack and compute weighted mixture via logsumexp
         # Justification: Numerically stable computation of log(Σ exp(...))
@@ -1112,16 +1170,30 @@ class GroupMixture(nn.Module):
                 count.item()
             )  # May be [count, d_full] if full SPN
 
-            # BUGFIX: If SPN returns full-dimensional samples, extract only relevant features
-            # This happens in vertical mode where SPNs are trained on feature subsets
-            # but still represent full d-dimensional distribution
-            if self.full_d is not None and comp_samples.shape[1] > len(
-                self.feature_indices
-            ):
-                # Extract only the features for this group
-                comp_samples = comp_samples[
-                    :, self.feature_indices
-                ]  # [count, len(feature_indices)]
+            # Extract relevant features from SPN samples
+            d_sampled = comp_samples.shape[1]
+            d_expected = len(self.feature_indices)
+
+            if d_sampled == d_expected:
+                # Dimensions match - samples are already correct
+                pass
+            elif self.full_d is not None and d_sampled == self.full_d:
+                # SPN returned full-dimensional samples (vertical mode)
+                # Extract using global feature indices
+                comp_samples = comp_samples[:, self.feature_indices]
+            elif d_sampled > d_expected:
+                # SPN returned more features than needed (hybrid mode)
+                # Extract first d_expected features (assumes features are ordered)
+                comp_samples = comp_samples[:, :d_expected]
+            else:
+                # SPN returned fewer features than expected
+                # Pad with zeros (shouldn't normally happen)
+                padding = torch.zeros(
+                    comp_samples.shape[0],
+                    d_expected - d_sampled,
+                    device=comp_samples.device,
+                )
+                comp_samples = torch.cat([comp_samples, padding], dim=1)
 
             # Ensure 2D shape
             if comp_samples.ndim == 1:
@@ -2379,7 +2451,11 @@ def sample_cluster_combinations(K_clients, K_local, num_samples=10, seed=42):
         )
     else:
         # Random sampling without replacement
-        num_samples = min(num_samples, max_combinations)
+        # If num_samples not specified, use default of min(20, max_combinations)
+        if num_samples is None:
+            num_samples = min(20, max_combinations)
+        else:
+            num_samples = min(num_samples, max_combinations)
         combinations = set()
 
         # Sample unique combinations
@@ -2655,7 +2731,21 @@ class LocalClusterMixture(nn.Module):
 
                 cluster_lls = []
                 for spn in self.cluster_spns:
-                    ll = spn.log_prob(x_obs)
+                    # Hybrid mode fix: Check if SPN expects different dimensions
+                    spn_input = x_obs
+                    if hasattr(spn, "mean") and spn.mean is not None:
+                        expected_dims = spn.mean.shape[0]
+                        if expected_dims > x_obs.shape[1]:
+                            # Pad with NaN to marginalize
+                            padding = torch.full(
+                                (x_obs.shape[0], expected_dims - x_obs.shape[1]),
+                                float("nan"),
+                                device=x_obs.device,
+                                dtype=x_obs.dtype,
+                            )
+                            spn_input = torch.cat([x_obs, padding], dim=1)
+
+                    ll = spn.log_prob(spn_input)
                     cluster_lls.append(ll)
 
                 ll_stack = torch.cat(cluster_lls, dim=1)

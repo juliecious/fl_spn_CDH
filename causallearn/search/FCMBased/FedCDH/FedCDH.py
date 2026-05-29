@@ -62,19 +62,35 @@ class SimulatedFederatedKMeans:
             D = 0
             for k in feature_maps:
                 D = max(D, max(feature_maps[k]) + 1)
+        elif scenario == "hybrid" and feature_maps is not None:
+            # Hybrid: clients have different samples AND features
+            # Determine total dimensions from feature_maps
+            N = 0
+            D = 0
+            for k in range(K_clients):
+                N = max(N, X_splits[k].shape[0])  # May have overlaps
+                if k in feature_maps:
+                    D = max(D, max(feature_maps[k]) + 1)
         else:
-            # Horizontal/Hybrid: all clients see all features
+            # Horizontal: all clients see all features
             N = sum(len(x) for x in X_splits)
             D = X_splits[0].shape[1]
 
-        if scenario == "vertical":
+        if scenario == "vertical" or (
+            scenario == "hybrid" and feature_maps is not None
+        ):
+            # Vertical/Hybrid: clients have different features, aggregate min/max
             g_min, g_max = np.full(D, np.inf), np.full(D, -np.inf)
             for k in range(K_clients):
                 cols = feature_maps[k]
                 l_min, l_max = X_splits[k].min(axis=0), X_splits[k].max(axis=0)
                 g_min[cols] = np.minimum(g_min[cols], l_min)
                 g_max[cols] = np.maximum(g_max[cols], l_max)
+            # Fill any remaining dimensions (shouldn't happen if coverage is complete)
+            g_min[np.isinf(g_min)] = 0.0
+            g_max[np.isinf(g_max)] = 1.0
         else:
+            # Horizontal: all clients have all features
             x0 = X_splits[0]
             if len(x0) > 0:
                 g_min, g_max = x0.min(axis=0), x0.max(axis=0)
@@ -85,7 +101,94 @@ class SimulatedFederatedKMeans:
 
         for it in range(self.max_iter):
             prev_centroids = centroids.copy()
-            if scenario == "vertical":
+
+            if scenario == "hybrid" and feature_maps is not None:
+                # HYBRID MODE: Overlapping samples and features
+                # Each client has subset of samples and subset of features
+                # Strategy: Compute distances using only features client has
+
+                # Build global sample-to-labels mapping
+                # Track which samples are seen by which clients
+                sample_labels = {}  # sample_idx -> cluster_label
+                sample_dists = {}  # sample_idx -> min_distance
+
+                for k in range(K_clients):
+                    if len(X_splits[k]) == 0:
+                        continue
+
+                    cols = feature_maps[k]  # Global feature indices
+                    # X_splits[k] has local columns (0, 1, ..., d_k-1)
+                    # centroids[:, cols] gets the relevant global features
+
+                    # Compute distances for this client's samples
+                    # X_splits[k]: (n_k, d_k) local features
+                    # centroids[:, cols]: (n_clusters, d_k) relevant global features
+                    dists = np.sum(
+                        (X_splits[k][:, None, :] - centroids[None, :, cols]) ** 2,
+                        axis=2,
+                    )  # (n_k, n_clusters)
+
+                    # Assign labels based on minimum distance
+                    local_labels = np.argmin(dists, axis=1)
+                    local_min_dists = np.min(dists, axis=1)
+
+                    # Map to global sample indices (would need sample_maps)
+                    # For now, accumulate all labels
+                    # This is simplified - proper implementation needs sample_maps
+
+                # Fallback to horizontal-style clustering for now
+                # TODO: Implement proper sample_maps tracking
+                global_sums = np.zeros((self.n_clusters, D))
+                global_counts = np.zeros(self.n_clusters)
+                self.inertia_ = 0
+                all_labels = []
+
+                for k in range(K_clients):
+                    if len(X_splits[k]) == 0:
+                        all_labels.append(np.array([]))
+                        continue
+
+                    cols = feature_maps[k]
+                    # Compute distances using only features this client has
+                    dists = np.sum(
+                        (X_splits[k][:, None, :] - centroids[None, :, cols]) ** 2,
+                        axis=2,
+                    )
+
+                    lbs = np.argmin(dists, axis=1)
+                    all_labels.append(lbs)
+                    self.inertia_ += np.min(dists, axis=1).sum()
+
+                    # Update global sums - only for features this client has
+                    for c in range(self.n_clusters):
+                        mask = lbs == c
+                        count = mask.sum()
+                        if count > 0:
+                            # X_splits[k][mask] has shape (count, d_k)
+                            # We need to add to global_sums[c, cols]
+                            global_sums[c, cols] += X_splits[k][mask].sum(axis=0)
+                            global_counts[c] += count
+
+                self.labels_ = (
+                    np.concatenate(all_labels) if all_labels else np.array([])
+                )
+
+                # Update centroids
+                new_centroids = np.zeros_like(centroids)
+                for c in range(self.n_clusters):
+                    if global_counts[c] > 0:
+                        # Only update features that have data
+                        for k in range(K_clients):
+                            cols = feature_maps[k]
+                            # Count how many samples from this client are in cluster c
+                            # This is approximate - proper version needs sample tracking
+                            new_centroids[c, cols] = (
+                                global_sums[c, cols] / global_counts[c]
+                            )
+                    else:
+                        new_centroids[c] = centroids[c]
+
+            elif scenario == "vertical":
                 for k in range(K_clients):
                     d_k = len(feature_maps[k])
                     self.comm_cost += self.n_clusters * d_k * 4
@@ -114,6 +217,7 @@ class SimulatedFederatedKMeans:
                             new_centroids[c, cols] = partial_sum / global_counts[c]
                 self.comm_cost += self.n_clusters * len(cols) * 4
             else:
+                # HORIZONTAL MODE: All clients have same features, different samples
                 global_sums = np.zeros((self.n_clusters, D))
                 global_counts = np.zeros(self.n_clusters)
                 self.inertia_ = 0
@@ -123,21 +227,26 @@ class SimulatedFederatedKMeans:
                     if len(X_splits[k]) == 0:
                         all_labels.append(np.array([]))
                         continue
+
+                    # All clients have same features (full D dimensions)
                     dists = (
                         np.linalg.norm(
                             X_splits[k][:, None, :] - centroids[None, :, :], axis=2
                         )
                         ** 2
                     )
+
                     lbs = np.argmin(dists, axis=1)
                     all_labels.append(lbs)
                     self.inertia_ += np.min(dists, axis=1).sum()
+
                     for c in range(self.n_clusters):
                         mask = lbs == c
                         count = mask.sum()
                         if count > 0:
                             global_sums[c] += X_splits[k][mask].sum(axis=0)
                             global_counts[c] += count
+
                 self.labels_ = (
                     np.concatenate(all_labels) if all_labels else np.array([])
                 )
@@ -227,8 +336,10 @@ class QueryCounterCIT:
 
 
 class FedCDH:
-    def __init__(self, args: Dict[str, Any]):
+    def __init__(self, args: Dict[str, Any], sample_maps=None, feature_maps=None):
         self.args = args
+        self.sample_maps = sample_maps
+        self.feature_maps = feature_maps
 
         # Device selection with optional override
         # Priority: args.device > auto-detect (CUDA > CPU)
@@ -443,8 +554,21 @@ class FedCDH:
             if self.scenario == "vertical":
                 # Vertical: concatenate features (axis=1)
                 X_global = np.concatenate(X_splits, axis=1)
+            elif (
+                self.scenario == "hybrid"
+                and self.sample_maps is not None
+                and self.feature_maps is not None
+            ):
+                # TRUE HYBRID: Reconstruct from overlapping splits
+                from causallearn.utils.hybrid_partition import (
+                    reconstruct_from_hybrid_splits,
+                )
+
+                X_global = reconstruct_from_hybrid_splits(
+                    X_splits, self.sample_maps, self.feature_maps
+                )
             else:
-                # Horizontal/Hybrid: concatenate samples (axis=0)
+                # Horizontal: concatenate samples (axis=0)
                 X_global = np.concatenate(X_splits, axis=0)
         else:
             X_global = X_splits
@@ -467,24 +591,30 @@ class FedCDH:
         if self.ci_method == "spn":
             start_train = time.time()
 
-            # Feature maps only needed for vertical scenario (disjoint features)
-            # For horizontal/hybrid, all clients see all features
+            # Feature maps needed for vertical and hybrid scenarios
             if self.scenario == "vertical":
                 # Vertical: Build feature maps from X_splits (NO context column for training)
                 # Context column only added to X_aug_global for CI testing
-                feature_maps = {}
-                for k in range(self.K_clients):
-                    # Feature indices are simply the columns in X_splits[k]
-                    # Assuming X_splits are already properly partitioned
-                    d_k = X_splits[k].shape[1]
-                    # Map to global feature indices
-                    start_idx = sum(X_splits[i].shape[1] for i in range(k))
-                    feature_maps[k] = list(range(start_idx, start_idx + d_k))
+                if self.feature_maps is None:
+                    feature_maps = {}
+                    for k in range(self.K_clients):
+                        # Feature indices are simply the columns in X_splits[k]
+                        # Assuming X_splits are already properly partitioned
+                        d_k = X_splits[k].shape[1]
+                        # Map to global feature indices
+                        start_idx = sum(X_splits[i].shape[1] for i in range(k))
+                        feature_maps[k] = list(range(start_idx, start_idx + d_k))
+                else:
+                    feature_maps = self.feature_maps
 
                 # Store original X_splits for training (WITHOUT context column)
                 self.X_splits_train = X_splits
+            elif self.scenario == "hybrid" and self.feature_maps is not None:
+                # Hybrid: Use provided feature maps (with overlaps)
+                feature_maps = self.feature_maps
+                self.X_splits_train = X_splits
             else:
-                # Horizontal/Hybrid: All clients see all features (no feature map needed)
+                # Horizontal: All clients see all features (no feature map needed)
                 feature_maps = None
                 if self.scenario == "horizontal":
                     # Keep existing splits but ensure they include context column U
@@ -516,11 +646,28 @@ class FedCDH:
                     total_samples_split += xk.shape[0]
 
             # Verify total samples match for horizontal/hybrid
-            if self.scenario in ["horizontal", "hybrid"]:
+            if self.scenario == "horizontal":
                 assert total_samples_split == X_aug_global.shape[0], (
-                    f"{self.scenario.capitalize()} scenario: Total samples across clients "
+                    f"Horizontal scenario: Total samples across clients "
                     f"({total_samples_split}) != global samples ({X_aug_global.shape[0]})"
                 )
+            elif self.scenario == "hybrid":
+                # Hybrid with overlaps: total may be larger due to overlap
+                # Just check that global samples are covered
+                if self.sample_maps is not None:
+                    all_samples = set()
+                    for smap in self.sample_maps.values():
+                        all_samples.update(smap)
+                    assert len(all_samples) >= X_aug_global.shape[0], (
+                        f"Hybrid scenario: Only {len(all_samples)} unique samples covered, "
+                        f"expected at least {X_aug_global.shape[0]}"
+                    )
+                else:
+                    # Old hybrid mode (no overlaps)
+                    assert total_samples_split == X_aug_global.shape[0], (
+                        f"Hybrid scenario: Total samples across clients "
+                        f"({total_samples_split}) != global samples ({X_aug_global.shape[0]})"
+                    )
 
             logging.info(
                 f"✓ Data partition validation passed for {self.scenario} scenario"
