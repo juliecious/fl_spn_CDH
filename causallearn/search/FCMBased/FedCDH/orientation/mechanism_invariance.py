@@ -538,8 +538,13 @@ def orient_edge_vertical_with_ownership(
         client_features = feature_maps[client_i]
 
         # Map global indices to local indices
-        local_i = client_features.index(i)
-        local_j = client_features.index(j)
+        # Handle both list and numpy array types
+        if isinstance(client_features, np.ndarray):
+            local_i = np.where(client_features == i)[0][0]
+            local_j = np.where(client_features == j)[0][0]
+        else:
+            local_i = client_features.index(i)
+            local_j = client_features.index(j)
 
         # Use local SPN to compare conditionals
         score_i_to_j = compute_conditional_local(

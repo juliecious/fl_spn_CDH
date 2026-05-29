@@ -295,13 +295,22 @@ def cdnod_alg(
 
     # Stage 1
     flag = 0
+    depth_limit = kwargs.get("depth_limit", None)
     cg_0 = SkeletonDiscovery.skeleton_discovery(
-        flag, cg_list, data, K, alpha, indep_test_all, stable
+        flag, cg_list, data, K, alpha, indep_test_all, stable, depth_limit=depth_limit
     )
 
     # Stage 2
     cg_1 = SkeletonDiscovery.skeleton_discovery_with_surrogate_GMM(
-        flag, cg_0, cg_list, data_aug, K, alpha, indep_test_all, stable
+        flag,
+        cg_0,
+        cg_list,
+        data_aug,
+        K,
+        alpha,
+        indep_test_all,
+        stable,
+        depth_limit=depth_limit,
     )
 
     # Orient edge from c_indx

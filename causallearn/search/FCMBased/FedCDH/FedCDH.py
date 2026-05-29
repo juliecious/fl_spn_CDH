@@ -2190,17 +2190,19 @@ class FedCDH:
         from causallearn.utils.cit import CIT, SPN_CIT
 
         # Permutation test configuration
-        # Default: num_permutations=0 (parametric chi-square test, faster)
+        # CRITICAL FIX: Parametric test (num_permutations=0) uses df=1 which is incorrect
+        # for continuous SPNs. This causes false negatives on standardized data (e.g., Asia).
+        # Default: num_permutations=50 (non-parametric, statistically correct)
         # Override via args.num_permutations if specified
-        # v2 change: Smoke tests showed parametric = permutation (both F1=0.133)
-        # Permutation test adds no value but costs 50x compute per CI test
-        num_permutations = getattr(self.args, "num_permutations", 0)
+        num_permutations = getattr(self.args, "num_permutations", 50)
         if num_permutations > 0:
             logging.info(
-                f"Using permutation test with num_permutations={num_permutations}"
+                f"Using permutation test with num_permutations={num_permutations} (statistically correct)"
             )
         else:
-            logging.info("Using parametric chi-square test (num_permutations=0)")
+            logging.warning(
+                "Using parametric chi-square test (num_permutations=0) - may produce incorrect p-values on standardized data"
+            )
 
         # Causal discovery using global CI test
         if self.ci_method == "spn":
@@ -2216,10 +2218,20 @@ class FedCDH:
 
         cit_counter = QueryCounterCIT(cit_obj)
 
+        # Adaptive depth limit based on dataset characteristics
+        # Prevents excessive conditioning set sizes that hurt SPN accuracy
+        # Rule of thumb: max_depth ≈ log(n) / 2, capped at 3-4
+        default_depth_limit = min(4, max(2, int(np.log(n_samples) / 2)))
+        depth_limit = getattr(self.args, "depth_limit", default_depth_limit)
+        logging.info(
+            f"Using depth_limit={depth_limit} for skeleton discovery (n={n_samples}, d={self.d_features})"
+        )
+
         # Prepare kwargs for cdnod
         cdnod_kwargs = {
             "num_permutations": 0,
             "orientation_type": getattr(self.args, "ablation_orientation", "mi_hybrid"),
+            "depth_limit": depth_limit,
         }
 
         # Pass covariance tensor if available (derived from SPN)

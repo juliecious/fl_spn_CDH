@@ -36,6 +36,7 @@ def skeleton_discovery(
     node_names: List[str] | None = None,
     use_ranking: bool = False,
     ranking_tracker=None,
+    depth_limit: int | None = None,
 ) -> CausalGraph:
     """
     Perform skeleton discovery
@@ -86,6 +87,13 @@ def skeleton_discovery(
     pbar = tqdm(total=no_of_var) if show_progress else None
     while cg.max_degree() - 1 > depth:
         depth += 1
+        # Check depth limit to prevent excessive conditioning sets
+        if depth_limit is not None and depth > depth_limit:
+            if show_progress:
+                print(
+                    f"\nReached depth_limit={depth_limit}, stopping skeleton discovery"
+                )
+            break
         edge_removal = []
         if show_progress:
             pbar.reset()
@@ -324,6 +332,7 @@ def skeleton_discovery_with_surrogate(
     verbose: bool = False,
     show_progress: bool = True,
     node_names: List[str] | None = None,
+    depth_limit: int | None = None,
 ) -> CausalGraph:
     """
     Perform skeleton discovery
@@ -396,6 +405,13 @@ def skeleton_discovery_with_surrogate(
     pbar = tqdm(total=no_of_var) if show_progress else None
     while cg.max_degree() - 1 > depth:
         depth += 1
+        # Check depth limit to prevent excessive conditioning sets
+        if depth_limit is not None and depth > depth_limit:
+            if show_progress:
+                print(
+                    f"\nReached depth_limit={depth_limit}, stopping skeleton discovery"
+                )
+            break
         edge_removal = []
         if show_progress:
             pbar.reset()
@@ -596,6 +612,7 @@ def skeleton_discovery_with_surrogate_GMM(
     verbose: bool = False,
     show_progress: bool = True,
     node_names: List[str] | None = None,
+    depth_limit: int | None = None,
 ) -> CausalGraph:
     """
     Perform skeleton discovery
@@ -657,6 +674,13 @@ def skeleton_discovery_with_surrogate_GMM(
     pbar = tqdm(total=no_of_var) if show_progress else None
     while cg.max_degree() - 1 > depth:
         depth += 1
+        # Check depth limit to prevent excessive conditioning sets
+        if depth_limit is not None and depth > depth_limit:
+            if show_progress:
+                print(
+                    f"\nReached depth_limit={depth_limit}, stopping skeleton discovery"
+                )
+            break
         edge_removal = []
         if show_progress:
             pbar.reset()
