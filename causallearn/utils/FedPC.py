@@ -2859,7 +2859,15 @@ class LocalClusterMixture(nn.Module):
                 samples_list.append((mask, cluster_samples))
 
         # Assemble full sample array
-        samples = torch.zeros(n, self.cluster_spns[0].num_features, device=self.device)
+        # Get number of features from first sample
+        if len(samples_list) > 0:
+            n_features = samples_list[0][1].shape[1]
+        else:
+            # Fallback: sample one to get shape
+            test_sample = self.cluster_spns[0].sample(1)
+            n_features = test_sample.shape[1]
+
+        samples = torch.zeros(n, n_features, device=self.device)
         for mask, cluster_samples in samples_list:
             samples[mask] = cluster_samples
 

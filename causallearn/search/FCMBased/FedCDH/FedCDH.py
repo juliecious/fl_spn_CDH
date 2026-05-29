@@ -1549,131 +1549,135 @@ class FedCDH:
                     )
 
                     # Step 1: Sample cluster combinations
-                # Each combination represents a "dependency pattern" (latent state L=l)
-                combinations, combo_weights = sample_cluster_combinations(
-                    K_clients=self.K_clients,
-                    K_local=K_local,
-                    num_samples=None,  # Enumerate all if K_local^K <= 20, else sample
-                    seed=42,
-                )
-
-                logging.info(
-                    f"  Building {len(combinations)} products for cluster combinations"
-                )
-
-                # Step 2: Build feature indicator matrix
-                M, feature_names = build_feature_indicator_matrix(
-                    X_splits=X_splits,
-                    scenario=self.scenario,
-                    d_features=self.d_features,
-                )
-
-                # Step 3: Group features by client overlap patterns
-                # For vertical: returns {(0,): [f1,f2], (1,): [f3,f4], ...} (no overlaps)
-                # For hybrid: returns {(0,): [...], (0,1): [...], ...} (with overlaps)
-                feature_subspaces = group_features_by_client_set(M, feature_names)
-
-                logging.info(f"  Feature subspaces: {len(feature_subspaces)} groups")
-                for client_set, features in feature_subspaces.items():
-                    if len(client_set) == 1:
-                        logging.info(f"    Client {client_set[0]}: features {features}")
-                    else:
-                        logging.info(
-                            f"    Clients {client_set} (overlap): features {features}"
-                        )
-
-                # Step 4: Build products for each cluster combination
-                products = []
-
-                for combo_idx, cluster_config in enumerate(combinations):
-                    logging.info(
-                        f"  Product {combo_idx + 1}/{len(combinations)}: "
-                        f"cluster config={cluster_config}"
+                    # Each combination represents a "dependency pattern" (latent state L=l)
+                    combinations, combo_weights = sample_cluster_combinations(
+                        K_clients=self.K_clients,
+                        K_local=K_local,
+                        num_samples=None,  # Enumerate all if K_local^K <= 20, else sample
+                        seed=42,
                     )
 
-                    # For this cluster configuration, build feature groups
-                    group_mixtures = []
-                    feature_groups = []
+                    logging.info(
+                        f"  Building {len(combinations)} products for cluster combinations"
+                    )
 
+                    # Step 2: Build feature indicator matrix
+                    M, feature_names = build_feature_indicator_matrix(
+                        X_splits=X_splits,
+                        scenario=self.scenario,
+                        d_features=self.d_features,
+                    )
+
+                    # Step 3: Group features by client overlap patterns
+                    # For vertical: returns {(0,): [f1,f2], (1,): [f3,f4], ...} (no overlaps)
+                    # For hybrid: returns {(0,): [...], (0,1): [...], ...} (with overlaps)
+                    feature_subspaces = group_features_by_client_set(M, feature_names)
+
+                    logging.info(
+                        f"  Feature subspaces: {len(feature_subspaces)} groups"
+                    )
                     for client_set, features in feature_subspaces.items():
-                        # Collect SPNs from selected clusters for this feature group
-                        num_clients_in_group = len(client_set)
-                        cluster_spns_for_group = []
-
-                        for k in client_set:
-                            # Get which cluster to use for client k in this configuration
-                            cluster_idx = cluster_config[k]
-
-                            # Extract the cluster SPN from LocalClusterMixture
-                            cluster_spn = client_local_mixtures[k].cluster_spns[
-                                cluster_idx
-                            ]
-
-                            cluster_spns_for_group.append(cluster_spn)
-
-                        if len(cluster_spns_for_group) == 0:
-                            logging.warning(
-                                f"    No SPNs for features {features} in combo {combo_idx}, skipping"
+                        if len(client_set) == 1:
+                            logging.info(
+                                f"    Client {client_set[0]}: features {features}"
                             )
-                            continue
+                        else:
+                            logging.info(
+                                f"    Clients {client_set} (overlap): features {features}"
+                            )
 
-                        # Equal weight for each client in the group
-                        weight_value = 1.0 / num_clients_in_group
-                        group_weights = [weight_value] * num_clients_in_group
+                    # Step 4: Build products for each cluster combination
+                    products = []
 
-                        # Create GroupMixture for this feature subspace
-                        # For vertical: single SPN with weight 1.0, extract features (no NaN masking)
-                        # For hybrid: multiple SPNs mixed, use NaN masking for full-d SPNs
-                        group_mix = GroupMixture(
-                            client_spns=cluster_spns_for_group,
-                            weights=group_weights,
-                            feature_indices=features,
+                    for combo_idx, cluster_config in enumerate(combinations):
+                        logging.info(
+                            f"  Product {combo_idx + 1}/{len(combinations)}: "
+                            f"cluster config={cluster_config}"
+                        )
+
+                        # For this cluster configuration, build feature groups
+                        group_mixtures = []
+                        feature_groups = []
+
+                        for client_set, features in feature_subspaces.items():
+                            # Collect SPNs from selected clusters for this feature group
+                            num_clients_in_group = len(client_set)
+                            cluster_spns_for_group = []
+
+                            for k in client_set:
+                                # Get which cluster to use for client k in this configuration
+                                cluster_idx = cluster_config[k]
+
+                                # Extract the cluster SPN from LocalClusterMixture
+                                cluster_spn = client_local_mixtures[k].cluster_spns[
+                                    cluster_idx
+                                ]
+
+                                cluster_spns_for_group.append(cluster_spn)
+
+                            if len(cluster_spns_for_group) == 0:
+                                logging.warning(
+                                    f"    No SPNs for features {features} in combo {combo_idx}, skipping"
+                                )
+                                continue
+
+                            # Equal weight for each client in the group
+                            weight_value = 1.0 / num_clients_in_group
+                            group_weights = [weight_value] * num_clients_in_group
+
+                            # Create GroupMixture for this feature subspace
+                            # For vertical: single SPN with weight 1.0, extract features (no NaN masking)
+                            # For hybrid: multiple SPNs mixed, use NaN masking for full-d SPNs
+                            group_mix = GroupMixture(
+                                client_spns=cluster_spns_for_group,
+                                weights=group_weights,
+                                feature_indices=features,
+                                device=self.device,
+                                full_d=self.d_features,  # Total features (for context stripping)
+                                use_nan_masking=(
+                                    self.scenario == "hybrid"
+                                ),  # Only NaN mask in hybrid
+                            )
+                            group_mixtures.append(group_mix)
+                            feature_groups.append(features)
+
+                        if len(group_mixtures) == 0:
+                            raise RuntimeError(
+                                f"Combo {combo_idx}: No feature groups created!"
+                            )
+
+                        # Create product for this cluster combination
+                        # ProductOverGroupsWithOverlap handles both scenarios:
+                        # - Vertical: no overlaps, behaves like ProductOverGroups
+                        # - Hybrid: with overlaps, handles feature intersection
+                        product = ProductOverGroupsWithOverlap(
+                            group_mixtures=group_mixtures,
+                            feature_groups=feature_groups,
                             device=self.device,
-                            full_d=self.d_features,  # Total features (for context stripping)
-                            use_nan_masking=(
-                                self.scenario == "hybrid"
-                            ),  # Only NaN mask in hybrid
+                            allow_overlap=(self.scenario == "hybrid"),
                         )
-                        group_mixtures.append(group_mix)
-                        feature_groups.append(features)
+                        products.append(product)
 
-                    if len(group_mixtures) == 0:
-                        raise RuntimeError(
-                            f"Combo {combo_idx}: No feature groups created!"
+                        logging.info(
+                            f"    ✓ Product {combo_idx + 1}: {len(group_mixtures)} feature groups"
                         )
 
-                    # Create product for this cluster combination
-                    # ProductOverGroupsWithOverlap handles both scenarios:
-                    # - Vertical: no overlaps, behaves like ProductOverGroups
-                    # - Hybrid: with overlaps, handles feature intersection
-                    product = ProductOverGroupsWithOverlap(
-                        group_mixtures=group_mixtures,
-                        feature_groups=feature_groups,
+                    # Step 5: Build mixture over all products
+                    # This is the global model: P(X) = Σ_l q(L=l) × p(X | L=l)
+                    fed_spn = GlobalSumOfProducts(
+                        products=products,
+                        weights=combo_weights,
                         device=self.device,
-                        allow_overlap=(self.scenario == "hybrid"),
                     )
-                    products.append(product)
 
                     logging.info(
-                        f"    ✓ Product {combo_idx + 1}: {len(group_mixtures)} feature groups"
+                        f"  ✓ {self.scenario.title()} mixture-of-products built: "
+                        f"{len(products)} products, {len(feature_groups)} groups per product"
                     )
 
-                # Step 5: Build mixture over all products
-                # This is the global model: P(X) = Σ_l q(L=l) × p(X | L=l)
-                fed_spn = GlobalSumOfProducts(
-                    products=products,
-                    weights=combo_weights,
-                    device=self.device,
-                )
-
-                logging.info(
-                    f"  ✓ {self.scenario.title()} mixture-of-products built: "
-                    f"{len(products)} products, {len(feature_groups)} groups per product"
-                )
-
-                # Store feature_map for vertical evaluation
-                if self.scenario == "vertical":
-                    self.vertical_feature_map = feature_maps
+                    # Store feature_map for vertical evaluation
+                    if self.scenario == "vertical":
+                        self.vertical_feature_map = feature_maps
 
             # Skip the else clause - fed_spn should be set by now from one of the branches above
 

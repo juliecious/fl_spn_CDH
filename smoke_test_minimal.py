@@ -20,7 +20,7 @@ from causallearn.utils.data_utils import (
 )
 
 print("=" * 60)
-print("MINIMAL SMOKE TEST - FedSPN-H")
+print("MINIMAL SMOKE TEST - FedSPN-V (Vertical)")
 print("=" * 60)
 
 # Minimal parameters
@@ -34,38 +34,52 @@ W = simulate_parameter(B_true)
 X_all = np.random.randn(n_total, d) @ W.T
 
 print(f"\nDataset: {d} nodes, {n_total} samples, {int(B_true.sum())} edges")
-print(f"Clients: {K} ({n_total//K} samples each)")
+print(f"Clients: {K} (vertical partitioning - different features)")
+
+# Vertical mode: partition features across clients
+feature_maps_v = {
+    0: [0, 1],  # Client 0: features 0, 1
+    1: [2, 3, 4],  # Client 1: features 2, 3, 4
+}
+print(f"Feature distribution:")
+for client_id, features in feature_maps_v.items():
+    print(f"  Client {client_id}: features {features}")
 
 # Minimal args - fast settings
 args = Namespace(
     K=K,
     d=d,
-    n=n_total // K,
-    scenario="horizontal",
+    n=n_total,  # Vertical: all clients see all samples
+    scenario="vertical",
     model_type="linear",
     ci_method="spn",
     device="cpu",
-    verbose=False,
+    verbose=True,  # Enable verbose for debugging
     # FAST settings
     epochs=10,
     num_sums=10,
     num_leaves=10,
     depth=2,
     alpha=0.1,  # More lenient
+    # Gap 4: Try cluster-conditional vertical
+    use_cluster_conditional=True,
 )
 
 print(f"\n{'=' * 60}")
-print(f"Running FedSPN-H (FAST mode)")
+print(f"Running FedSPN-V (FAST mode)")
 print(f"{'=' * 60}")
 
 start = time.time()
 
 try:
-    model = FedCDH(args)
+    model = FedCDH(args, feature_maps=feature_maps_v)
 
-    n_per_client = n_total // K
-    X_splits = [X_all[i * n_per_client : (i + 1) * n_per_client] for i in range(K)]
-    c_indx = np.repeat(np.arange(K), n_per_client).reshape(-1, 1)
+    # Vertical: split columns (features), all clients see all samples
+    X_splits = [X_all[:, feature_maps_v[k]] for k in range(K)]
+
+    # c_indx for vertical: all samples belong to all clients (or None)
+    # Use client index 0 for all samples since it's vertical partitioning
+    c_indx = np.zeros((n_total, 1), dtype=int)
 
     print(f"\n✓ Initialized")
     print(f"✓ Data split: {[x.shape for x in X_splits]}")
