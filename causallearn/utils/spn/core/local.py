@@ -24,7 +24,7 @@ class LocalSPNWrapper(nn.Module):
         num_repetitions=10,
         seed=None,
         variable_order=None,
-        structure="poon-domingos",  # BUG FIX: Accept structure parameter
+        structure="top-down",  # BUG FIX: Accept structure parameter (must be 'top-down' or 'bottom-up')
     ):
         super().__init__()
         self.device = device
@@ -51,6 +51,15 @@ class LocalSPNWrapper(nn.Module):
         if seed is not None:
             torch.manual_seed(seed)
             np.random.seed(seed)
+
+        # Map "poon-domingos" to "top-down" for simple_einet compatibility
+        # simple_einet only accepts "top-down" or "bottom-up"
+        if structure == "poon-domingos":
+            structure = "top-down"
+        elif structure not in ["top-down", "bottom-up"]:
+            raise ValueError(
+                f"Invalid structure type: {structure}. Must be 'top-down', 'bottom-up', or 'poon-domingos'."
+            )
 
         # BUG FIX: Use structure parameter from template instead of hardcoded "top-down"
         self.config = EinetConfig(
