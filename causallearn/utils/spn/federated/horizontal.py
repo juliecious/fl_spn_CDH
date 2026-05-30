@@ -1,0 +1,293 @@
+"""
+Horizontal Federated SPN implementation.
+
+This module implements the horizontal federated learning scenario where
+all clients have the same features but different samples.
+"""
+
+import logging
+from typing import List, Dict, Optional
+import torch
+import torch.nn as nn
+
+# Import for isinstance checks
+try:
+    from .vertical import ProductOverGroups
+    from .hybrid import ProductOverGroupsWithOverlap
+except ImportError:
+    ProductOverGroups = None
+    ProductOverGroupsWithOverlap = None
+
+from ..core.local import LocalSPNWrapper, LocalClusterMixture
+
+
+class GlobalFedSPN(nn.Module):
+    """
+    Global Federated SPN (Mixture).
+    Models P(X) = Sum_c w_c * Component_c(X).
+    Components can be LocalSPNWrapper (Horizontal) or FederatedProduct (Vertical Latent).
+    """
+
+    def __init__(
+        self,
+        components: List[nn.Module],
+        weights: List[float] = None,
+        feature_map: Dict[int, List[int]] = None,
+        strategy: str = "mixture",
+        device="cpu",
+    ):
+        super().__init__()
+        self.components = nn.ModuleList(components)
+        self.device = device
+        self.strategy = strategy.lower()
+        self.feature_map = feature_map
+
+        if weights is None:
+            n = len(components)
+            weights = [1.0 / n] * n
+
+        self.weights = torch.tensor(weights, dtype=torch.float32).to(device)
+
+        # Backward compatibility aliases
+        self.clients = self.components
+
+    def train_weights_em(self, x, epochs=10, lr=0.01):
+        """
+        Refine the mixture weights using EM (Expectation-Maximization) on the server.
+        Optimizes P(X) = Sum_k w_k * Component_k(X) w.r.t w_k.
+        Useful for Vertical FL to better align the latent components.
+        """
+        if self.strategy != "mixture":
+            logging.warning("EM weight training only valid for 'mixture' strategy.")
+            return
+
+        prev_ll = -float("inf")
+
+        with torch.no_grad():
+            for epoch in range(epochs):
+                # 1. E-Step: Compute Responsibilities (Posteriors)
+                comp_lls = []
+                for i, c in enumerate(self.components):
+                    if self.feature_map is not None:
+                        idx = self.feature_map[i]
+                        x_c = x[:, idx]
+                    else:
+                        x_c = x
+                    comp_lls.append(c.log_prob(x_c))
+
+                ll_stack = torch.cat(comp_lls, dim=1)
+
+                # Log Prior
+                log_w = torch.log(self.weights + 1e-9).unsqueeze(0)
+
+                # Log Joint: [N, K]
+                log_joint = ll_stack + log_w
+
+                # Log Marginal (Evidence): [N, 1]
+                log_evidence = torch.logsumexp(log_joint, dim=1, keepdim=True)
+
+                # Log Posterior: [N, K]
+                log_posterior = log_joint - log_evidence
+
+                # Monitor convergence
+                current_ll = log_evidence.mean().item()
+                if abs(current_ll - prev_ll) < 1e-4:
+                    break
+                prev_ll = current_ll
+
+                # 2. M-Step: Update Weights
+                responsibilities = torch.exp(log_posterior)
+                new_weights = responsibilities.mean(dim=0)
+
+                # Update
+                self.weights = new_weights.detach()
+
+        # Convert to list for logging to avoid numpy/torch compatibility issues
+        weights_list = self.weights.cpu().numpy().tolist()
+        logging.info(f"[FedPC] EM Refined Weights: {weights_list}")
+
+    def log_prob(self, x):
+        """
+        Computes log P(X).
+        """
+        if self.strategy == "product":
+            # Direct Product over components
+            comp_lls = []
+            for i, c in enumerate(self.components):
+                if self.feature_map is not None:
+                    idx = self.feature_map[i]
+                    x_c = x[:, idx]
+                else:
+                    x_c = x
+                comp_lls.append(c.log_prob(x_c))
+            return torch.sum(torch.cat(comp_lls, dim=1), dim=1, keepdim=True)
+
+        # Default: Mixture (Sum Node)
+        comp_lls = []
+        for i, c in enumerate(self.components):
+            if self.feature_map is not None:
+                idx = self.feature_map[i]
+                x_c = x[:, idx]
+            else:
+                x_c = x
+            comp_lls.append(c.log_prob(x_c))
+
+        ll_stack = torch.cat(comp_lls, dim=1)
+        log_w = torch.log(self.weights + 1e-9).unsqueeze(0)
+        return torch.logsumexp(ll_stack + log_w, dim=1, keepdim=True)
+
+    def sample(self, n: int) -> torch.Tensor:
+        """
+        Sample from the mixture distribution.
+        1. Choose component based on weights.
+        2. Sample from component.
+        """
+        if n <= 0:
+            return torch.tensor([], device=self.device)
+
+        # 1. Choose components
+        comp_indices = torch.multinomial(self.weights, n, replacement=True)
+        unique_comps, counts = torch.unique(comp_indices, return_counts=True)
+
+        # Determine total features
+        # If Horizontal, components have same features. If Vertical, they might differ.
+        # Product components (Vertical) already handle internal feature maps.
+        # For simplicity, we sample and fill.
+
+        # Determine dimensionality
+        if self.feature_map is not None:
+            all_indices = []
+            for v in self.feature_map.values():
+                all_indices.extend(v)
+            num_features = len(set(all_indices))
+        else:
+            # Assume all components have same features (Horizontal)
+            # Sample from first to get shape
+            test_sample = self.components[0].sample(1)
+            num_features = test_sample.shape[1]
+
+        samples = torch.zeros(n, num_features, device=self.device)
+
+        # Track filling
+        start_idx = 0
+        for comp_idx, count in zip(unique_comps, counts):
+            c = self.components[comp_idx.item()]
+            comp_samples = c.sample(count.item())
+            # Ensure 2D
+            comp_samples = comp_samples.view(count.item(), -1)
+
+            end_idx = start_idx + count.item()
+
+            if self.feature_map is not None:
+                indices = self.feature_map[comp_idx.item()]
+                samples[start_idx:end_idx, indices] = comp_samples
+            else:
+                samples[start_idx:end_idx, :] = comp_samples
+
+            start_idx = end_idx
+
+        # FIX: Add context column if components are hybrid mode classes
+        # This ensures hybrid mode samples have shape [n, d+1] like horizontal mode
+        # Check for ProductOverGroups/ProductOverGroupsWithOverlap (hybrid mode)
+        # NOTE: FederatedProduct is used in VERTICAL mode and should NOT add context column
+        is_hybrid = any(
+            isinstance(c, (ProductOverGroups, ProductOverGroupsWithOverlap))
+            for c in self.components
+        )
+
+        if is_hybrid:
+            # Hybrid mode: Add context column with component indices
+            # This makes shape consistent with horizontal [n, d+1]
+            context_col = comp_indices.float().view(n, 1)
+            samples = torch.cat([samples, context_col], dim=1)
+
+        return samples.view(n, -1)
+
+    def log_prob_conditional_u(self, x, u_idx):
+        """
+        Routing for Horizontal scenario where components ARE clients.
+
+        Args:
+            x: Feature data without context column, shape (batch_size, d)
+            u_idx: Client index to condition on
+
+        Returns:
+            Log probability from the specified client's local SPN
+
+        Note: Local SPNs were trained with context column appended.
+        We reconstruct the augmented data [x, u_idx] before evaluation.
+        """
+        if 0 <= u_idx < len(self.components):
+            # Local SPNs expect augmented data [features, context]
+            # Reconstruct by appending the context value
+            u_col = torch.full((x.shape[0], 1), u_idx, dtype=x.dtype, device=x.device)
+            x_aug = torch.cat([x, u_col], dim=1)
+
+            if self.feature_map is not None:
+                idx = self.feature_map[u_idx]
+                x_c = x_aug[:, idx]
+            else:
+                x_c = x_aug
+            return self.components[u_idx].log_prob(x_c)
+        else:
+            raise ValueError(f"Index {u_idx} out of bounds")
+
+    def eval_partial_scope_log_likelihood(self, data, scope_indices):
+        """
+        Evaluate log P(X_scope) for mixture model by averaging over components.
+
+        For horizontal FL, this marginalizes over unobserved variables
+        in each client's model, then combines via mixture weights.
+
+        Args:
+            data: Full data matrix [n, d]
+            scope_indices: List of variable indices to evaluate
+
+        Returns:
+            log_prob: [n, 1] log P(X_scope)
+        """
+        if not isinstance(data, torch.Tensor):
+            data = torch.tensor(data, dtype=torch.float32, device=self.device)
+
+        # Compute partial scope LL for each component
+        comp_lls = []
+        for i, c in enumerate(self.components):
+            if self.feature_map is not None:
+                # Extract client's features
+                idx = self.feature_map[i]
+                # Only evaluate scope indices that this client has
+                client_scope = [si for si in scope_indices if si in idx]
+                if len(client_scope) > 0:
+                    ll = c.eval_partial_scope_log_likelihood(data[:, idx], client_scope)
+                else:
+                    # Client has no variables in scope → marginalize everything → 0
+                    ll = torch.zeros(data.shape[0], 1, device=self.device)
+            else:
+                # Horizontal FL: all clients have all features
+                ll = c.eval_partial_scope_log_likelihood(data, scope_indices)
+            comp_lls.append(ll)
+
+        # Combine via mixture
+        ll_stack = torch.cat(comp_lls, dim=1)  # [n, num_components]
+        log_w = torch.log(self.weights + 1e-9).unsqueeze(0)  # [1, num_components]
+        log_prob = torch.logsumexp(ll_stack + log_w, dim=1, keepdim=True)
+
+        return log_prob
+
+    def get_total_communication_cost(self) -> int:
+        """
+        Returns the total communication cost (in bytes) of the One-Shot Federated Training phase.
+        Cost = Sum of (Serialized Size of Client Models).
+        In a real scenario, this is the cost of uploading models to the server.
+        """
+        total_bytes = 0
+        for c in self.components:
+            # If component is LocalSPNWrapper or FederatedProduct, it has get_size_bytes
+            if hasattr(c, "get_size_bytes"):
+                total_bytes += c.get_size_bytes()
+            else:
+                # Fallback for generic nn.Module
+                buffer = io.BytesIO()
+                torch.save(c.state_dict(), buffer)
+                total_bytes += buffer.tell()
+        return total_bytes
