@@ -5,6 +5,7 @@ This module provides utilities for computing adaptive SPN hyperparameters
 based on data characteristics.
 """
 
+import logging
 import numpy as np
 from typing import Dict, Any
 

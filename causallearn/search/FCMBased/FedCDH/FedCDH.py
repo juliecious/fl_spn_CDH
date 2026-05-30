@@ -2221,6 +2221,7 @@ class FedCDH:
         # Adaptive depth limit based on dataset characteristics
         # Prevents excessive conditioning set sizes that hurt SPN accuracy
         # Rule of thumb: max_depth ≈ log(n) / 2, capped at 3-4
+        n_samples = X_aug_global.shape[0]
         default_depth_limit = min(4, max(2, int(np.log(n_samples) / 2)))
         depth_limit = getattr(self.args, "depth_limit", default_depth_limit)
         logging.info(
