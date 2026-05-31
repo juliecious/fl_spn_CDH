@@ -366,6 +366,16 @@ class DatasetLoader:
         X = df.values
         feature_names = list(df.columns)
 
+        # IMPORTANT: Sachs has discrete values (1, 2, 3) representing Low/Medium/High protein levels
+        # For categorical SPN, we need 0-indexed classes (0, 1, 2)
+        # Subtract 1 to convert: 1→0, 2→1, 3→2
+        # Note: This is done here so X is 0-indexed for both normal and categorical distributions
+        # Normal distribution handles 0-indexed data fine, categorical requires it
+        X = X - 1  # Convert (1,2,3) → (0,1,2)
+        logging.info(
+            f"  Converted Sachs values to 0-indexed: {np.unique(X)} (was 1,2,3)"
+        )
+
         # Ground truth adjacency matrix (17 edges)
         B = np.zeros((11, 11))
         edges = [
