@@ -181,14 +181,14 @@ class LocalSPNWrapper(nn.Module):
             )
 
         # Convert to tensor
-        # For categorical/binomial: use int64 to preserve integer values
-        # For normal: use float32 for normalization
+        # Always use float32 for compatibility with dropout and other operations
+        # For categorical/binomial: don't normalize (keep integer values as floats)
+        # For normal: normalize to mean=0, std=1
+        data_t = torch.tensor(data, dtype=torch.float32).to(self.device)
+
         if should_normalize:
-            data_t = torch.tensor(data, dtype=torch.float32).to(self.device)
             data_t = self._normalize(data_t)
-        else:
-            # Categorical/Binomial: keep as integers
-            data_t = torch.tensor(data, dtype=torch.int64).to(self.device)
+        # else: categorical/binomial stay as integer values in float32 format
 
         data_t = self._permute(data_t)  # Apply dependency-aware ordering
 
