@@ -417,6 +417,16 @@ class FedCDH:
             # For binary data (gene expression on/off), total_count=1
             # User can override with args.binomial_total_count if needed
             self.leaf_kwargs["total_count"] = getattr(args, "binomial_total_count", 1)
+        elif self.leaf_type == "categorical":
+            # For categorical data, num_bins must be specified
+            # Will be inferred from data during training if not provided
+            # User can override with args.categorical_num_bins if known
+            if (
+                hasattr(args, "categorical_num_bins")
+                and args.categorical_num_bins is not None
+            ):
+                self.leaf_kwargs["num_bins"] = args.categorical_num_bins
+            # else: will be inferred from data in _infer_num_bins()
 
         # NEW: Experiment seed for reproducibility and variability testing
         # If provided, used to derive SPN seeds and K-means random_state
@@ -436,6 +446,33 @@ class FedCDH:
         elif self.leaf_type != "normal":
             # Unknown leaf type but not erroring - let LocalSPNWrapper handle it
             logging.warning(f"Unknown leaf_type: {self.leaf_type}")
+
+    def _infer_num_bins(self, data: np.ndarray) -> int:
+        """
+        Infer number of bins/categories for categorical data.
+
+        Args:
+            data: Data array (n_samples, n_features)
+
+        Returns:
+            num_bins: Maximum number of categories across all features
+        """
+        # For categorical data, find the maximum value + 1 (assumes 0-indexed)
+        # e.g., if data has values [0, 1, 2], then num_bins = 3
+        max_value = int(np.max(data))
+        min_value = int(np.min(data))
+
+        if min_value < 0:
+            logging.warning(
+                f"Categorical data has negative values (min={min_value}). "
+                f"Categorical distributions expect non-negative integers."
+            )
+
+        num_bins = max_value + 1
+        logging.info(
+            f"  Inferred num_bins={num_bins} from data (range: [{min_value}, {max_value}])"
+        )
+        return num_bins
 
     def _extract_feature_indices(self, client_id: int, include_context: bool = False):
         """
@@ -1132,6 +1169,15 @@ class FedCDH:
                                     else base_seed
                                 )
 
+                                # For categorical data, infer num_bins from cluster data
+                                leaf_kwargs_local = self.leaf_kwargs.copy()
+                                if (
+                                    self.leaf_type == "categorical"
+                                    and "num_bins" not in leaf_kwargs_local
+                                ):
+                                    num_bins = self._infer_num_bins(cluster_data)
+                                    leaf_kwargs_local["num_bins"] = num_bins
+
                                 spn_kh = LocalSPNWrapper(
                                     num_features=local_d,
                                     device=self.device,
@@ -1141,7 +1187,7 @@ class FedCDH:
                                     num_repetitions=num_repetitions,
                                     seed=spn_seed,
                                     leaf_type=self.leaf_type,
-                                    leaf_kwargs=self.leaf_kwargs,
+                                    leaf_kwargs=leaf_kwargs_local,
                                 )
                                 spn_kh.train_local(
                                     cluster_data,
@@ -1182,6 +1228,15 @@ class FedCDH:
                                         lr=adaptive_lr,
                                     )
                                 else:
+                                    # For categorical data, infer num_bins from cluster data
+                                    leaf_kwargs_local = self.leaf_kwargs.copy()
+                                    if (
+                                        self.leaf_type == "categorical"
+                                        and "num_bins" not in leaf_kwargs_local
+                                    ):
+                                        num_bins = self._infer_num_bins(cluster_data)
+                                        leaf_kwargs_local["num_bins"] = num_bins
+
                                     spn_kh = LocalSPNWrapper(
                                         num_features=local_d,
                                         device="cpu",
@@ -1195,7 +1250,7 @@ class FedCDH:
                                             else k * 10 + h
                                         ),
                                         leaf_type=self.leaf_type,
-                                        leaf_kwargs=self.leaf_kwargs,
+                                        leaf_kwargs=leaf_kwargs_local,
                                     )
                                     spn_kh.train_local(
                                         cluster_data,
@@ -1330,6 +1385,15 @@ class FedCDH:
                                 lr=adaptive_lr,
                             )
                         else:
+                            # For categorical data, infer num_bins from client data
+                            leaf_kwargs_local = self.leaf_kwargs.copy()
+                            if (
+                                self.leaf_type == "categorical"
+                                and "num_bins" not in leaf_kwargs_local
+                            ):
+                                num_bins = self._infer_num_bins(client_data)
+                                leaf_kwargs_local["num_bins"] = num_bins
+
                             single_spn = LocalSPNWrapper(
                                 num_features=local_d,
                                 device=self.device,
@@ -1343,7 +1407,7 @@ class FedCDH:
                                     else k * 10
                                 ),
                                 leaf_type=self.leaf_type,
-                                leaf_kwargs=self.leaf_kwargs,
+                                leaf_kwargs=leaf_kwargs_local,
                             )
                             single_spn.train_local(
                                 client_data,
@@ -1392,6 +1456,15 @@ class FedCDH:
                                     lr=adaptive_lr,
                                 )
                             else:
+                                # For categorical data, infer num_bins from client data
+                                leaf_kwargs_local = self.leaf_kwargs.copy()
+                                if (
+                                    self.leaf_type == "categorical"
+                                    and "num_bins" not in leaf_kwargs_local
+                                ):
+                                    num_bins = self._infer_num_bins(client_data)
+                                    leaf_kwargs_local["num_bins"] = num_bins
+
                                 single_spn = LocalSPNWrapper(
                                     num_features=local_d,
                                     device="cpu",
@@ -1405,7 +1478,7 @@ class FedCDH:
                                         else k * 10
                                     ),
                                     leaf_type=self.leaf_type,
-                                    leaf_kwargs=self.leaf_kwargs,
+                                    leaf_kwargs=leaf_kwargs_local,
                                 )
                                 single_spn.train_local(
                                     client_data,
