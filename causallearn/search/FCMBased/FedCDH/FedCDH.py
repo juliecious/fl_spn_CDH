@@ -821,16 +821,34 @@ class FedCDH:
                 f"d={self.d_features} → lr={adaptive_lr:.4f}"
             )
 
-            # Adaptive epochs: scale with complexity
-            # Formula: epochs = base_epochs * (d/5)^1.5
+            # Adaptive epochs: scale with complexity and data size
+            # Formula: epochs = base_epochs * (d/5)^1.5 * sqrt(n_samples/500)
             # Effect: d=5→base, d=8→2.3×base, d=10→2.8×base
+            # Additional scaling: more samples → more epochs (sqrt scaling for stability)
             base_epochs = train_epochs
-            adaptive_epochs = int(base_epochs * (self.d_features / 5.0) ** 1.5)
+
+            # Get samples per client for adaptive scaling
+            n_samples_per_client = self.n_samples_per_client
+            if isinstance(n_samples_per_client, list):
+                n_samples_per_client = int(np.mean(n_samples_per_client))
+
+            # Complexity scaling (dimensionality)
+            complexity_scale = (self.d_features / 5.0) ** 1.5
+
+            # Data size scaling (sample count) - sqrt to avoid over-training
+            # Reference: 500 samples → 1.0×, 1000 samples → 1.4×, 250 samples → 0.7×
+            data_scale = np.sqrt(n_samples_per_client / 500.0)
+            data_scale = np.clip(data_scale, 0.5, 2.0)  # Bounded to [0.5, 2.0]
+
+            adaptive_epochs = int(base_epochs * complexity_scale * data_scale)
             adaptive_epochs = max(base_epochs, adaptive_epochs)  # Never less than base
+
             if adaptive_epochs != base_epochs:
                 logging.info(
                     f"Adaptive epochs: base={base_epochs}, "
-                    f"d={self.d_features} → epochs={adaptive_epochs} ({adaptive_epochs/base_epochs:.1f}×)"
+                    f"d={self.d_features} (complexity={complexity_scale:.2f}×), "
+                    f"n_per_client={n_samples_per_client} (data_scale={data_scale:.2f}×) "
+                    f"→ epochs={adaptive_epochs} ({adaptive_epochs/base_epochs:.1f}×)"
                 )
             else:
                 logging.info(f"Training epochs: {adaptive_epochs}")
@@ -2210,9 +2228,30 @@ class FedCDH:
         # Permutation test configuration
         # CRITICAL FIX: Parametric test (num_permutations=0) uses df=1 which is incorrect
         # for continuous SPNs. This causes false negatives on standardized data (e.g., Asia).
-        # Default: num_permutations=50 (non-parametric, statistically correct)
+        # Adaptive num_permutations based on dataset size:
+        #   - Small datasets (n<500): Use more permutations (100) for stable p-values
+        #   - Medium datasets (500≤n<2000): Use 50 permutations (good balance)
+        #   - Large datasets (n≥2000): Can use fewer (30) due to better SPN estimates
         # Override via args.num_permutations if specified
-        num_permutations = getattr(self.args, "num_permutations", 50)
+        if not hasattr(self.args, "num_permutations"):
+            # Adaptive default based on sample size
+            n_samples = X_aug_global.shape[0]
+            if n_samples < 500:
+                default_permutations = (
+                    100  # Small data → more permutations for stability
+                )
+            elif n_samples < 2000:
+                default_permutations = 50  # Medium data → standard permutations
+            else:
+                default_permutations = 30  # Large data → fewer permutations (faster)
+            num_permutations = default_permutations
+            logging.info(
+                f"Adaptive num_permutations={num_permutations} (n={n_samples}, "
+                f"rule: n<500→100, 500≤n<2000→50, n≥2000→30)"
+            )
+        else:
+            num_permutations = self.args.num_permutations
+
         if num_permutations > 0:
             logging.info(
                 f"Using permutation test with num_permutations={num_permutations} (statistically correct)"
@@ -2238,12 +2277,30 @@ class FedCDH:
 
         # Adaptive depth limit based on dataset characteristics
         # Prevents excessive conditioning set sizes that hurt SPN accuracy
-        # Rule of thumb: max_depth ≈ log(n) / 2, capped at 3-4
+        # Improved formula: depth = min(d-2, sqrt(n/100), 5), bounded by [2, 6]
+        # Rationale:
+        #   - depth ≤ d-2: Can't condition on all variables (need at least 2 for CI test)
+        #   - depth ≈ sqrt(n/100): Statistical power scales with sqrt(n)
+        #   - Max depth=5-6: Beyond this, SPN likelihood estimates become unreliable
+        #   - Min depth=2: Even small datasets should try some conditioning
         n_samples = X_aug_global.shape[0]
-        default_depth_limit = min(4, max(2, int(np.log(n_samples) / 2)))
+
+        # Calculate depth based on multiple criteria
+        depth_by_samples = int(np.sqrt(n_samples / 100.0))  # n=1000 → 3, n=2500 → 5
+        depth_by_features = self.d_features - 2  # Leave room for X, Y in CI test
+        depth_by_statistical_power = (
+            int(np.log2(n_samples / 50.0)) if n_samples > 50 else 2
+        )  # log2 scaling
+
+        # Take minimum to be conservative, then bound
+        default_depth_limit = min(depth_by_samples, depth_by_features, 6)
+        default_depth_limit = max(2, min(5, default_depth_limit))  # Bounded to [2, 5]
+
         depth_limit = getattr(self.args, "depth_limit", default_depth_limit)
         logging.info(
-            f"Using depth_limit={depth_limit} for skeleton discovery (n={n_samples}, d={self.d_features})"
+            f"Using depth_limit={depth_limit} for skeleton discovery "
+            f"(n={n_samples}, d={self.d_features}, "
+            f"√(n/100)={depth_by_samples}, d-2={depth_by_features})"
         )
 
         # Prepare kwargs for cdnod
