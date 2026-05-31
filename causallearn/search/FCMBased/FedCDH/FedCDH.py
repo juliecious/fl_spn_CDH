@@ -404,6 +404,18 @@ class FedCDH:
         # If True, use FederatedProductWithClusters instead of naive FederatedProduct
         self.use_cluster_conditional = getattr(args, "use_cluster_conditional", False)
 
+        # NEW: SPN leaf distribution type
+        # Options: 'normal' (continuous), 'binomial' (binary/count), 'categorical' (discrete)
+        # Default: 'normal' for continuous data
+        # Use 'binomial' for gene expression (on/off), binary data
+        # Use 'categorical' for discrete multi-class data
+        self.leaf_type = getattr(args, "leaf_type", "normal")
+        if self.leaf_type != "normal":
+            logging.info(
+                f"Using {self.leaf_type} leaf distribution "
+                f"(suitable for {'binary/count' if self.leaf_type == 'binomial' else 'discrete'} data)"
+            )
+
     def _extract_feature_indices(self, client_id: int, include_context: bool = False):
         """
         Extract feature indices for a client in vertical mode.
@@ -1084,6 +1096,7 @@ class FedCDH:
                                     depth=hyperparams["depth"],
                                     num_repetitions=num_repetitions,
                                     seed=k * 10 + h,
+                                    leaf_type=self.leaf_type,
                                 )
                                 spn_kh.train_local(
                                     cluster_data,
@@ -1128,6 +1141,7 @@ class FedCDH:
                                         depth=hyperparams["depth"],
                                         num_repetitions=num_repetitions,
                                         seed=k * 10 + h,
+                                        leaf_type=self.leaf_type,
                                     )
                                     spn_kh.train_local(
                                         cluster_data,
@@ -1266,6 +1280,7 @@ class FedCDH:
                                 depth=hyperparams["depth"],
                                 num_repetitions=num_repetitions,
                                 seed=k * 10,
+                                leaf_type=self.leaf_type,
                             )
                             single_spn.train_local(
                                 client_data,
@@ -1318,6 +1333,7 @@ class FedCDH:
                                     depth=hyperparams["depth"],
                                     num_repetitions=num_repetitions,
                                     seed=k * 10,
+                                    leaf_type=self.leaf_type,
                                 )
                                 single_spn.train_local(
                                     client_data,

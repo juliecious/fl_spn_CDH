@@ -11,6 +11,8 @@ import torch
 import torch.nn as nn
 from simple_einet.einet import Einet, EinetConfig
 from simple_einet.layers.distributions.normal import Normal
+from simple_einet.layers.distributions.binomial import Binomial
+from simple_einet.layers.distributions.categorical import Categorical
 
 
 class LocalSPNWrapper(nn.Module):
@@ -25,6 +27,7 @@ class LocalSPNWrapper(nn.Module):
         seed=None,
         variable_order=None,
         structure="top-down",  # BUG FIX: Accept structure parameter (must be 'top-down' or 'bottom-up')
+        leaf_type="normal",  # NEW: Support different distributions ('normal', 'binomial', 'categorical')
     ):
         super().__init__()
         self.device = device
@@ -61,6 +64,26 @@ class LocalSPNWrapper(nn.Module):
                 f"Invalid structure type: {structure}. Must be 'top-down', 'bottom-up', or 'poon-domingos'."
             )
 
+        # NEW: Select leaf distribution based on data type
+        # - 'normal': Continuous data (default, Gaussian leaves)
+        # - 'binomial': Binary/count data (gene expression on/off)
+        # - 'categorical': Discrete multi-class data
+        if isinstance(leaf_type, str):
+            leaf_type_lower = leaf_type.lower()
+            if leaf_type_lower == "normal":
+                leaf_dist = Normal
+            elif leaf_type_lower == "binomial":
+                leaf_dist = Binomial
+            elif leaf_type_lower == "categorical":
+                leaf_dist = Categorical
+            else:
+                raise ValueError(
+                    f"Invalid leaf_type: {leaf_type}. Must be 'normal', 'binomial', or 'categorical'."
+                )
+        else:
+            # Already a distribution class
+            leaf_dist = leaf_type
+
         # BUG FIX: Use structure parameter from template instead of hardcoded "top-down"
         self.config = EinetConfig(
             num_features=num_features,
@@ -70,7 +93,7 @@ class LocalSPNWrapper(nn.Module):
             num_repetitions=num_repetitions,
             depth=depth,
             num_classes=1,
-            leaf_type=Normal,
+            leaf_type=leaf_dist,
             layer_type="linsum",
             structure=structure,  # BUG FIX: Use passed structure parameter
         )
