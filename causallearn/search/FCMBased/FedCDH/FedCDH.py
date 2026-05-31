@@ -417,6 +417,13 @@ class FedCDH:
             # For binary data (gene expression on/off), total_count=1
             # User can override with args.binomial_total_count if needed
             self.leaf_kwargs["total_count"] = getattr(args, "binomial_total_count", 1)
+
+        # NEW: Experiment seed for reproducibility and variability testing
+        # If provided, used to derive SPN seeds and K-means random_state
+        # Different experiment seeds → different random initializations
+        self.experiment_seed = getattr(args, "seed", None)
+
+        if self.leaf_type == "binomial":
             logging.info(
                 f"Using binomial leaf distribution (suitable for binary/count data, "
                 f"total_count={self.leaf_kwargs['total_count']})"
@@ -1030,7 +1037,16 @@ class FedCDH:
                     old_omp = os.environ.get("OMP_NUM_THREADS", None)
                     os.environ["OMP_NUM_THREADS"] = "1"
                     try:
-                        kmeans = KMeans(n_clusters=K_local, random_state=42, n_init=10)
+                        # Use experiment seed for K-means if available
+                        # Format: experiment_seed + client_id for deterministic but seed-varied clustering
+                        kmeans_seed = (
+                            self.experiment_seed + k
+                            if self.experiment_seed is not None
+                            else 42
+                        )
+                        kmeans = KMeans(
+                            n_clusters=K_local, random_state=kmeans_seed, n_init=10
+                        )
                         local_cluster_labels = kmeans.fit_predict(client_data)
                     finally:
                         # Restore original value
@@ -1094,7 +1110,11 @@ class FedCDH:
                                     device=self.device,
                                     num_sums=hyperparams["num_sums"],
                                     num_leaves=hyperparams["num_leaves"],
-                                    seed=k * 10 + h,
+                                    seed=(
+                                        self.experiment_seed * 1000 + k * 10 + h
+                                        if self.experiment_seed is not None
+                                        else k * 10 + h
+                                    ),
                                 )
                                 spn_kh.train_local(
                                     cluster_data,
@@ -1102,6 +1122,16 @@ class FedCDH:
                                     lr=adaptive_lr,
                                 )
                             else:
+                                # Compute SPN seed: incorporate experiment seed if provided
+                                # Format: experiment_seed * 1000 + client_id * 10 + cluster_id
+                                # This ensures different experiment seeds → different SPN initializations
+                                base_seed = k * 10 + h
+                                spn_seed = (
+                                    self.experiment_seed * 1000 + base_seed
+                                    if self.experiment_seed is not None
+                                    else base_seed
+                                )
+
                                 spn_kh = LocalSPNWrapper(
                                     num_features=local_d,
                                     device=self.device,
@@ -1109,7 +1139,7 @@ class FedCDH:
                                     num_leaves=hyperparams["num_leaves"],
                                     depth=hyperparams["depth"],
                                     num_repetitions=num_repetitions,
-                                    seed=k * 10 + h,
+                                    seed=spn_seed,
                                     leaf_type=self.leaf_type,
                                     leaf_kwargs=self.leaf_kwargs,
                                 )
@@ -1140,7 +1170,11 @@ class FedCDH:
                                         device="cpu",
                                         num_sums=num_sums,
                                         num_leaves=num_leaves,
-                                        seed=k * 10 + h,
+                                        seed=(
+                                            self.experiment_seed * 1000 + k * 10 + h
+                                            if self.experiment_seed is not None
+                                            else k * 10 + h
+                                        ),
                                     )
                                     spn_kh.train_local(
                                         cluster_data,
@@ -1155,7 +1189,11 @@ class FedCDH:
                                         num_leaves=hyperparams["num_leaves"],
                                         depth=hyperparams["depth"],
                                         num_repetitions=num_repetitions,
-                                        seed=k * 10 + h,
+                                        seed=(
+                                            self.experiment_seed * 1000 + k * 10 + h
+                                            if self.experiment_seed is not None
+                                            else k * 10 + h
+                                        ),
                                         leaf_type=self.leaf_type,
                                         leaf_kwargs=self.leaf_kwargs,
                                     )
@@ -1280,7 +1318,11 @@ class FedCDH:
                                 device=self.device,
                                 num_sums=hyperparams["num_sums"],
                                 num_leaves=hyperparams["num_leaves"],
-                                seed=k * 10,
+                                seed=(
+                                    self.experiment_seed * 1000 + k * 10
+                                    if self.experiment_seed is not None
+                                    else k * 10
+                                ),
                             )
                             single_spn.train_local(
                                 client_data,
@@ -1295,7 +1337,11 @@ class FedCDH:
                                 num_leaves=hyperparams["num_leaves"],
                                 depth=hyperparams["depth"],
                                 num_repetitions=num_repetitions,
-                                seed=k * 10,
+                                seed=(
+                                    self.experiment_seed * 1000 + k * 10
+                                    if self.experiment_seed is not None
+                                    else k * 10
+                                ),
                                 leaf_type=self.leaf_type,
                                 leaf_kwargs=self.leaf_kwargs,
                             )
@@ -1334,7 +1380,11 @@ class FedCDH:
                                     device="cpu",
                                     num_sums=num_sums,
                                     num_leaves=num_leaves,
-                                    seed=k * 10,
+                                    seed=(
+                                        self.experiment_seed * 1000 + k * 10
+                                        if self.experiment_seed is not None
+                                        else k * 10
+                                    ),
                                 )
                                 single_spn.train_local(
                                     client_data,
@@ -1349,7 +1399,11 @@ class FedCDH:
                                     num_leaves=hyperparams["num_leaves"],
                                     depth=hyperparams["depth"],
                                     num_repetitions=num_repetitions,
-                                    seed=k * 10,
+                                    seed=(
+                                        self.experiment_seed * 1000 + k * 10
+                                        if self.experiment_seed is not None
+                                        else k * 10
+                                    ),
                                     leaf_type=self.leaf_type,
                                     leaf_kwargs=self.leaf_kwargs,
                                 )
