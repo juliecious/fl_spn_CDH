@@ -36,6 +36,7 @@ class LocalSPNWrapper(nn.Module):
         self.std = None
         self.seed = seed
         self.num_features = num_features
+        self.leaf_type = leaf_type  # Store for normalization decision
 
         # Dependency-Aware Ordering
         if variable_order is not None:
@@ -105,6 +106,20 @@ class LocalSPNWrapper(nn.Module):
         )
         self.model = Einet(self.config).to(device)
 
+    def _should_normalize(self):
+        """
+        Determine if data should be normalized based on leaf distribution type.
+
+        Returns:
+            bool: True if should normalize (Normal), False otherwise (Categorical, Binomial)
+        """
+        # Only normalize for continuous distributions (Normal)
+        # Categorical and Binomial expect raw integer values
+        if isinstance(self.leaf_type, str):
+            return self.leaf_type.lower() == "normal"
+        # If leaf_type is a class, check its name
+        return self.leaf_type.__name__ == "Normal"
+
     def _normalize(self, data):
         if self.mean is None or self.std is None:
             return data
@@ -147,8 +162,11 @@ class LocalSPNWrapper(nn.Module):
         if len(data) < 5:
             return 0.0
 
-        # Compute and store normalization stats
-        if self.mean is None:
+        # Compute and store normalization stats (only for continuous distributions)
+        # Categorical and Binomial distributions expect raw integer values, not normalized
+        should_normalize = self._should_normalize()
+
+        if should_normalize and self.mean is None:
             logging.error(
                 f"[LocalSPNWrapper.fit] Computing stats from data.shape={data.shape}"
             )
@@ -162,8 +180,16 @@ class LocalSPNWrapper(nn.Module):
                 f"[LocalSPNWrapper.fit] Computed mean.shape={self.mean.shape}, std.shape={self.std.shape}"
             )
 
-        data_t = torch.tensor(data, dtype=torch.float32).to(self.device)
-        data_t = self._normalize(data_t)
+        # Convert to tensor
+        # For categorical/binomial: use int64 to preserve integer values
+        # For normal: use float32 for normalization
+        if should_normalize:
+            data_t = torch.tensor(data, dtype=torch.float32).to(self.device)
+            data_t = self._normalize(data_t)
+        else:
+            # Categorical/Binomial: keep as integers
+            data_t = torch.tensor(data, dtype=torch.int64).to(self.device)
+
         data_t = self._permute(data_t)  # Apply dependency-aware ordering
 
         if weights is not None:
@@ -258,8 +284,12 @@ class LocalSPNWrapper(nn.Module):
         # Force 2D [n, num_features]
         samples = samples.view(n, -1)
         samples = self._inv_permute(samples)  # Restore original variable order
-        if self.mean is not None and self.std is not None:
+
+        # Only denormalize for continuous distributions (Normal)
+        # Categorical/Binomial samples are already in correct range
+        if self._should_normalize() and self.mean is not None and self.std is not None:
             samples = samples * (self.std + 1e-6) + self.mean
+
         return samples
 
     def log_prob(self, x):
@@ -303,11 +333,18 @@ class LocalSPNWrapper(nn.Module):
             # For rows with at least one observed feature, compute normally
             if (~all_nan_mask).any():
                 x_obs = x[~all_nan_mask]
-                x_norm = self._normalize(x_obs)
+
+                # Normalize only for continuous distributions
+                if self._should_normalize():
+                    x_norm = self._normalize(x_obs)
+                else:
+                    x_norm = x_obs
+
                 x_perm = self._permute(x_norm)
                 ll_obs = self.model(x_perm)
 
-                if self.std is not None:
+                # Jacobian correction only for continuous distributions
+                if self._should_normalize() and self.std is not None:
                     mask_obs = (~torch.isnan(x_obs)).float()
                     log_sigma = torch.log(self.std + 1e-6)
                     log_det_jacobian = -(log_sigma * mask_obs).sum(dim=1, keepdim=True)
@@ -318,16 +355,22 @@ class LocalSPNWrapper(nn.Module):
             return ll
 
         # Normal case: at least one feature is observed in all rows
-        # 1. Normalize and Permute
-        x_norm = self._normalize(x)
+        # 1. Normalize and Permute (only for continuous distributions)
+        if self._should_normalize():
+            x_norm = self._normalize(x)
+        else:
+            # Categorical/Binomial: keep as-is (already integers)
+            x_norm = x
+
         x_perm = self._permute(x_norm)
 
         # 2. Forward pass through Einet
         # Einet's marginalization: NaN dimensions are integrated out
         ll = self.model(x_perm)
 
-        # 3. Log-Jacobian Correction
-        if self.std is not None:
+        # 3. Log-Jacobian Correction (only for continuous distributions)
+        # Categorical/Binomial have no normalization → no Jacobian correction needed
+        if self._should_normalize() and self.std is not None:
             # Jacobian is based on scale sigma.
             # Mask is based on ORIGINAL x (not permuted)
             # NaN marginalization: mask zeroes out missing dims → no Jacobian contribution
