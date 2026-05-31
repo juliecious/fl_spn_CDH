@@ -300,29 +300,34 @@ Solution: Use KCI instead of SPN-based CI test
 
 5. ✅ **Permutation tests** - Use numpy RNG state
 
-### TODO: Propagate Experiment Seed to SPN Initialization
+### ✅ IMPLEMENTED: Experiment Seed Propagation to SPN and K-means
 
-**Current (deterministic across experiments)**:
+**Status**: Completed (Commit: 2e698ec)
+
+**Implementation**:
 ```python
-spn_kh = LocalSPNWrapper(
-    seed=k * 10 + h,  # Always same: 0, 1, 10, 11, 20, 21
+# In FedCDH.__init__
+self.experiment_seed = getattr(args, "seed", None)
+
+# All SPN instantiations now use:
+spn_seed = (
+    self.experiment_seed * 1000 + k * 10 + h
+    if self.experiment_seed is not None
+    else k * 10 + h
+)
+
+# K-means now uses:
+kmeans_seed = (
+    self.experiment_seed + k if self.experiment_seed is not None else 42
 )
 ```
 
-**Recommended (varies with experiment seed)**:
-```python
-spn_kh = LocalSPNWrapper(
-    seed=experiment_seed * 1000 + k * 10 + h if experiment_seed else k * 10 + h,
-)
-```
+**Impact**:
+- seed=42 → SPN seeds: [42000, 42001, 42010, 42011, 42020, 42021]
+- seed=43 → SPN seeds: [43000, 43001, 43010, 43011, 43020, 43021]
+- seed=44 → SPN seeds: [44000, 44001, 44010, 44011, 44020, 44021]
 
-**Benefit**: Different experiment seeds → different SPN initializations → can assess variance from random initialization.
-
-**Implementation Plan**:
-1. Pass experiment seed through args to FedCDH
-2. Use it in SPN seed calculation
-3. Also set K-means random_state
-4. Results will vary across seeds (expected and good!)
+**Result**: Different experiment seeds → different SPN and K-means initializations → can assess variance!
 
 ---
 
@@ -348,6 +353,8 @@ spn_kh = LocalSPNWrapper(
 5. `ae76412` - refactor: Phase 5&6 complete
 6. `158f5d0` - feat: add SPN leaf distribution support
 7. `bc839bb` - fix: implement seed-controlled random data shuffle
+8. `451686a` - chore: consolidate documentation and clean up root
+9. `2e698ec` - feat: propagate experiment seed to SPN and K-means initialization
 
 ---
 
