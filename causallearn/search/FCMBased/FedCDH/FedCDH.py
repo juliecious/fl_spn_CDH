@@ -553,10 +553,21 @@ class FedCDH:
 
     def fit(self, X_splits, c_indx, true_DAG_bin):
         # Get training epochs and alpha from args
+        # Increased default epochs for better density estimation
+        # Previous: 50 (GPU) / 10 (CPU)
+        # New: 80 (GPU) / 20 (CPU) - Better SPN quality for accurate CI tests
         if hasattr(self.args, "epochs"):
             train_epochs = self.args.epochs
+            epochs_source = "user-specified"
         else:
-            train_epochs = 50 if self.device.type in ["cuda", "gpu"] else 10
+            train_epochs = 80 if self.device.type in ["cuda", "gpu"] else 20
+            epochs_source = "auto-detected default"
+
+        logging.info(
+            f"Base SPN training epochs: {train_epochs} ({epochs_source}, "
+            f"device={self.device.type})"
+        )
+
         alpha = self.args.alpha if hasattr(self.args, "alpha") else 0.05
 
         # Reconstruct global data from splits
