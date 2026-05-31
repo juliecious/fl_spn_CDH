@@ -410,11 +410,25 @@ class FedCDH:
         # Use 'binomial' for gene expression (on/off), binary data
         # Use 'categorical' for discrete multi-class data
         self.leaf_type = getattr(args, "leaf_type", "normal")
-        if self.leaf_type != "normal":
+
+        # NEW: Configure distribution-specific parameters
+        self.leaf_kwargs = {}
+        if self.leaf_type == "binomial":
+            # For binary data (gene expression on/off), total_count=1
+            # User can override with args.binomial_total_count if needed
+            self.leaf_kwargs["total_count"] = getattr(args, "binomial_total_count", 1)
             logging.info(
-                f"Using {self.leaf_type} leaf distribution "
-                f"(suitable for {'binary/count' if self.leaf_type == 'binomial' else 'discrete'} data)"
+                f"Using binomial leaf distribution (suitable for binary/count data, "
+                f"total_count={self.leaf_kwargs['total_count']})"
             )
+        elif self.leaf_type == "categorical":
+            # For categorical data, cardinality is inferred from data
+            logging.info(
+                f"Using categorical leaf distribution (suitable for discrete data)"
+            )
+        elif self.leaf_type != "normal":
+            # Unknown leaf type but not erroring - let LocalSPNWrapper handle it
+            logging.warning(f"Unknown leaf_type: {self.leaf_type}")
 
     def _extract_feature_indices(self, client_id: int, include_context: bool = False):
         """
@@ -1097,6 +1111,7 @@ class FedCDH:
                                     num_repetitions=num_repetitions,
                                     seed=k * 10 + h,
                                     leaf_type=self.leaf_type,
+                                    leaf_kwargs=self.leaf_kwargs,
                                 )
                                 spn_kh.train_local(
                                     cluster_data,
@@ -1142,6 +1157,7 @@ class FedCDH:
                                         num_repetitions=num_repetitions,
                                         seed=k * 10 + h,
                                         leaf_type=self.leaf_type,
+                                        leaf_kwargs=self.leaf_kwargs,
                                     )
                                     spn_kh.train_local(
                                         cluster_data,
@@ -1281,6 +1297,7 @@ class FedCDH:
                                 num_repetitions=num_repetitions,
                                 seed=k * 10,
                                 leaf_type=self.leaf_type,
+                                leaf_kwargs=self.leaf_kwargs,
                             )
                             single_spn.train_local(
                                 client_data,
@@ -1334,6 +1351,7 @@ class FedCDH:
                                     num_repetitions=num_repetitions,
                                     seed=k * 10,
                                     leaf_type=self.leaf_type,
+                                    leaf_kwargs=self.leaf_kwargs,
                                 )
                                 single_spn.train_local(
                                     client_data,

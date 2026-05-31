@@ -1033,6 +1033,7 @@ class MethodRunner:
             structure_vote_threshold=kwargs.get("structure_vote_threshold", 0.4),
             return_graphs=True,  # CRITICAL: Must return graphs for evaluation
             spn_eval_dir=spn_eval_dir,  # Use benchmark's experiment directory
+            leaf_type=kwargs.get("leaf_type", "normal"),  # SPN leaf distribution
         )
 
         # Log configuration for K ablation studies
@@ -1107,6 +1108,7 @@ class UnifiedBenchmark:
         save_graphs: bool = False,
         scenario_override: str = None,
         K_local_override: int = None,
+        leaf_type: str = "normal",
     ):
         """
         Initialize unified benchmark.
@@ -1122,6 +1124,7 @@ class UnifiedBenchmark:
             save_graphs: Whether to save graphs and visualizations
             scenario_override: Force specific scenario (horizontal/vertical/hybrid)
             K_local_override: Force specific K_local for SPN methods
+            leaf_type: SPN leaf distribution type (normal/binomial/categorical)
         """
         self.datasets = datasets
         self.methods = methods
@@ -1134,6 +1137,7 @@ class UnifiedBenchmark:
         self.save_graphs = save_graphs
         self.scenario_override = scenario_override
         self.K_local_override = K_local_override
+        self.leaf_type = leaf_type
 
         # Create graphs directory if saving graphs
         if self.save_graphs:
@@ -1208,6 +1212,7 @@ class UnifiedBenchmark:
                 exp_dir=exp_dir,  # Pass experiment directory to prevent FedCDH from creating its own
                 scenario_override=self.scenario_override,
                 K_local_override=self.K_local_override,
+                leaf_type=self.leaf_type,
             )
 
             # Extract internal objects for visualization (if available)
@@ -1814,6 +1819,13 @@ def main():
         action="store_true",
         help="Save graph adjacency matrices and visualizations (adds ~5-10s per experiment)",
     )
+    parser.add_argument(
+        "--leaf-type",
+        type=str,
+        default="normal",
+        choices=["normal", "binomial", "categorical"],
+        help="SPN leaf distribution type (default: normal for continuous data, binomial for binary/count, categorical for discrete)",
+    )
 
     args = parser.parse_args()
 
@@ -1834,6 +1846,7 @@ def main():
         save_graphs=args.save_graphs,
         scenario_override=args.scenario,
         K_local_override=args.K_local,
+        leaf_type=args.leaf_type,
     )
 
     # Run experiments

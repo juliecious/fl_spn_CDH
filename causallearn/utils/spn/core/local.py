@@ -28,6 +28,7 @@ class LocalSPNWrapper(nn.Module):
         variable_order=None,
         structure="top-down",  # BUG FIX: Accept structure parameter (must be 'top-down' or 'bottom-up')
         leaf_type="normal",  # NEW: Support different distributions ('normal', 'binomial', 'categorical')
+        leaf_kwargs=None,  # NEW: Additional leaf distribution parameters (e.g., total_count for Binomial)
     ):
         super().__init__()
         self.device = device
@@ -85,6 +86,10 @@ class LocalSPNWrapper(nn.Module):
             leaf_dist = leaf_type
 
         # BUG FIX: Use structure parameter from template instead of hardcoded "top-down"
+        # NEW: Pass leaf_kwargs for distribution-specific parameters (e.g., total_count for Binomial)
+        if leaf_kwargs is None:
+            leaf_kwargs = {}
+
         self.config = EinetConfig(
             num_features=num_features,
             num_channels=1,
@@ -96,6 +101,7 @@ class LocalSPNWrapper(nn.Module):
             leaf_type=leaf_dist,
             layer_type="linsum",
             structure=structure,  # BUG FIX: Use passed structure parameter
+            leaf_kwargs=leaf_kwargs,  # NEW: Distribution-specific parameters
         )
         self.model = Einet(self.config).to(device)
 
