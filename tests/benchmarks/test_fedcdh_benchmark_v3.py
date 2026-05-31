@@ -1,24 +1,39 @@
 #!/usr/bin/env python
 """
-FedCDH V3 Unified Benchmark Suite - Comprehensive Causal Discovery Evaluation.
+FedSPN Benchmark Suite - Federated Causal Discovery with Sum-Product Networks.
 
-V3 Enhancements:
-- ✅ Multiple datasets: Real-world (Sachs, Law School) + Synthetic (ER, SF, Chain)
-- ✅ Multiple methods: Centralized (GES, FCI) + Federated (FedCDH, FedSPN-H/V/Hy)
-- ✅ Comprehensive metrics: 30+ metrics (Structure, Runtime, Quality, Communication)
-- ✅ Automated comparison: Statistical tests, LaTeX tables, publication plots
-- ✅ V3 features: structure_voting (H), GlobalSumOfProducts (Hy), ProductOverGroups (V)
+This script is dedicated to benchmarking FedSPN methods:
+- fedspn_h: Horizontal partitioning with structure voting
+- fedspn_v: Vertical partitioning with product over groups
+- fedspn_hy: Hybrid partitioning with global sum-of-products
+
+Features:
+- ✅ Multiple datasets: Real-world (Sachs, Law School, Asia, Dream4) + Synthetic (ER, SF, Chain)
+- ✅ SPN distribution support: Normal, Binomial, Categorical
+- ✅ Adaptive parameters: Dynamic epochs, depth, and permutations based on data characteristics
+- ✅ Comprehensive metrics: Structure accuracy, runtime, quality metrics
+- ✅ Seed-controlled data shuffling for robust evaluation
 
 Architecture:
 - UnifiedBenchmark: Main experiment runner
-- DatasetRegistry: Centralized dataset management
-- MethodRegistry: Unified method dispatcher
+- DatasetRegistry: Dataset management (real-world + synthetic)
+- SPNMethodRegistry: FedSPN method configurations
+- SPNMethodRunner: FedSPN execution engine
 - MetricsEngine: Comprehensive evaluation
 
 Usage:
-    python tests/test/test_fedcdh_benchmark_v3.py --datasets sachs,synthetic_er_small --methods ges,fedspn_h --seeds 42,43,44
+    # Single dataset, multiple seeds
+    python tests/benchmarks/test_fedcdh_benchmark_v3.py --datasets sachs --methods fedspn_h --seeds 42,43,44
 
-Updated: May 10, 2026 - V3 unified architecture with comprehensive evaluation
+    # Multiple datasets, with categorical distribution
+    python tests/benchmarks/test_fedcdh_benchmark_v3.py --datasets sachs,asia --methods fedspn_h --leaf-type categorical
+
+    # Save visualizations
+    python tests/benchmarks/test_fedcdh_benchmark_v3.py --datasets sachs --methods fedspn_h --save-graphs
+
+Note: For baseline methods (GES, FCI, FedCDH), use test_baseline_methods.py instead.
+
+Updated: May 31, 2026 - Refactored to SPN-only benchmark
 """
 
 import logging
@@ -41,15 +56,8 @@ if project_root not in sys.path:
 
 import torch
 
-# Import causal discovery methods
-from causallearn.search.ScoreBased.GES import ges
-
-# PC is broken in current causal-learn version - use FCI instead
-# from causallearn.search.ConstraintBased.PC import pc
-from causallearn.search.ConstraintBased.FCI import fci
+# Import FedSPN causal discovery
 from causallearn.search.FCMBased.FedCDH import FedCDH
-from causallearn.search.ConstraintBased.CDNOD import cdnod
-from causallearn.utils.cit import kci
 
 # Import visualization utilities
 from tests.utils.visualization.graph_visualization import (
@@ -260,85 +268,34 @@ DATASET_REGISTRY = {
 
 
 @dataclass
-class MethodConfig:
-    """Configuration for a causal discovery method."""
+class SPNMethodConfig:
+    """Configuration for FedSPN causal discovery methods."""
 
-    name: str
-    type: str  # "centralized" or "federated"
-    category: str  # "score_based", "constraint_based", "kernel_based", "spn_based"
-    ci_method: Optional[str] = None  # "fisherz", "kci", "spn", None
-    privacy: bool = False  # Does it preserve privacy?
-    scenarios: List[str] = field(default_factory=lambda: ["pooled"])
-    aggregation: Optional[str] = None  # For federated: "structure_voting", etc.
-    v3_feature: bool = False  # Is this a V3 enhancement?
-    handles_latent: bool = False  # Can handle latent confounders?
-    source: Optional[str] = None
+    name: str  # Method identifier (fedspn_h, fedspn_v, fedspn_hy)
+    scenario: str  # Federated scenario: "horizontal", "vertical", "hybrid"
+    aggregation: str  # Aggregation strategy for the scenario
+    description: str  # Human-readable description
 
 
-METHOD_REGISTRY = {
-    # === CENTRALIZED BASELINES (No Privacy) ===
-    "ges": MethodConfig(
-        name="ges",
-        type="centralized",
-        category="score_based",
-        ci_method=None,
-        privacy=False,
-        scenarios=["pooled"],
-        source="causal-learn",
-    ),
-    # "pc": REMOVED - API broken in causal-learn (use FCI instead)
-    "fci": MethodConfig(
-        name="fci",
-        type="centralized",
-        category="constraint_based",
-        ci_method="fisherz",
-        privacy=False,
-        scenarios=["pooled"],
-        handles_latent=True,
-        source="causal-learn",
-    ),
-    # === FEDERATED BASELINES ===
-    "fedcdh": MethodConfig(
-        name="fedcdh",
-        type="federated",
-        category="kernel_based",
-        ci_method="kci",
-        privacy=True,
-        scenarios=["horizontal"],
-        source="Li et al. 2024 (CD-NOD)",
-    ),
-    # === OUR METHODS (FedSPN V3) ===
-    "fedspn_h": MethodConfig(
+# SPN Method Registry - All methods use SPN-based CI tests in federated settings
+SPN_METHOD_REGISTRY = {
+    "fedspn_h": SPNMethodConfig(
         name="fedspn_h",
-        type="federated",
-        category="spn_based",
-        ci_method="spn",
-        privacy=True,
-        scenarios=["horizontal"],
+        scenario="horizontal",
         aggregation="structure_voting",
-        v3_feature=True,
-        source="This work",
+        description="FedSPN Horizontal - Structure voting across clients with same features",
     ),
-    "fedspn_v": MethodConfig(
+    "fedspn_v": SPNMethodConfig(
         name="fedspn_v",
-        type="federated",
-        category="spn_based",
-        ci_method="spn",
-        privacy=True,
-        scenarios=["vertical"],
+        scenario="vertical",
         aggregation="product_over_groups",
-        source="This work",
+        description="FedSPN Vertical - Product aggregation across clients with different features",
     ),
-    "fedspn_hy": MethodConfig(
+    "fedspn_hy": SPNMethodConfig(
         name="fedspn_hy",
-        type="federated",
-        category="spn_based",
-        ci_method="spn",
-        privacy=True,
-        scenarios=["hybrid"],
+        scenario="hybrid",
         aggregation="global_sum_of_products",
-        v3_feature=True,
-        source="This work",
+        description="FedSPN Hybrid - Global sum-of-products with overlapping data",
     ),
 }
 
@@ -731,8 +688,8 @@ class MetricsEngine:
 # ============================================================
 
 
-class MethodRunner:
-    """Unified method dispatcher for running causal discovery algorithms."""
+class SPNMethodRunner:
+    """Method runner for FedSPN causal discovery algorithms."""
 
     @staticmethod
     def run_method(
@@ -745,145 +702,28 @@ class MethodRunner:
         **kwargs,
     ) -> Tuple[np.ndarray, Dict[str, Any]]:
         """
-        Run causal discovery method.
+        Run FedSPN causal discovery method.
 
         Args:
-            method_name: Method from METHOD_REGISTRY
+            method_name: Method from SPN_METHOD_REGISTRY (fedspn_h/v/hy)
             X: Data matrix (n, d)
             B: Ground truth (for evaluation)
-            K: Number of clients (for federated methods)
+            K: Number of clients
             alpha: Significance level
             seed: Random seed
-            **kwargs: Additional method-specific parameters
+            **kwargs: Additional method-specific parameters (leaf_type, epochs, etc.)
 
         Returns:
             G: Predicted graph (d, d)
             metrics: Runtime and quality metrics
         """
-        if method_name not in METHOD_REGISTRY:
-            raise ValueError(f"Unknown method: {method_name}")
-
-        config = METHOD_REGISTRY[method_name]
-
-        if config.type == "centralized":
-            return MethodRunner._run_centralized(method_name, X, B, alpha, seed)
-        elif config.type == "federated":
-            return MethodRunner._run_federated(
-                method_name, X, B, K, alpha, seed, **kwargs
-            )
-        else:
-            raise ValueError(f"Unknown method type: {config.type}")
-
-    @staticmethod
-    def _run_centralized(
-        method_name: str, X: np.ndarray, B: np.ndarray, alpha: float, seed: int
-    ) -> Tuple[np.ndarray, Dict[str, Any]]:
-        """Run centralized methods (GES, PC, FCI)."""
-        np.random.seed(seed)
-        start_time = time.time()
-
-        try:
-            if method_name == "ges":
-                record = ges(X, score_func="local_score_BIC")
-                G = record["G"].graph
-
-            elif method_name == "fci":
-                cg, edges = fci(
-                    X, "fisherz", alpha=alpha, verbose=False, show_progress=False
-                )
-                G = cg.graph
-
-            else:
-                raise ValueError(f"Unknown centralized method: {method_name}")
-
-            runtime = time.time() - start_time
-
-            metrics = {
-                "total_time": runtime,
-                "training_time": 0.0,
-                "ci_test_time": runtime,
-                "aggregation_time": 0.0,
-            }
-
-            return G, metrics
-
-        except Exception as e:
-            logging.error(f"  {method_name.upper()} failed: {e}")
-            runtime = time.time() - start_time
-            return np.zeros((X.shape[1], X.shape[1])), {"total_time": runtime}
-
-    @staticmethod
-    def _run_federated(
-        method_name: str,
-        X: np.ndarray,
-        B: np.ndarray,
-        K: int,
-        alpha: float,
-        seed: int,
-        **kwargs,
-    ) -> Tuple[np.ndarray, Dict[str, Any]]:
-        """Run federated methods (FedCDH, FedSPN)."""
-        np.random.seed(seed)
-
-        if method_name == "fedcdh":
-            return MethodRunner._run_fedcdh(X, B, K, alpha, seed)
-        elif method_name.startswith("fedspn"):
-            return MethodRunner._run_fedspn(method_name, X, B, K, alpha, seed, **kwargs)
-        else:
-            raise ValueError(f"Unknown federated method: {method_name}")
-
-    @staticmethod
-    def _run_fedcdh(
-        X: np.ndarray, B: np.ndarray, K: int, alpha: float, seed: int
-    ) -> Tuple[np.ndarray, Dict[str, Any]]:
-        """Run FedCDH (CD-NOD) with KCI tests."""
-        d = X.shape[1]
-        n = X.shape[0]
-
-        # Partition horizontally
-        samples_per_client = n // K
-        c_indx = np.repeat(np.arange(K), samples_per_client)
-
-        # Handle remainder samples
-        remainder = n % K
-        if remainder > 0:
-            c_indx = np.concatenate([c_indx, np.arange(remainder)])
-
-        c_indx = c_indx[:n].reshape(-1, 1)
-
-        start_time = time.time()
-
-        try:
-            # Run CD-NOD
-            cg = cdnod(
-                X,
-                c_indx,
-                K,
-                alpha,
-                kci,
-                True,  # background_knowledge
-                0,  # uc_rule
-                -1,  # uc_priority
+        if method_name not in SPN_METHOD_REGISTRY:
+            raise ValueError(
+                f"Unknown SPN method: {method_name}. Available: {list(SPN_METHOD_REGISTRY.keys())}"
             )
 
-            runtime = time.time() - start_time
-
-            # Extract graph
-            G = cg.G.graph[0:d, 0:d]
-
-            metrics = {
-                "total_time": runtime,
-                "training_time": 0.0,
-                "ci_test_time": runtime,  # KCI tests dominate
-                "aggregation_time": 0.0,
-            }
-
-            return G, metrics
-
-        except Exception as e:
-            logging.error(f"  FedCDH failed: {e}")
-            runtime = time.time() - start_time
-            return np.zeros((d, d)), {"total_time": runtime}
+        # All methods are FedSPN variants
+        return SPNMethodRunner._run_fedspn(method_name, X, B, K, alpha, seed, **kwargs)
 
     @staticmethod
     def _run_fedspn(
@@ -896,6 +736,9 @@ class MethodRunner:
         **kwargs,
     ) -> Tuple[np.ndarray, Dict[str, Any]]:
         """Run FedSPN methods (H/V/Hy)."""
+        # Get method config
+        config = SPN_METHOD_REGISTRY[method_name]
+
         # Check for scenario override (from command-line --scenario)
         scenario_override = kwargs.get("scenario_override", None)
 
@@ -904,15 +747,8 @@ class MethodRunner:
             scenario = scenario_override
             logging.info(f"  Using scenario override: {scenario}")
         else:
-            # Extract scenario from method name
-            if method_name == "fedspn_h":
-                scenario = "horizontal"
-            elif method_name == "fedspn_v":
-                scenario = "vertical"
-            elif method_name == "fedspn_hy":
-                scenario = "hybrid"
-            else:
-                raise ValueError(f"Unknown FedSPN variant: {method_name}")
+            # Use scenario from config
+            scenario = config.scenario
 
         # Create config
         d = X.shape[1]
@@ -1116,11 +952,12 @@ class MethodRunner:
 # ============================================================
 
 
-class UnifiedBenchmark:
+class SPNBenchmark:
     """
-    V3 Unified Benchmark Suite for Causal Discovery.
+    FedSPN Benchmark Suite for Federated Causal Discovery.
 
-    Runs any method on any dataset with comprehensive evaluation.
+    Runs FedSPN methods (horizontal/vertical/hybrid) on multiple datasets
+    with comprehensive evaluation metrics.
     """
 
     def __init__(
@@ -1130,7 +967,7 @@ class UnifiedBenchmark:
         seeds: List[int] = [42, 123, 456],
         K: int = 3,
         alpha: float = 0.05,
-        output_dir: str = "benchmark_results/v3",
+        output_dir: str = "benchmark_results/fedspn",
         device: str = None,
         save_graphs: bool = False,
         scenario_override: str = None,
@@ -1138,19 +975,19 @@ class UnifiedBenchmark:
         leaf_type: str = "normal",
     ):
         """
-        Initialize unified benchmark.
+        Initialize FedSPN benchmark.
 
         Args:
             datasets: List of dataset names from DATASET_REGISTRY
-            methods: List of method names from METHOD_REGISTRY
+            methods: List of FedSPN methods (fedspn_h, fedspn_v, fedspn_hy)
             seeds: Random seeds for multiple runs
-            K: Number of clients (for federated methods)
+            K: Number of federated clients
             alpha: Significance level for CI tests
             output_dir: Output directory for results
             device: Device to use (cuda/mps/cpu) or None for auto-detect
             save_graphs: Whether to save graphs and visualizations
             scenario_override: Force specific scenario (horizontal/vertical/hybrid)
-            K_local_override: Force specific K_local for SPN methods
+            K_local_override: Force specific K_local (number of local clusters per client)
             leaf_type: SPN leaf distribution type (normal/binomial/categorical)
         """
         self.datasets = datasets
@@ -1185,8 +1022,10 @@ class UnifiedBenchmark:
             if dataset not in DATASET_REGISTRY:
                 raise ValueError(f"Unknown dataset: {dataset}")
         for method in methods:
-            if method not in METHOD_REGISTRY:
-                raise ValueError(f"Unknown method: {method}")
+            if method not in SPN_METHOD_REGISTRY:
+                raise ValueError(
+                    f"Unknown SPN method: {method}. Available: {list(SPN_METHOD_REGISTRY.keys())}"
+                )
 
     def _setup_experiment_logging(self, exp_dir: Path) -> logging.FileHandler:
         """Set up logging to file for an experiment."""
@@ -1228,7 +1067,7 @@ class UnifiedBenchmark:
             X, B, feature_names = DatasetLoader.load_dataset(dataset_name, seed)
 
             # Run method
-            G, runtime_metrics = MethodRunner.run_method(
+            G, runtime_metrics = SPNMethodRunner.run_method(
                 method_name,
                 X,
                 B,
@@ -1236,7 +1075,7 @@ class UnifiedBenchmark:
                 alpha=self.alpha,
                 seed=seed,
                 device=self.device,
-                exp_dir=exp_dir,  # Pass experiment directory to prevent FedCDH from creating its own
+                exp_dir=exp_dir,
                 scenario_override=self.scenario_override,
                 K_local_override=self.K_local_override,
                 leaf_type=self.leaf_type,
@@ -1272,7 +1111,7 @@ class UnifiedBenchmark:
                 "n_samples": X.shape[0],
                 "n_features": X.shape[1],
                 "n_edges_true": int(np.sum(B)),
-                "K": self.K if METHOD_REGISTRY[method_name].type == "federated" else 1,
+                "K": self.K,  # All SPN methods are federated
                 "alpha": self.alpha,
                 **all_metrics,
             }
@@ -1691,11 +1530,12 @@ class UnifiedBenchmark:
         counter = 1
 
         logging.info("=" * 80)
-        logging.info("V3 UNIFIED BENCHMARK SUITE")
+        logging.info("FEDSPN BENCHMARK SUITE")
         logging.info("=" * 80)
         logging.info(f"Datasets: {self.datasets}")
-        logging.info(f"Methods: {self.methods}")
+        logging.info(f"FedSPN Methods: {self.methods}")
         logging.info(f"Seeds: {self.seeds}")
+        logging.info(f"Leaf Distribution: {self.leaf_type}")
         logging.info(f"Total experiments: {total}")
         if self.save_graphs:
             logging.info(f"Graph saving: ENABLED (output: {self.graphs_dir})")
@@ -1783,19 +1623,21 @@ class UnifiedBenchmark:
 def main():
     import argparse
 
-    parser = argparse.ArgumentParser(description="V3 Unified Benchmark Suite")
+    parser = argparse.ArgumentParser(
+        description="FedSPN Benchmark Suite - Federated Causal Discovery with Sum-Product Networks"
+    )
     parser.add_argument(
         "--datasets",
         type=str,
-        default="sachs,synthetic_er_small",
-        help="Comma-separated list of datasets",
+        default="sachs",
+        help="Comma-separated list of datasets (e.g., sachs,asia,law_school,dream4_net1)",
     )
     parser.add_argument(
         "--methods",
         "--method",
         type=str,
-        default="ges,fedspn_h",
-        help="Comma-separated list of methods",
+        default="fedspn_h",
+        help="Comma-separated list of FedSPN methods (fedspn_h, fedspn_v, fedspn_hy)",
     )
     parser.add_argument(
         "--seeds",
@@ -1862,7 +1704,7 @@ def main():
     seeds = [int(s) for s in args.seeds.split(",")]
 
     # Create benchmark
-    benchmark = UnifiedBenchmark(
+    benchmark = SPNBenchmark(
         datasets=datasets,
         methods=methods,
         seeds=seeds,
@@ -1891,7 +1733,7 @@ def main():
     print(summary)
 
     logging.info("\n" + "=" * 80)
-    logging.info("V3 UNIFIED BENCHMARK COMPLETE")
+    logging.info("FEDSPN BENCHMARK COMPLETE")
     logging.info("=" * 80)
 
 

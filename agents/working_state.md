@@ -432,16 +432,70 @@ Known limitation:
 - Gene regulatory networks (Dream4): Use KCI instead
 
 ### Next Steps
-1. (Optional) Propagate experiment seed to SPN initialization for true random init testing
-2. Re-run benchmarks with multiple seeds to get variance statistics
-3. Test Dream4 with KCI or epochs=200
-4. Fine-tune Asia with stricter alpha
+1. Rename `test_fedcdh_benchmark_v3.py` → `test_fedspn_benchmark.py`
+2. Create `test_baseline_methods.py` for GES/FCI/FedCDH baselines
+3. Re-run benchmarks with multiple seeds to get variance statistics
+4. Test Sachs with Categorical distribution (recommended based on analysis)
+5. Test Dream4 with KCI or epochs=200
+6. Fine-tune Asia with stricter alpha
+
+---
+
+## Benchmark Script Refactoring (May 31, 2026)
+
+### Motivation
+The benchmark script `test_fedcdh_benchmark_v3.py` had redundant fields and mixed concerns (baseline methods + SPN methods). Refactored to focus solely on FedSPN benchmarking.
+
+### Changes Made
+
+**1. Simplified MethodConfig → SPNMethodConfig**
+- **Removed 5 redundant fields**:
+  - `type`: All "federated" (constant)
+  - `category`: All "spn_based" (constant)
+  - `ci_method`: All "spn" (constant)
+  - `scenarios`: **NEVER USED** in code
+  - `v3_feature`: **NEVER USED** in code
+- **Kept 4 essential fields**:
+  - `name`: Method identifier
+  - `scenario`: horizontal/vertical/hybrid
+  - `aggregation`: structure_voting/product_over_groups/global_sum_of_products
+  - `description`: Human-readable description
+
+**2. Removed Baseline Methods**
+- Removed: `ges`, `fci`, `fedcdh` from registry
+- Kept only: `fedspn_h`, `fedspn_v`, `fedspn_hy`
+- Rationale: SPN-focused script, baselines should be in separate file
+
+**3. Simplified Method Runner**
+- Renamed: `MethodRunner` → `SPNMethodRunner`
+- Removed: `_run_centralized()`, `_run_fedcdh()` methods
+- Kept only: `_run_fedspn()` method
+- No branching logic needed (all methods are FedSPN)
+
+**4. Updated Naming**
+- `METHOD_REGISTRY` → `SPN_METHOD_REGISTRY`
+- `MethodRunner` → `SPNMethodRunner`
+- `UnifiedBenchmark` → `SPNBenchmark`
+- Default output: `benchmark_results/v3` → `benchmark_results/fedspn`
+
+**5. Removed Unused Imports**
+- Removed: `ges`, `fci`, `cdnod`, `kci` imports
+- Kept: `FedCDH` import (for FedSPN implementation)
+
+### Benefits
+- **55% reduction** in MethodConfig fields (9 → 4)
+- **No branching logic** in method runner
+- **Clear purpose**: SPN-only benchmarking
+- **Better maintainability**: Less complexity, fewer fields
+
+### Files Modified
+- `tests/benchmarks/test_fedcdh_benchmark_v3.py` (SPNMethodConfig, SPNMethodRunner, SPNBenchmark)
 
 ---
 
 **Session Duration**: ~10 hours intensive development
-**Total Commits**: 7 major commits
-**Files Modified**: 5 core files
+**Total Commits**: 9 major commits
+**Files Modified**: 6 core files
 **Documentation**: Consolidated here
 
 🎉 **FedSPN-CDH is production-ready for medical, biological, and social science datasets!**
