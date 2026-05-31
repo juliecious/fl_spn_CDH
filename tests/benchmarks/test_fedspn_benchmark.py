@@ -784,9 +784,11 @@ class SPNMethodRunner:
             "d": d,
             "K": K,
             "n_total": n,
+            # epochs: Use device-based default (80 for GPU, 20 for CPU) unless user overrides
+            # If user provides --epochs via command line, pass it; otherwise let FedCDH use default
             "epochs": kwargs.get(
-                "epochs", 20
-            ),  # Reduced for faster smoke tests (was 50)
+                "epochs", None
+            ),  # None = use FedCDH device-based default
             "num_local_clusters": num_local_clusters,
             "force_clusters": force_clusters,
         }
@@ -884,34 +886,42 @@ class SPNMethodRunner:
         exp_dir = kwargs.get("exp_dir", None)
         spn_eval_dir = str(exp_dir) if exp_dir else None
 
-        args = Namespace(
-            K=K,
-            d=d,
-            n=samples_per_client,
-            scenario=scenario,
-            model_type="synthetic",
-            ci_method="spn",
-            alpha=alpha,
-            epochs=config["epochs"],
-            device=kwargs.get("device", get_device()),  # Auto-detect GPU
-            skip_bic=False,
-            data_type="nonlinear",
-            use_ci_ranking=False,
-            force_num_clusters=config["force_clusters"],
-            num_local_clusters=config["num_local_clusters"],
-            skip_spn_eval=True,
-            horizontal_aggregation=kwargs.get(
+        # Build args - only set epochs if user explicitly provided it
+        args_dict = {
+            "K": K,
+            "d": d,
+            "n": samples_per_client,
+            "scenario": scenario,
+            "model_type": "synthetic",
+            "ci_method": "spn",
+            "alpha": alpha,
+            "skip_bic": False,
+            "data_type": "nonlinear",
+            "use_ci_ranking": False,
+            "force_num_clusters": config["force_clusters"],
+            "num_local_clusters": config["num_local_clusters"],
+            "skip_spn_eval": True,
+            "horizontal_aggregation": kwargs.get(
                 "horizontal_aggregation", "structure_voting"
             ),
-            structure_vote_threshold=kwargs.get("structure_vote_threshold", 0.4),
-            return_graphs=True,  # CRITICAL: Must return graphs for evaluation
-            spn_eval_dir=spn_eval_dir,  # Use benchmark's experiment directory
-            leaf_type=kwargs.get("leaf_type", "normal"),  # SPN leaf distribution
-        )
+            "structure_vote_threshold": kwargs.get("structure_vote_threshold", 0.4),
+            "return_graphs": True,  # CRITICAL: Must return graphs for evaluation
+            "spn_eval_dir": spn_eval_dir,  # Use benchmark's experiment directory
+            "leaf_type": kwargs.get("leaf_type", "normal"),  # SPN leaf distribution
+        }
+
+        # Only set epochs if user explicitly provided it (otherwise FedCDH uses device default)
+        if config["epochs"] is not None:
+            args_dict["epochs"] = config["epochs"]
+
+        args = Namespace(**args_dict)
 
         # Log configuration for K ablation studies
+        epochs_str = (
+            str(config["epochs"]) if config["epochs"] is not None else "device-default"
+        )
         logging.info(
-            f"  FedSPN config: scenario={scenario}, K={K}, K_local={config['num_local_clusters']}, epochs={config['epochs']}"
+            f"  FedSPN config: scenario={scenario}, K={K}, K_local={config['num_local_clusters']}, epochs={epochs_str}"
         )
 
         start_time = time.time()
