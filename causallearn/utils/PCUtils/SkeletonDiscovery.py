@@ -75,8 +75,25 @@ def skeleton_discovery(
     assert 0 < alpha < 1
 
     no_of_var = data.shape[1]
-    cg = CausalGraph(no_of_var, None)
-    cg.set_ind_test(indep_test)  # indep_test = CIT(data, indep_test, **kwargs)
+
+    # FIX #3: Use initial skeleton from cg_list if provided
+    # If cg_list[0] has edges (initial skeleton), use it as starting point
+    # Otherwise create a fresh fully-connected graph
+    if cg_list and len(cg_list) > 0 and cg_list[0].G.get_num_edges() > 0:
+        # Use the pre-initialized graph with initial skeleton
+        n_initial_edges = cg_list[0].G.get_num_edges()
+        print(
+            f"[SkeletonDiscovery] Using initial skeleton from cg_list[0]: {n_initial_edges} edge entries ({n_initial_edges//2} undirected edges)"
+        )
+        cg = cg_list[0]
+        cg.set_ind_test(indep_test)
+    else:
+        # Create fresh fully-connected graph (original behavior)
+        print(
+            f"[SkeletonDiscovery] Creating fresh fully-connected graph (no initial skeleton provided or empty)"
+        )
+        cg = CausalGraph(no_of_var, None)
+        cg.set_ind_test(indep_test)  # indep_test = CIT(data, indep_test, **kwargs)
 
     if flag == 1:
         f = open("result/fedcd/k6-n8-pvalue_fed_2.csv", "a+")

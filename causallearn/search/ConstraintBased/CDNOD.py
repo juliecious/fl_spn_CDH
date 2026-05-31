@@ -207,6 +207,7 @@ def cdnod(
     show_progress: bool = True,
     fed_spn_model: Optional[nn.Module] = None,
     orientation_type: str = "hybrid",
+    exclude_augmented_var: bool = False,
     **kwargs,
 ) -> CausalGraph:
     if mvcdnod:
@@ -237,6 +238,7 @@ def cdnod(
             show_progress=show_progress,
             fed_spn_model=fed_spn_model,
             orientation_type=orientation_type,
+            exclude_augmented_var=exclude_augmented_var,
             **kwargs,
         )
 
@@ -255,6 +257,7 @@ def cdnod_alg(
     show_progress: bool = True,
     fed_spn_model: Optional[nn.Module] = None,
     orientation_type: str = "hybrid",
+    exclude_augmented_var: bool = False,
     **kwargs,
 ) -> CausalGraph:
     start = time.time()
@@ -268,6 +271,25 @@ def cdnod_alg(
         indep_test_all = CIT(data_aug, indep_test, **kwargs)
 
     s_a, d = data_aug.shape
+
+    # FIX #2: Determine number of causal variables (exclude augmented variable if requested)
+    # In horizontal mode, the augmented variable (context/client ID) should NOT be part of the causal graph
+    # It's only used for conditioning in CI tests
+    if exclude_augmented_var:
+        n_causal_vars = data.shape[1]  # Original features only (e.g., 8 for Asia)
+        if verbose:
+            print(
+                f"[CDNOD] Excluding augmented variable from skeleton: "
+                f"{n_causal_vars} causal variables, {data_aug.shape[1]} total variables"
+            )
+    else:
+        n_causal_vars = data_aug.shape[
+            1
+        ]  # All features including augmented (legacy behavior)
+
+    # FIX #3: Extract initial skeleton from kwargs if provided
+    initial_skeleton = kwargs.get("initial_skeleton", None)
+
     cg_list = []
     for i in range(K):
         # Use the domain index to extract samples for each client/domain
@@ -283,7 +305,38 @@ def cdnod_alg(
             except ValueError:
                 fed_dt = data_aug  # Last resort fallback
 
-        fed_cg = CausalGraph(no_of_var=data_aug.shape[1], node_names=None)
+        fed_cg = CausalGraph(no_of_var=n_causal_vars, node_names=None)
+
+        # FIX #3: Initialize graph with initial skeleton if provided (from structure voting)
+        if initial_skeleton is not None:
+            if verbose:
+                print(
+                    f"[CDNOD] Initializing CausalGraph with skeleton from structure voting: "
+                    f"{initial_skeleton.sum() // 2} edges"
+                )
+
+            # CRITICAL: CausalGraph starts fully connected by default!
+            # We need to CLEAR it first, then add only the skeleton edges
+            # Set all edges to 0 (no edge), keeping diagonal at 0
+            fed_cg.G.graph[:] = 0
+
+            # Now set ONLY the edges from initial skeleton
+            # initial_skeleton is symmetric adjacency matrix: 1 = edge exists
+            for node_i in range(min(n_causal_vars, initial_skeleton.shape[0])):
+                for node_j in range(
+                    node_i + 1, min(n_causal_vars, initial_skeleton.shape[1])
+                ):
+                    if initial_skeleton[node_i, node_j] == 1:
+                        # Add undirected edge (both directions set to -1)
+                        fed_cg.G.graph[node_i, node_j] = -1
+                        fed_cg.G.graph[node_j, node_i] = -1
+
+            if verbose:
+                actual_edges = fed_cg.G.get_num_edges()
+                print(
+                    f"[CDNOD] After loading skeleton: {actual_edges} edges in fed_cg.G"
+                )
+
         if fed_spn_model is not None:
             fed_indep_test = indep_test_all
         elif callable(indep_test):
@@ -296,16 +349,35 @@ def cdnod_alg(
     # Stage 1
     flag = 0
     depth_limit = kwargs.get("depth_limit", None)
+
+    # Debug: Check if cg_list[0] actually has edges before passing to skeleton_discovery
+    if verbose and cg_list and len(cg_list) > 0:
+        n_edges_before = cg_list[0].G.get_num_edges()
+        print(
+            f"[CDNOD Stage 1] Passing cg_list to skeleton_discovery: cg_list[0] has {n_edges_before} edge entries"
+        )
+
     cg_0 = SkeletonDiscovery.skeleton_discovery(
         flag, cg_list, data, K, alpha, indep_test_all, stable, depth_limit=depth_limit
     )
 
     # Stage 2
+    # FIX #2 (CRITICAL): In Stage 2, use the same data as Stage 1
+    # Stage 2 adds a surrogate node and assumes the LAST variable in data is the context variable
+    # If we pass data_aug (9D) but cg_0 has 8 nodes, Stage 2 will test the augmented variable again
+    # When exclude_augmented_var=True, pass data (8D) so Stage 2 operates on same dimensions as Stage 1
+    stage2_data = data if exclude_augmented_var else data_aug
+    if verbose and exclude_augmented_var:
+        print(
+            f"[CDNOD Stage 2] Using data.shape={data.shape} (excluding augmented var) "
+            f"instead of data_aug.shape={data_aug.shape}"
+        )
+
     cg_1 = SkeletonDiscovery.skeleton_discovery_with_surrogate_GMM(
         flag,
         cg_0,
         cg_list,
-        data_aug,
+        stage2_data,
         K,
         alpha,
         indep_test_all,
@@ -313,10 +385,20 @@ def cdnod_alg(
         depth_limit=depth_limit,
     )
 
-    # Orient edge from c_indx
-    c_indx_id = data_aug.shape[1] - 1
-    for i in cg_1.G.get_adjacent_nodes(cg_1.G.nodes[c_indx_id]):
-        cg_1.G.add_directed_edge(cg_1.G.nodes[c_indx_id], i)
+    # Orient edge from c_indx (context variable)
+    # FIX #2 (CRITICAL): Compute c_indx_id for later use, but only orient if augmented var is included
+    c_indx_id = (
+        data_aug.shape[1] - 1
+    )  # Always compute this (used later in orientation code)
+
+    if not exclude_augmented_var:
+        # Only orient context edges if augmented variable is part of the graph
+        for i in cg_1.G.get_adjacent_nodes(cg_1.G.nodes[c_indx_id]):
+            cg_1.G.add_directed_edge(cg_1.G.nodes[c_indx_id], i)
+    elif verbose:
+        print(
+            f"[CDNOD] Skipping context edge orientation (augmented variable excluded from graph)"
+        )
 
     if background_knowledge is not None:
         orient_by_background_knowledge(cg_1, background_knowledge)
@@ -444,46 +526,60 @@ def cdnod_alg(
 
     else:
         # Original: Context-Based Orientation (requires edges to context variable)
-        feature_map = Nystroem(gamma=0.2, n_components=5, random_state=1)
-        C_f = feature_map.fit_transform(c_indx)
-        Ccc = my_cov(C_f, C_f)
-        iCcc = np.linalg.inv(Ccc + np.eye(5) * 1e-10)
-
-        vh = []
-        for i in range(d - 1):
-            if (cg.G.graph[i, d - 1] == 1) and (cg.G.graph[d - 1, i] == -1):
-                vh.append(i)
-
-        if verbose:
-            print(f"\n[Stage 3] Using Context-Based Orientation")
-            print(f"Variables with edges to context (vh): {vh}")
-
-        for v in combinations(vh, 2):
-            i, j = v
-            if fed_spn_model is not None:
-                score_i_j = get_hybrid_direction_score(
-                    fed_spn_model,
-                    i,
-                    j,
-                    c_indx_id,
-                    data_aug,
-                    C_f,
-                    iCcc,
-                    orientation_type=orientation_type,
+        # FIX #4: Skip context-based orientation when augmented variable is excluded
+        if exclude_augmented_var:
+            if verbose:
+                print(
+                    f"\n[Stage 3] Skipping Context-Based Orientation (augmented variable excluded)"
                 )
-            else:
-                score_i_j = get_hsic_score_fast(
-                    data[:, i].reshape(-1, 1), data[:, j].reshape(-1, 1), C_f, iCcc
-                )
+        else:
+            feature_map = Nystroem(gamma=0.2, n_components=5, random_state=1)
+            C_f = feature_map.fit_transform(c_indx)
+            Ccc = my_cov(C_f, C_f)
+            iCcc = np.linalg.inv(Ccc + np.eye(5) * 1e-10)
 
-            if score_i_j == 1:
-                cg.G.add_edge(
-                    Edge(cg.G.nodes[i], cg.G.nodes[j], Endpoint.TAIL, Endpoint.ARROW)
-                )
-            else:
-                cg.G.add_edge(
-                    Edge(cg.G.nodes[j], cg.G.nodes[i], Endpoint.TAIL, Endpoint.ARROW)
-                )
+            vh = []
+            # FIX #4: Use n_causal_vars instead of d (which includes augmented variable)
+            for i in range(n_causal_vars):
+                if (cg.G.graph[i, n_causal_vars] == 1) and (
+                    cg.G.graph[n_causal_vars, i] == -1
+                ):
+                    vh.append(i)
+
+            if verbose:
+                print(f"\n[Stage 3] Using Context-Based Orientation")
+                print(f"Variables with edges to context (vh): {vh}")
+
+            for v in combinations(vh, 2):
+                i, j = v
+                if fed_spn_model is not None:
+                    score_i_j = get_hybrid_direction_score(
+                        fed_spn_model,
+                        i,
+                        j,
+                        c_indx_id,
+                        data_aug,
+                        C_f,
+                        iCcc,
+                        orientation_type=orientation_type,
+                    )
+                else:
+                    score_i_j = get_hsic_score_fast(
+                        data[:, i].reshape(-1, 1), data[:, j].reshape(-1, 1), C_f, iCcc
+                    )
+
+                if score_i_j == 1:
+                    cg.G.add_edge(
+                        Edge(
+                            cg.G.nodes[i], cg.G.nodes[j], Endpoint.TAIL, Endpoint.ARROW
+                        )
+                    )
+                else:
+                    cg.G.add_edge(
+                        Edge(
+                            cg.G.nodes[j], cg.G.nodes[i], Endpoint.TAIL, Endpoint.ARROW
+                        )
+                    )
 
     end = time.time()
     cg.PC_elapsed = end - start

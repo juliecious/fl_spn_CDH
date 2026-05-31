@@ -23,6 +23,7 @@ def extract_local_dependency_graph(
     alpha: float = 0.05,
     num_permutations: int = 50,
     device: str = "cpu",
+    has_augmented_var: bool = True,
 ) -> nx.Graph:
     """
     Extract dependency graph from a local SPN using conditional independence tests.
@@ -33,13 +34,35 @@ def extract_local_dependency_graph(
         alpha: Significance level for CI tests
         num_permutations: Number of permutations for SPN_CIT
         device: torch device
+        has_augmented_var: If True, last column is augmented variable (condition on it)
 
     Returns:
         NetworkX Graph with edges representing dependencies (X⊥̸Y)
+
+    Note:
+        If has_augmented_var=True, we:
+        1. Only test original variables (0 to d-2)
+        2. Always condition on augmented variable (d-1)
+        3. This preserves SPN context while excluding augmented var from causal graph
     """
     from causallearn.utils.cit import SPN_CIT
 
     d = X_data.shape[1]
+
+    # Determine which variables to include in causal graph
+    if has_augmented_var:
+        # Last column is augmented variable - exclude from graph
+        d_original = d - 1
+        augmented_var_idx = d - 1
+        logging.info(
+            f"      → Conditioning on augmented variable (column {augmented_var_idx})"
+        )
+        logging.info(
+            f"      → Testing only original {d_original} variables for causal structure"
+        )
+    else:
+        d_original = d
+        augmented_var_idx = None
 
     # Create SPN_CIT instance
     spn_cit = SPN_CIT(
@@ -49,14 +72,20 @@ def extract_local_dependency_graph(
         num_permutations=num_permutations,
     )
 
-    # Test all pairwise dependencies (skeleton)
+    # Test all pairwise dependencies (skeleton) among ORIGINAL variables only
     dependency_graph = nx.Graph()
-    dependency_graph.add_nodes_from(range(d))
+    dependency_graph.add_nodes_from(range(d_original))
 
-    for i in range(d):
-        for j in range(i + 1, d):
-            # Test independence: X_i ⊥ X_j
-            p_value = spn_cit(i, j, None)
+    for i in range(d_original):
+        for j in range(i + 1, d_original):
+            # Test independence: X_i ⊥ X_j | augmented_var
+            # This preserves SPN's 9D context while testing causal relationships
+            if has_augmented_var:
+                # Condition on augmented variable to preserve SPN context
+                p_value = spn_cit(i, j, [augmented_var_idx])
+            else:
+                # No augmented variable - standard marginal test
+                p_value = spn_cit(i, j, None)
 
             # If p_value <= alpha, reject independence → they are DEPENDENT
             if p_value <= alpha:

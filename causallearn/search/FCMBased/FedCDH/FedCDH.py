@@ -1431,6 +1431,7 @@ class FedCDH:
                             alpha=alpha,
                             num_permutations=50,
                             device=str(self.device),
+                            has_augmented_var=True,  # Condition on augmented variable
                         )
                         local_graphs.append(graph)
                         logging.info(f"      → {len(graph.edges())} edges detected")
@@ -1452,6 +1453,23 @@ class FedCDH:
                     # Note: This graph can be used to constrain PC algorithm or as direct output
                     self.consensus_dependency_graph = consensus_graph
                     self.edge_confidence = edge_confidence
+
+                    # FIX #3: Convert consensus graph to initial skeleton for PC algorithm
+                    # The consensus graph from structure voting provides high-quality edge proposals
+                    # Use it as initial skeleton to speed up PC algorithm and improve accuracy
+                    n_vars = self.d_features
+                    initial_skeleton = np.zeros((n_vars, n_vars), dtype=int)
+                    for edge in consensus_graph.edges():
+                        i, j = edge
+                        # Undirected skeleton: mark both directions
+                        initial_skeleton[i, j] = 1
+                        initial_skeleton[j, i] = 1
+
+                    self.initial_skeleton_from_voting = initial_skeleton
+                    logging.info(
+                        f"  [Structure Voting] Converted consensus graph to initial skeleton: "
+                        f"{initial_skeleton.sum() // 2} edges"
+                    )
 
                     # Build standard mixture for SPN inference (still needed for CI tests)
                     fed_spn = GlobalFedSPN(
@@ -2233,7 +2251,19 @@ class FedCDH:
             "num_permutations": 0,
             "orientation_type": getattr(self.args, "ablation_orientation", "mi_hybrid"),
             "depth_limit": depth_limit,
+            "verbose": True,  # Enable verbose logging to see skeleton initialization
         }
+
+        # FIX #3: Pass initial skeleton from structure voting if available
+        if (
+            hasattr(self, "initial_skeleton_from_voting")
+            and self.initial_skeleton_from_voting is not None
+        ):
+            cdnod_kwargs["initial_skeleton"] = self.initial_skeleton_from_voting
+            n_edges = self.initial_skeleton_from_voting.sum() // 2
+            logging.info(
+                f"[Structure Voting] Passing initial skeleton to PC algorithm: {n_edges} edges from consensus graph"
+            )
 
         # Pass covariance tensor if available (derived from SPN)
         if hasattr(self, "covariance_tensor") and self.covariance_tensor is not None:
@@ -2261,6 +2291,10 @@ class FedCDH:
                     f"Vertical mode: Passing {len(self.local_cluster_mixtures)} local cluster mixtures for within-client edge orientation"
                 )
 
+        # FIX #2: Exclude augmented variable from skeleton in horizontal mode
+        # The augmented variable (client ID) is used for conditioning but should not appear in the causal graph
+        exclude_augmented = self.scenario == "horizontal"
+
         cg = cdnod(
             X_global,
             c_indx,
@@ -2271,6 +2305,7 @@ class FedCDH:
             uc_rule=2,
             uc_priority=-1,
             fed_spn_model=self.fed_spn_model,
+            exclude_augmented_var=exclude_augmented,
             **cdnod_kwargs,
         )
         cd_time = time.time() - start_cd
