@@ -188,7 +188,11 @@ class LocalSPNWrapper(nn.Module):
 
         if should_normalize:
             data_t = self._normalize(data_t)
-        # else: categorical/binomial stay as integer values in float32 format
+        else:
+            # Categorical/binomial: round to nearest integer to ensure exact values
+            # This prevents numerical errors like 1.0 becoming 1.0001 or 1.1111
+            # Categorical distributions require EXACT integer values (0.0, 1.0, 2.0, ...)
+            data_t = torch.round(data_t)
 
         data_t = self._permute(data_t)  # Apply dependency-aware ordering
 
