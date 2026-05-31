@@ -948,30 +948,57 @@ class MethodRunner:
         # Prepare data splits
         samples_per_client = n // K if scenario != "vertical" else n
 
-        # Create c_indx (context indices)
+        # IMPORTANT: Shuffle data indices with seed for proper federated learning
+        # This ensures:
+        # 1. Reproducibility: same seed → same split
+        # 2. Robustness: different seeds → different splits → can assess variance
+        # 3. Realism: simulates random patient/data assignment to clients
+        if seed is not None:
+            rng = np.random.RandomState(seed)
+            shuffled_indices = rng.permutation(n)
+            logging.info(
+                f"  Data shuffled with seed={seed} (first 5 sample indices: {shuffled_indices[:5].tolist()})"
+            )
+        else:
+            # No seed: deterministic sequential split (for debugging only)
+            shuffled_indices = np.arange(n)
+            logging.warning(
+                "  No seed provided - using deterministic split (not recommended for experiments)"
+            )
+
+        # Create c_indx (context indices) - maps each shuffled sample to its client
         if scenario == "vertical":
             # Vertical: All clients see same samples, no sample partitioning
             # c_indx can be zeros or any constant (not used for vertical)
             c_indx = np.zeros((n, 1), dtype=int)
         else:
             # Horizontal/Hybrid: Samples are partitioned across clients
-            c_indx = np.repeat(np.arange(K), samples_per_client).reshape(-1, 1)
+            # Map shuffled samples to clients
+            c_indx = np.zeros((n, 1), dtype=int)
+            for k in range(K):
+                start = k * samples_per_client
+                end = (k + 1) * samples_per_client if k < K - 1 else n
+                client_sample_indices = shuffled_indices[start:end]
+                c_indx[client_sample_indices, 0] = k
 
         # Partition data based on scenario
         sample_maps = None
         feature_maps = None
 
         if scenario == "horizontal":
-            # Horizontal: Split samples, all features
-            X_splits = [
-                X[i * samples_per_client : (i + 1) * samples_per_client, :]
-                for i in range(K)
-            ]
-            # Build maps for consistency
-            sample_indices = [
-                np.arange(i * samples_per_client, (i + 1) * samples_per_client)
-                for i in range(K)
-            ]
+            # Horizontal: Split shuffled samples, all features
+            sample_indices = []
+            X_splits = []
+            for k in range(K):
+                start = k * samples_per_client
+                end = (k + 1) * samples_per_client if k < K - 1 else n
+                # Get shuffled indices for this client
+                client_sample_indices = shuffled_indices[start:end]
+                sample_indices.append(client_sample_indices)
+                # Extract data for these shuffled samples
+                X_splits.append(X[client_sample_indices, :])
+
+            # Build maps
             sample_maps = {k: indices for k, indices in enumerate(sample_indices)}
             feature_maps = {k: np.arange(d) for k in range(K)}
 
