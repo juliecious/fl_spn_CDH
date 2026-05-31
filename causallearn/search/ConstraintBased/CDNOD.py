@@ -357,8 +357,30 @@ def cdnod_alg(
             f"[CDNOD Stage 1] Passing cg_list to skeleton_discovery: cg_list[0] has {n_edges_before} edge entries"
         )
 
+    # FIX: Compute c_indx_id early so it can be passed to skeleton_discovery functions
+    # This is the index of the augmented/context variable (client ID) in data_aug
+    c_indx_id = data_aug.shape[1] - 1
+
+    # When exclude_augmented_var=True, pass c_indx_id to ensure CI tests condition on it
+    # even though it's not part of the causal graph
+    c_indx_param = c_indx_id if exclude_augmented_var else None
+
+    if verbose and exclude_augmented_var:
+        print(
+            f"[CDNOD Stage 1] Will condition on augmented variable (index {c_indx_id}) "
+            f"in all CI tests to control for domain heterogeneity"
+        )
+
     cg_0 = SkeletonDiscovery.skeleton_discovery(
-        flag, cg_list, data, K, alpha, indep_test_all, stable, depth_limit=depth_limit
+        flag,
+        cg_list,
+        data,
+        K,
+        alpha,
+        indep_test_all,
+        stable,
+        depth_limit=depth_limit,
+        c_indx_id=c_indx_param,
     )
 
     # Stage 2
@@ -383,13 +405,11 @@ def cdnod_alg(
         indep_test_all,
         stable,
         depth_limit=depth_limit,
+        c_indx_id=c_indx_param,
     )
 
     # Orient edge from c_indx (context variable)
-    # FIX #2 (CRITICAL): Compute c_indx_id for later use, but only orient if augmented var is included
-    c_indx_id = (
-        data_aug.shape[1] - 1
-    )  # Always compute this (used later in orientation code)
+    # FIX #2 (CRITICAL): Only orient if augmented var is included in the graph
 
     if not exclude_augmented_var:
         # Only orient context edges if augmented variable is part of the graph

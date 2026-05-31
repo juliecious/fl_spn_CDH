@@ -37,6 +37,7 @@ def skeleton_discovery(
     use_ranking: bool = False,
     ranking_tracker=None,
     depth_limit: int | None = None,
+    c_indx_id: int | None = None,
 ) -> CausalGraph:
     """
     Perform skeleton discovery
@@ -147,17 +148,24 @@ def skeleton_discovery(
 
                 Neigh_x_noy = np.delete(Neigh_x, np.where(Neigh_x == y))
                 for S in combinations(Neigh_x_noy, depth):
+                    # FIX: Include augmented variable in conditioning set if provided
+                    # This controls for confounding by client/domain membership
+                    if c_indx_id is not None:
+                        S_with_context = tuple(S) + (c_indx_id,)
+                    else:
+                        S_with_context = S
+
                     if flag == 0:
-                        p = cg.ci_test(x, y, S)
+                        p = cg.ci_test(x, y, S_with_context)
 
                     if flag == -1:
-                        p = cg.ci_test(x, y, S, gmm=3)
+                        p = cg.ci_test(x, y, S_with_context, gmm=3)
 
                     # print all the fed p-values.
                     if flag == 1:
                         f.write(f"{x},{y},{S},{p},{p>alpha}")
                         for i in range(K):
-                            p_ = cg_list[i].ci_test(x, y, S)
+                            p_ = cg_list[i].ci_test(x, y, S_with_context)
                             f.write(f",{p_}")
                         f.write("\n")
 
@@ -171,15 +179,21 @@ def skeleton_discovery(
                         ratio = 0.6
 
                         if style == 1:
-                            p_list = [cg_list[i].ci_test(x, y, S) for i in range(K)]
+                            p_list = [
+                                cg_list[i].ci_test(x, y, S_with_context)
+                                for i in range(K)
+                            ]
                             p = max(p_list)
                         elif style == 2:
-                            p_list = [cg_list[i].ci_test(x, y, S) for i in range(K)]
+                            p_list = [
+                                cg_list[i].ci_test(x, y, S_with_context)
+                                for i in range(K)
+                            ]
                             p = sum(p_list) / len(p_list)
                         elif style == 3:
                             count = 0
                             for i in range(K):
-                                p_ = cg_list[i].ci_test(x, y, S)
+                                p_ = cg_list[i].ci_test(x, y, S_with_context)
                                 if p_ <= alpha:
                                     count += 1
                             if count >= ratio * K:  # ratio
@@ -187,10 +201,13 @@ def skeleton_discovery(
                             else:
                                 p = 1
                         elif style == 4:
-                            # p_list = [cg_list[i].ci_test(x, y, S)<=alpha for i in range(K)]
+                            # p_list = [cg_list[i].ci_test(x, y, S_with_context)<=alpha for i in range(K)]
                             # count = np.sum(p_list)
                             count = np.sum(
-                                [cg_list[i].ci_test(x, y, S) <= alpha for i in range(K)]
+                                [
+                                    cg_list[i].ci_test(x, y, S_with_context) <= alpha
+                                    for i in range(K)
+                                ]
                             )
                             p = count < ratio * K
                             # print("Linear Gaussian. Using Voting method")
@@ -350,6 +367,7 @@ def skeleton_discovery_with_surrogate(
     show_progress: bool = True,
     node_names: List[str] | None = None,
     depth_limit: int | None = None,
+    c_indx_id: int | None = None,
 ) -> CausalGraph:
     """
     Perform skeleton discovery
@@ -468,14 +486,22 @@ def skeleton_discovery_with_surrogate(
 
                 Neigh_x_noy = np.delete(Neigh_x, np.where(Neigh_x == y))
                 for S in combinations(Neigh_x_noy, depth):
+                    # FIX: Include augmented variable in conditioning set if provided
+                    if c_indx_id is not None:
+                        S_with_context = tuple(S) + (c_indx_id,)
+                    else:
+                        S_with_context = S
+
                     if flag == 0:
-                        p = cg.ci_test(x, y, S)  ###################################
+                        p = cg.ci_test(
+                            x, y, S_with_context
+                        )  ###################################
 
                     # print all the fed p-values.
                     if flag == 1:
-                        f.write(f"{x},{y},{S},{p},{p>alpha}")
+                        f.write(f"{x},{y},{S_with_context},{p},{p>alpha}")
                         for i in range(K):
-                            p_ = cg_list[i].ci_test(x, y, S)
+                            p_ = cg_list[i].ci_test(x, y, S_with_context)
                             f.write(f",{p_}")
                         f.write("\n")
 
@@ -489,15 +515,21 @@ def skeleton_discovery_with_surrogate(
                         ratio = 0.1
 
                         if style == 1:
-                            p_list = [cg_list[i].ci_test(x, y, S) for i in range(K)]
+                            p_list = [
+                                cg_list[i].ci_test(x, y, S_with_context)
+                                for i in range(K)
+                            ]
                             p = max(p_list)
                         elif style == 2:
-                            p_list = [cg_list[i].ci_test(x, y, S) for i in range(K)]
+                            p_list = [
+                                cg_list[i].ci_test(x, y, S_with_context)
+                                for i in range(K)
+                            ]
                             p = sum(p_list) / len(p_list)
                         elif style == 3:
                             count = 0
                             for i in range(K):
-                                p_ = cg_list[i].ci_test(x, y, S)
+                                p_ = cg_list[i].ci_test(x, y, S_with_context)
                                 if p_ <= alpha:
                                     count += 1
                             if count >= ratio * K:  # ratio
@@ -505,14 +537,20 @@ def skeleton_discovery_with_surrogate(
                             else:
                                 p = 1
                         elif style == 4:
-                            # p_list = [cg_list[i].ci_test(x, y, S)<=alpha for i in range(K)]
+                            # p_list = [cg_list[i].ci_test(x, y, S_with_context)<=alpha for i in range(K)]
                             # count = np.sum(p_list)
                             count = np.sum(
-                                [cg_list[i].ci_test(x, y, S) <= alpha for i in range(K)]
+                                [
+                                    cg_list[i].ci_test(x, y, S_with_context) <= alpha
+                                    for i in range(K)
+                                ]
                             )
                             p = count < ratio * K
                         elif style == 5:
-                            p_list = [cg_list[i].ci_test(x, y, S) for i in range(K)]
+                            p_list = [
+                                cg_list[i].ci_test(x, y, S_with_context)
+                                for i in range(K)
+                            ]
                             big_K = 100
                             p_list_new = np.random.choice(p_list, big_K)
                             p_list_new = [i <= alpha for i in p_list_new]
@@ -525,10 +563,10 @@ def skeleton_discovery_with_surrogate(
                             if (
                                 x == no_of_var - 1
                                 or y == no_of_var - 1
-                                or (no_of_var - 1) in S
+                                or (no_of_var - 1) in S_with_context
                             ):
                                 p_list = [
-                                    cg_list[i].ci_test(x, y, S) <= alpha
+                                    cg_list[i].ci_test(x, y, S_with_context) <= alpha
                                     for i in range(K)
                                 ]
                                 count = np.sum(p_list)
@@ -538,7 +576,7 @@ def skeleton_discovery_with_surrogate(
                                     p = 1
                             else:
                                 p_list = [
-                                    cg_list[i].ci_test(x, y, S) <= alpha
+                                    cg_list[i].ci_test(x, y, S_with_context) <= alpha
                                     for i in range(K)
                                 ]
                                 count = np.sum(p_list)
@@ -549,7 +587,8 @@ def skeleton_discovery_with_surrogate(
 
                         elif style == 7:
                             p_list = [
-                                cg_list[i].ci_test(x, y, S) <= alpha for i in range(K)
+                                cg_list[i].ci_test(x, y, S_with_context) <= alpha
+                                for i in range(K)
                             ]
                             count = np.sum(p_list)
                             if count >= ratio * K:  # ratio
@@ -557,12 +596,14 @@ def skeleton_discovery_with_surrogate(
                             else:
                                 p = 1
 
-                            p_cen = cg.ci_test(x, y, S)
+                            p_cen = cg.ci_test(x, y, S_with_context)
                             if (p_cen > alpha and p == 0) or (
                                 p_cen <= alpha and p == 1
                             ):
                                 p_fed = [
-                                    np.round(cg_list[i].ci_test(x, y, S), 4)
+                                    np.round(
+                                        cg_list[i].ci_test(x, y, S_with_context), 4
+                                    )
                                     for i in range(K)
                                 ]
                                 print(
@@ -630,6 +671,7 @@ def skeleton_discovery_with_surrogate_GMM(
     show_progress: bool = True,
     node_names: List[str] | None = None,
     depth_limit: int | None = None,
+    c_indx_id: int | None = None,
 ) -> CausalGraph:
     """
     Perform skeleton discovery
@@ -738,35 +780,51 @@ def skeleton_discovery_with_surrogate_GMM(
                 Neigh_x_noy = np.delete(Neigh_x, np.where(Neigh_x == y))
                 # print(f"Neighbor test: Neigh_x_noy={Neigh_x_noy}.")
                 for S in combinations(Neigh_x_noy, depth):
+                    # FIX: Include augmented variable in conditioning set if provided
+                    if c_indx_id is not None:
+                        S_with_context = tuple(S) + (c_indx_id,)
+                    else:
+                        S_with_context = S
+
                     if flag == 0:
                         # print("KCI test. for CI test: ", x,y,S)
-                        p = cg.ci_test(x, y, S)
+                        p = cg.ci_test(x, y, S_with_context)
 
                     if flag == -1:
-                        p = cg.ci_test(x, y, S, gmm=3)
+                        p = cg.ci_test(x, y, S_with_context, gmm=3)
 
                     # Gaussian Mixture Model
                     if flag == 4:
                         if len(S) == 0:
-                            print("GMM - Unconditional test: ", x, y, S)
+                            print("GMM - Unconditional test: ", x, y, S_with_context)
                         else:
-                            print("GMM - Conditional test: ", x, y, S)
-                        p = cg.ci_test(x, y, S, gmm=1, K=K)
-                        # print(f"The groundtruth pvalue for CIT is: {cg.ci_test(x, y, S)}.")
+                            print("GMM - Conditional test: ", x, y, S_with_context)
+                        p = cg.ci_test(x, y, S_with_context, gmm=1, K=K)
+                        # print(f"The groundtruth pvalue for CIT is: {cg.ci_test(x, y, S_with_context)}.")
 
                     # Linear Gaussian Model
                     if flag == 3:
                         if len(S) == 0:
-                            print("Linear Gaussian - Unconditional test: ", x, y, S)
+                            print(
+                                "Linear Gaussian - Unconditional test: ",
+                                x,
+                                y,
+                                S_with_context,
+                            )
                         else:
-                            print("Linear Gaussian - Conditional test: ", x, y, S)
-                        p = cg.ci_test(x, y, S, gmm=2, K=K)
+                            print(
+                                "Linear Gaussian - Conditional test: ",
+                                x,
+                                y,
+                                S_with_context,
+                            )
+                        p = cg.ci_test(x, y, S_with_context, gmm=2, K=K)
 
                     # print all the fed p-values.
                     if flag == 1:
-                        f.write(f"{x},{y},{S},{p},{p>alpha}")
+                        f.write(f"{x},{y},{S_with_context},{p},{p>alpha}")
                         for i in range(K):
-                            p_ = cg_list[i].ci_test(x, y, S)
+                            p_ = cg_list[i].ci_test(x, y, S_with_context)
                             f.write(f",{p_}")
                         f.write("\n")
 
@@ -777,15 +835,21 @@ def skeleton_discovery_with_surrogate_GMM(
                         ratio = 0.1
                         # print("Linear Gaussian. Using Voting method")
                         if style == 1:
-                            p_list = [cg_list[i].ci_test(x, y, S) for i in range(K)]
+                            p_list = [
+                                cg_list[i].ci_test(x, y, S_with_context)
+                                for i in range(K)
+                            ]
                             p = max(p_list)
                         elif style == 2:
-                            p_list = [cg_list[i].ci_test(x, y, S) for i in range(K)]
+                            p_list = [
+                                cg_list[i].ci_test(x, y, S_with_context)
+                                for i in range(K)
+                            ]
                             p = sum(p_list) / len(p_list)
                         elif style == 3:
                             count = 0
                             for i in range(K):
-                                p_ = cg_list[i].ci_test(x, y, S)
+                                p_ = cg_list[i].ci_test(x, y, S_with_context)
                                 if p_ <= alpha:
                                     count += 1
                             if count >= ratio * K:  # ratio
@@ -794,7 +858,10 @@ def skeleton_discovery_with_surrogate_GMM(
                                 p = 1
                         elif style == 4:
                             count = np.sum(
-                                [cg_list[i].ci_test(x, y, S) <= alpha for i in range(K)]
+                                [
+                                    cg_list[i].ci_test(x, y, S_with_context) <= alpha
+                                    for i in range(K)
+                                ]
                             )
                             p = count < ratio * K
 
